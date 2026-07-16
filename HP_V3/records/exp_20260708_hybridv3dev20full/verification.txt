@@ -1,0 +1,20 @@
+schema=hybridpatch.verification/1
+experiment_id=exp_20260708_hybridv3dev20full
+status=fail
+evidence_basis=archived_log
+verified_at=
+verifier_command=python -B src/verify_anchorpatch.py --dir <experiment-root>/exp_20260708_hybridv3dev20full
+verifier_exit_code=1
+verified_rows_total=400
+canonical_rows_expected=400
+canonical_rows_covered=400
+mismatched_rows=1
+accepted_known_exception=True
+structural_validation_status=
+derivation_validation_status=
+archive_inclusive_verified_rows=
+source_ref=HP_V3/VERSION.md
+source_ref_sha256=e84aeb733f2d9779955b9e95efe2f3c6f1353fd4dae26a43509f5722fcf6bf12
+source_log_ref=_attic/logs_root/v7regress_verify_20260708_hybridv3dev20full.log
+source_log_sha256=ab10841ba01bdf75a6e76e2a7a47f3e1731917c562dba66743e0ba316b88997b
+notes=hybridpatch/quantum4 RT9 stored=0.9850, recomputed=1.0000; documented evaluator environment sensitivity.

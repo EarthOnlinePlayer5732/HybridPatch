@@ -1,0 +1,106 @@
+{
+  "canonical_scope_id": "frozen233",
+  "comparisons": [],
+  "experiment_id": "exp_20260710_frbaseline234",
+  "methods": {
+    "fullrewrite": {
+      "backward_rows": 2330,
+      "commit_outcomes": {
+        "not_applicable": 4617,
+        "unchanged": 43
+      },
+      "committed_rows": 4660,
+      "critical_failures": {
+        "count": 167,
+        "theta": 0.1,
+        "transitions": 2097
+      },
+      "execution_status": {
+        "degraded": 167,
+        "failure": 194,
+        "success": 4299
+      },
+      "failure_labels": {
+        "content_regression": 230,
+        "empty_response": 63,
+        "evaluator_error": 15,
+        "near_empty_response": 53
+      },
+      "latency_ms": {
+        "count": 4660,
+        "max": 2179313,
+        "mean": 118227.121,
+        "median": 61664.0
+      },
+      "mean_backward_rs": 0.6852280824120633,
+      "preservation_violations": {
+        "max": null,
+        "recorded_rows": 0,
+        "total": 0,
+        "unknown_rows": 4660
+      },
+      "routes": {
+        "fullrewrite": 4660
+      },
+      "rs_at_k": {
+        "1": 0.9254426941775752,
+        "10": 0.5582064222029176,
+        "5": 0.6815311186321047
+      },
+      "tokens": {
+        "input": 17359719,
+        "input_plus_output": 85874973,
+        "output": 68515254,
+        "semantic_call_total": 85874973,
+        "total": 85874973
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": null,
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 2330,
+    "canonical_committed_rows": 4660,
+    "canonical_samples": 233,
+    "committed_rows": 4668,
+    "excluded_samples": [
+      {
+        "reason": "Evaluator packaging failure; four committed RTs are retained but excluded from the 233-sample baseline.",
+        "sample_id": "python1"
+      }
+    ],
+    "planned_rows": 4680,
+    "planned_samples": 234
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "Baseline/exp_20260710_frbaseline234",
+    "Baseline/FR冻结计划.md",
+    "docs/FINDINGS.md",
+    "Baseline/exp_20260710_frbaseline234/analysis/comparison.md"
+  ],
+  "verification": {
+    "archive_inclusive_replayed_backward_rows": 2334,
+    "archive_inclusive_source": "docs/restructure_final_report.md",
+    "canonical_backward_rows": 2330,
+    "exceptions": [
+      "The linked verifier log covers the 2330 canonical rows; a separate archive-inclusive replay reports 2334 rows including four retained python1 rows outside the canonical baseline."
+    ],
+    "excluded_replayed_backward_rows": 4,
+    "log": "Baseline/exp_20260710_frbaseline234/verify_fr233.stdout.log",
+    "replayed_backward_rows": 2330,
+    "source": "Baseline/FR冻结计划.md",
+    "status": "pass"
+  }
+}

@@ -1,0 +1,328 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260713_frbaseline_v2_rerun
+record_kind: run
+owner: Baseline
+title: Official non-stream rerun source for FR+Official; only complete chains are eligible.
+purpose: Official non-stream rerun source for FR+Official; only complete chains are eligible.
+lifecycle_status: incomplete
+evidence_role: supporting
+claim_eligibility: none
+source:
+  experiment_root_ref: Baseline/exp_20260713_frbaseline_v2_rerun
+  run_metadata_schema: anchorpatch.run_metadata/2
+  raw_artifact_id: exp_20260713_frbaseline_v2_rerun-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 1
+  fingerprints:
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: 32d5746e07eb
+    hybrid_schema.py: 93e8b9c78f12
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: 79ef3e766a00
+    hybrid_gate.py: 06299fbd4822
+    model_openai.py: 0839fc1ed6ea
+    run_meta.py: e0d7d7861cfb
+    requirements.txt: 38ffe361be94
+  version_reference: transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md
+execution:
+  working_directory_ref: null
+  command_templates:
+  - python .\src\experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --seed
+    42 --skip_distractor --model minimax-m3 --max_tokens 131072 --out_dir ..\Baseline\exp_20260713_frbaseline_v2_rerun
+    --notes FR baseline v2 contaminated rerun, one-shot official nonstream, worker A
+  - python .\src\experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --seed
+    42 --skip_distractor --model minimax-m3 --max_tokens 131072 --out_dir ..\Baseline\exp_20260713_frbaseline_v2_rerun
+    --notes FR baseline v2 contaminated rerun, one-shot official nonstream, worker B
+  - python .\src\experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --seed
+    42 --skip_distractor --model minimax-m3 --max_tokens 131072 --out_dir ..\Baseline\exp_20260713_frbaseline_v2_rerun
+    --notes FR baseline v2 contaminated rerun, one-shot official nonstream, worker C
+  methods:
+  - fullrewrite
+  arms:
+    fullrewrite: live_official_nonstream
+  seed: 42
+  round_trips: 10
+  distractor: false
+  comparison_policy: source-only; no standalone method headline
+model:
+  name: minimax-m3
+  provider: minimax_official
+  base_url: https://api.minimaxi.com/v1
+  request_url: https://api.minimaxi.com/v1/chat/completions
+  transport: openai_sdk_nonstream
+  transport_revision: minimax_official_nonstream/1
+  thinking_mode: adaptive
+  max_tokens: 131072
+  temperature: null
+protocol:
+  declared_campaign_revision: null
+  observed_valid_envelope_revisions: []
+  prompt_revision: null
+  prompt_fingerprint: 81668ab72e5d
+  executor_fingerprint: 79ef3e766a00
+  runner_fingerprint: 32d5746e07eb
+data:
+  dataset: DELEGATE-52
+  split: 85 preselected historically anomalous baseline samples
+  planned_sample_ids:
+  - calendar5
+  - chess6
+  - dbschema5
+  - dns3
+  - docker5
+  - docker6
+  - earncall1
+  - earncall2
+  - edifact1
+  - emails5
+  - filesystem1
+  - filesystem5
+  - filesystem6
+  - fonteng2
+  - fonteng4
+  - foodmenu2
+  - foodmenu4
+  - foodmenu5
+  - foodmenu6
+  - geodata1
+  - geodata4
+  - geotrack5
+  - geotrack6
+  - graphviz1
+  - graphviz3
+  - graphviz5
+  - graphviz6
+  - hamradio2
+  - infra2
+  - infra6
+  - jobboard2
+  - jobboard3
+  - json3
+  - json4
+  - landmarks3
+  - latex1
+  - latex4
+  - latex6
+  - makefile3
+  - makefile6
+  - malware6
+  - mathlean3
+  - mathlean6
+  - molecule5
+  - musicsheet1
+  - musicsheet3
+  - musicsheet4
+  - musicsheet5
+  - musicsheet6
+  - obj3d1
+  - obj3d3
+  - obj3d5
+  - protein1
+  - protein2
+  - protein4
+  - protein6
+  - python4
+  - python7
+  - quantum1
+  - quantum2
+  - quantum4
+  - recipe1
+  - satellite1
+  - satellite2
+  - satellite3
+  - satellite4
+  - satellite5
+  - screenplay1
+  - screenplay2
+  - screenplay5
+  - screenplay6
+  - slides1
+  - starcatalog4
+  - starcatalog6
+  - subtitles3
+  - subtitles4
+  - transit2
+  - translation2
+  - translation4
+  - translation5
+  - translation6
+  - treebank3
+  - treebank4
+  - weather1
+  - weather6
+  canonical_sample_ids:
+  - calendar5
+  - chess6
+  - dbschema5
+  - dns3
+  - docker5
+  - docker6
+  - earncall1
+  - earncall2
+  - edifact1
+  - emails5
+  - filesystem1
+  - filesystem5
+  - filesystem6
+  - fonteng2
+  - fonteng4
+  - foodmenu2
+  - foodmenu4
+  - foodmenu5
+  - foodmenu6
+  - geodata1
+  - geodata4
+  - geotrack5
+  - geotrack6
+  - graphviz1
+  - graphviz3
+  - graphviz5
+  - graphviz6
+  - hamradio2
+  - infra2
+  - infra6
+  - jobboard2
+  - jobboard3
+  - json3
+  - json4
+  - landmarks3
+  - latex1
+  - latex4
+  - latex6
+  - makefile3
+  - makefile6
+  - malware6
+  - mathlean3
+  - mathlean6
+  - molecule5
+  - musicsheet1
+  - musicsheet4
+  - musicsheet5
+  - musicsheet6
+  - obj3d1
+  - obj3d3
+  - obj3d5
+  - protein1
+  - protein2
+  - protein4
+  - protein6
+  - python4
+  - python7
+  - quantum1
+  - quantum2
+  - quantum4
+  - recipe1
+  - satellite1
+  - satellite2
+  - satellite3
+  - satellite4
+  - satellite5
+  - screenplay1
+  - screenplay2
+  - screenplay5
+  - screenplay6
+  - slides1
+  - starcatalog4
+  - starcatalog6
+  - subtitles3
+  - subtitles4
+  - translation2
+  - translation4
+  - translation5
+  - translation6
+  - treebank3
+  - treebank4
+  - weather1
+  - weather6
+  excluded_samples:
+  - sample_id: musicsheet3
+    reason: Incomplete or missing result trajectory; source-only canonical scope requires a complete chain.
+  - sample_id: transit2
+    reason: Incomplete or missing result trajectory; source-only canonical scope requires a complete chain.
+  task_plan_source: task plans stored in the source archive and checked against the frozen baseline
+time:
+  started_at_local: '2026-07-13T02:34:56'
+  last_dispatch_started_at_local: '2026-07-13T23:02:24'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: complete83_source_chains
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: null
+  source_report_sha256: null
+  source_report_embedded: false
+  source_report_embedding_policy: none
+  selection_reason: source-only; no standalone method headline
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: Baseline/FR+Official/README.md
+  role: source_usage_report
+  sha256: a18403b4c0d1e7f00310c2731b60a2ad11b899f9d40d4dc7221591607554bd86
+  size_bytes: 3693
+- path: Baseline/FR+Official/source_manifest.csv
+  role: selected_source_manifest
+  sha256: 31b5cf26661c73191e5668ca4e82e43711b111f69c148aedbeb1089e352adc3d
+  size_bytes: 56872
+- path: Baseline/exp_20260713_frbaseline_v2_rerun/RESUME.md
+  role: frozen_status_note
+  sha256: d331c267b2cb3feba847e44fd49b6e55b50c227ae7dadcb7d7417f378c678786
+  size_bytes: 1731
+noncanonical_reports:
+- source_report_ref: Baseline/FR+Official/README.md
+  role: source_usage_report
+  sha256: a18403b4c0d1e7f00310c2731b60a2ad11b899f9d40d4dc7221591607554bd86
+  size_bytes: 3693
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+- source_report_ref: Baseline/FR+Official/source_manifest.csv
+  role: selected_source_manifest
+  sha256: 31b5cf26661c73191e5668ca4e82e43711b111f69c148aedbeb1089e352adc3d
+  size_bytes: 56872
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+- source_report_ref: Baseline/exp_20260713_frbaseline_v2_rerun/RESUME.md
+  role: frozen_status_note
+  sha256: d331c267b2cb3feba847e44fd49b6e55b50c227ae7dadcb7d7417f378c678786
+  size_bytes: 1731
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: not_run
+  structural_validation_status: pass
+  replayed_backward_rows: null
+  canonical_backward_rows: 830
+  source: Baseline/build_fr_plus_official.py
+  log: null
+  exceptions:
+  - No completed independent result replay is recorded for this rerun source.
+  - transit2 is partial and musicsheet3 has no result file; neither is selected into FR+Official.
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+known_exceptions:
+- The sample pool was selected post-hoc for historical anomalies and cannot estimate official API background
+  anomaly rates.
+- 'The rerun is frozen incomplete: transit2 has 3RT and musicsheet3 has no result file.'
+raw_manifest_ref: raw_manifest.json

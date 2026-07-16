@@ -1,0 +1,153 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260709_hybridv4smoke
+record_kind: run
+owner: HP_V4
+title: Seven-sample mechanism smoke for bulk file-level matching and routing pressure.
+purpose: Seven-sample mechanism smoke for bulk file-level matching and routing pressure.
+lifecycle_status: complete
+evidence_role: diagnostic
+claim_eligibility: diagnostic_only
+source:
+  experiment_root_ref: HP_V4/exp_20260709_hybridv4smoke
+  run_metadata_schema: anchorpatch.run_metadata/1
+  raw_artifact_id: exp_20260709_hybridv4smoke-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 1
+  fingerprints:
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: 291ec60aa8df
+    hybrid_schema.py: 1f7e9ba68bb6
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 7ff76aec06b0
+    hybrid_executor.py: d9297cccfadf
+    hybrid_gate.py: 3c992dd20f1f
+  version_reference: HP_V4/VERSION.md
+execution:
+  working_directory_ref: HP_V4
+  command_templates:
+  - 'python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260709_hybridv4smoke --notes hybridpatch/4 targeted
+    smoke: D1(docker6/fonteng3) D2(mathlean2) D3(latex2) regression(malware6) P1-watch(geotrack3/foodmenu6)'
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260709_hybridv4smoke --notes resume after 429 quota
+    stop
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260709_hybridv4smoke --notes resume after weekly
+    quota reset
+  methods:
+  - hybridpatch
+  arms:
+    hybridpatch: live
+  seed: 42
+  round_trips: 10
+  distractor: false
+  comparison_policy: single-arm longitudinal diagnostic; not a live paired method claim
+model:
+  name: minimax-m3
+  provider: null
+  base_url: null
+  request_url: null
+  transport: null
+  transport_revision: null
+  thinking_mode: null
+  max_tokens: null
+  temperature: null
+protocol:
+  declared_campaign_revision: hybridpatch/4
+  observed_valid_envelope_revisions:
+  - hybridpatch/4
+  prompt_revision: null
+  prompt_fingerprint: 7ff76aec06b0
+  executor_fingerprint: d9297cccfadf
+  runner_fingerprint: 291ec60aa8df
+data:
+  dataset: DELEGATE-52
+  split: targeted seven-sample dev smoke
+  planned_sample_ids:
+  - docker6
+  - fonteng3
+  - foodmenu6
+  - geotrack3
+  - latex2
+  - malware6
+  - mathlean2
+  canonical_sample_ids:
+  - docker6
+  - fonteng3
+  - foodmenu6
+  - geotrack3
+  - latex2
+  - malware6
+  - mathlean2
+  excluded_samples: []
+  task_plan_source: task plans stored in the experiment archive
+time:
+  started_at_local: '2026-07-09T08:08:59'
+  last_dispatch_started_at_local: '2026-07-09T11:38:27'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: smoke7_complete
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: HP_V4/exp_20260709_hybridv4smoke/analysis/comparison.md
+  source_report_sha256: 59d7d3479f54e05387064b6f531cfa2e6206144b0b3e56cdca06a3f1be8543e3
+  source_report_embedded: true
+  source_report_embedding_policy: sanitized_snapshot_v1
+  selection_reason: single-arm longitudinal diagnostic; not a live paired method claim
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: HP_V4/exp_20260709_hybridv4smoke/analysis/comparison.md
+  role: source_analysis
+  sha256: 59d7d3479f54e05387064b6f531cfa2e6206144b0b3e56cdca06a3f1be8543e3
+  size_bytes: 3631
+- path: docs/FINDINGS.md
+  role: failure_attribution
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+noncanonical_reports:
+- source_report_ref: docs/FINDINGS.md
+  role: failure_attribution
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: pass
+  replayed_backward_rows: 70
+  canonical_backward_rows: 70
+  source: HP_V4/VERSION.md
+  log: _attic/logs_root/v6regress_verify_v4smoke.log
+  exceptions: []
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+- field: model.transport_revision
+  reason: Legacy run metadata did not record a transport revision.
+  impact: Transport semantics must be interpreted from versioned project documentation.
+known_exceptions:
+- The run was interrupted by quota limits and later completed from checkpoints.
+- This targeted set is patch-friendly and is not an untargeted validation set.
+raw_manifest_ref: raw_manifest.json

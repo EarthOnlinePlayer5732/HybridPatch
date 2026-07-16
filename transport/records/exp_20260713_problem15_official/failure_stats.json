@@ -1,0 +1,70 @@
+{
+  "affected_sample_methods": 30,
+  "by_label": {
+    "content_regression": {
+      "canonical_row_count": 27,
+      "row_count": 27,
+      "sample_method_count": 9
+    },
+    "empty_response": {
+      "canonical_row_count": 27,
+      "row_count": 27,
+      "sample_method_count": 13
+    },
+    "evaluator_error": {
+      "canonical_row_count": 4,
+      "row_count": 4,
+      "sample_method_count": 2
+    },
+    "infrastructure_incomplete": {
+      "canonical_row_count": 0,
+      "row_count": 382,
+      "sample_method_count": 21
+    },
+    "near_empty_response": {
+      "canonical_row_count": 20,
+      "row_count": 20,
+      "sample_method_count": 6
+    },
+    "text_truncated": {
+      "canonical_row_count": 16,
+      "row_count": 16,
+      "sample_method_count": 6
+    }
+  },
+  "by_method": {
+    "fullrewrite": {
+      "content_regression": 27,
+      "empty_response": 21,
+      "evaluator_error": 4,
+      "infrastructure_incomplete": 100,
+      "near_empty_response": 20,
+      "text_truncated": 16
+    },
+    "hybridpatch": {
+      "empty_response": 6,
+      "infrastructure_incomplete": 282
+    }
+  },
+  "by_stage": {
+    "evaluator": 4,
+    "infrastructure": 382,
+    "model": 63,
+    "quality": 27
+  },
+  "canonical_exclusions": {
+    "infrastructure_incomplete": 382
+  },
+  "committed_rows": 218,
+  "critical_failures": {
+    "by_method": {
+      "fullrewrite": 12
+    },
+    "count": 12
+  },
+  "experiment_id": "exp_20260713_problem15_official",
+  "non_none_failure_rows": 476,
+  "primary_label_policy": "deterministic_root_cause_v1",
+  "schema": "hybridpatch.failure_stats/1",
+  "total_planned_rows": 600
+}

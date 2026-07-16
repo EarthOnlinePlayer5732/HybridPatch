@@ -1,0 +1,163 @@
+{
+  "canonical_scope_id": "dev20_complete_pairs",
+  "comparisons": [
+    {
+      "cohen_d": 0.5400970611039057,
+      "delta_a_minus_b": 0.19459017885941735,
+      "headline": true,
+      "mean_a": 0.9207259027882031,
+      "mean_b": 0.7261357239287857,
+      "method_a": "hybridpatch",
+      "method_b": "fullrewrite",
+      "p": 9.065557983893795e-13,
+      "paired_backward_rows": 200,
+      "scope_id": "dev20_complete_pairs",
+      "t": 7.638125888109937
+    }
+  ],
+  "experiment_id": "exp_20260710_hybridv6dev20full",
+  "methods": {
+    "fullrewrite": {
+      "backward_rows": 200,
+      "commit_outcomes": {
+        "not_applicable": 397,
+        "unchanged": 3
+      },
+      "committed_rows": 400,
+      "critical_failures": {
+        "count": 13,
+        "theta": 0.1,
+        "transitions": 180
+      },
+      "execution_status": {
+        "degraded": 14,
+        "failure": 11,
+        "success": 375
+      },
+      "failure_labels": {
+        "content_regression": 12,
+        "empty_response": 7,
+        "near_empty_response": 6
+      },
+      "latency_ms": {
+        "count": 400,
+        "max": 1481738,
+        "mean": 112084.217,
+        "median": 52322.5
+      },
+      "mean_backward_rs": 0.7261357239287857,
+      "preservation_violations": {
+        "max": null,
+        "recorded_rows": 0,
+        "total": 0,
+        "unknown_rows": 400
+      },
+      "routes": {
+        "fullrewrite": 400
+      },
+      "rs_at_k": {
+        "1": 0.959207405279048,
+        "10": 0.6317751788011442,
+        "5": 0.7843232762153132
+      },
+      "tokens": {
+        "input": 1448869,
+        "input_plus_output": 7084848,
+        "output": 5635979,
+        "semantic_call_total": 7084848,
+        "total": 7084848
+      }
+    },
+    "hybridpatch": {
+      "backward_rows": 200,
+      "commit_outcomes": {
+        "applied": 388,
+        "kept_context": 9,
+        "unchanged": 3
+      },
+      "committed_rows": 400,
+      "critical_failures": {
+        "count": 8,
+        "theta": 0.1,
+        "transitions": 180
+      },
+      "execution_status": {
+        "degraded": 19,
+        "success": 381
+      },
+      "failure_labels": {
+        "content_regression": 6,
+        "format_regression": 2,
+        "text_truncated": 1,
+        "unknown_failure": 3,
+        "validation_gate": 7
+      },
+      "latency_ms": {
+        "count": 400,
+        "max": 1481322,
+        "mean": 189665.42,
+        "median": 132362.5
+      },
+      "mean_backward_rs": 0.9207259027882031,
+      "preservation_violations": {
+        "max": 0,
+        "recorded_rows": 400,
+        "total": 0,
+        "unknown_rows": 0
+      },
+      "routes": {
+        "bounded_rewrite": 232,
+        "bulk_patch": 48,
+        "local_patch": 120
+      },
+      "rs_at_k": {
+        "1": 0.99138967190885,
+        "10": 0.9181872595055146,
+        "5": 0.9057810735984393
+      },
+      "tokens": {
+        "input": 4279023,
+        "input_plus_output": 15159773,
+        "output": 10880750,
+        "semantic_call_total": 15159773,
+        "total": 15159773
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": null,
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 400,
+    "canonical_committed_rows": 800,
+    "canonical_samples": 20,
+    "committed_rows": 800,
+    "excluded_samples": [],
+    "planned_rows": 800,
+    "planned_samples": 20
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "HP_V6/exp_20260710_hybridv6dev20full",
+    "HP_V6/exp_20260710_hybridv6dev20full/analysis/comparison.md",
+    "docs/FINDINGS.md"
+  ],
+  "verification": {
+    "canonical_backward_rows": 400,
+    "exceptions": [],
+    "log": "_attic/logs_root/v7regress_verify_20260710_hybridv6dev20full.log",
+    "replayed_backward_rows": 400,
+    "source": "HP_V6/VERSION.md",
+    "status": "pass"
+  }
+}

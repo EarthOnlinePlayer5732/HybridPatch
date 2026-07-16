@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "codify_parties_state",
+    "sort_by_line_total_state",
+    "classify_products_state",
+    "add_gross_amounts_state",
+    "split_by_invoice_state",
+    "normalize_gtin14_state",
+    "codify_parties_state",
+    "split_by_invoice_state",
+    "classify_products_state",
+    "add_gross_amounts_state"
+  ]
+}

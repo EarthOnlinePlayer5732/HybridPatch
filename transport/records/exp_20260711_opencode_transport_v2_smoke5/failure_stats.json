@@ -1,0 +1,48 @@
+{
+  "affected_sample_methods": 4,
+  "by_label": {
+    "content_regression": {
+      "canonical_row_count": 3,
+      "row_count": 3,
+      "sample_method_count": 3
+    },
+    "text_truncated": {
+      "canonical_row_count": 1,
+      "row_count": 1,
+      "sample_method_count": 1
+    },
+    "thinking_budget_exhausted": {
+      "canonical_row_count": 1,
+      "row_count": 1,
+      "sample_method_count": 1
+    }
+  },
+  "by_method": {
+    "fullrewrite": {
+      "content_regression": 2,
+      "thinking_budget_exhausted": 1
+    },
+    "hybridpatch": {
+      "content_regression": 1,
+      "text_truncated": 1
+    }
+  },
+  "by_stage": {
+    "model": 2,
+    "quality": 3
+  },
+  "canonical_exclusions": {},
+  "committed_rows": 40,
+  "critical_failures": {
+    "by_method": {
+      "fullrewrite": 1,
+      "hybridpatch": 1
+    },
+    "count": 2
+  },
+  "experiment_id": "exp_20260711_opencode_transport_v2_smoke5",
+  "non_none_failure_rows": 5,
+  "primary_label_policy": "deterministic_root_cause_v1",
+  "schema": "hybridpatch.failure_stats/1",
+  "total_planned_rows": 40
+}

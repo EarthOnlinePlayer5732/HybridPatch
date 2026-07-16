@@ -1,0 +1,31 @@
+{
+  "affected_sample_methods": 3,
+  "by_label": {
+    "content_regression": {
+      "canonical_row_count": 3,
+      "row_count": 3,
+      "sample_method_count": 3
+    }
+  },
+  "by_method": {
+    "hybridpatch": {
+      "content_regression": 3
+    }
+  },
+  "by_stage": {
+    "quality": 3
+  },
+  "canonical_exclusions": {},
+  "committed_rows": 140,
+  "critical_failures": {
+    "by_method": {
+      "hybridpatch": 3
+    },
+    "count": 3
+  },
+  "experiment_id": "exp_20260709_hybridv4smoke",
+  "non_none_failure_rows": 3,
+  "primary_label_policy": "deterministic_root_cause_v1",
+  "schema": "hybridpatch.failure_stats/1",
+  "total_planned_rows": 140
+}

@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "split_state",
+    "bib_by_topic_state",
+    "cpx_conditional_blocks_state",
+    "nomenclature_state",
+    "cpx_variable_crossref_state",
+    "comparison_table_state",
+    "appendix_state",
+    "blog_state",
+    "restructured_state",
+    "cpx_conditional_blocks_state"
+  ]
+}

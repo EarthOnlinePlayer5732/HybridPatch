@@ -1,0 +1,201 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260710_hybridv6dev20full
+record_kind: run
+owner: HP_V6
+title: Formal HybridPatch/6 dev20 evaluation paired with the copied frozen FullRewrite baseline.
+purpose: Formal HybridPatch/6 dev20 evaluation paired with the copied frozen FullRewrite baseline.
+lifecycle_status: complete
+evidence_role: primary
+claim_eligibility: canonical
+source:
+  experiment_root_ref: HP_V6/exp_20260710_hybridv6dev20full
+  run_metadata_schema: anchorpatch.run_metadata/1
+  raw_artifact_id: exp_20260710_hybridv6dev20full-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 1
+  fingerprints:
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: 291ec60aa8df
+    hybrid_schema.py: edbd2517894a
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: a4ea477217b0
+    hybrid_gate.py: 3143bd4b3d0a
+  version_reference: HP_V6/VERSION.md
+execution:
+  working_directory_ref: HP_V6
+  command_templates:
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes HP resume after
+    5h quota reset
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes HP tail resume
+    after quota reset
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes HP tail resume
+    probe
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes hybridpatch/6 HP
+    tail resume after API key swap
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes hybridpatch/6 HP
+    translation4 final resume RT7-10
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes hybridpatch/6 full
+    dev20 paired campaign, HP batch1
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes hybridpatch/6 full
+    dev20 paired campaign, HP batch2
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes hybridpatch/6 full
+    dev20 paired campaign, HP batch2a
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes hybridpatch/6 full
+    dev20 paired campaign, HP batch2b
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_hybridv6dev20full --notes manual quota probe
+  methods:
+  - hybridpatch
+  - fullrewrite
+  arms:
+    hybridpatch: live
+    fullrewrite: copied_frozen_baseline
+  seed: 42
+  round_trips: 10
+  distractor: false
+  comparison_policy: HybridPatch live arm paired with immutable FullRewrite baseline rows
+model:
+  name: minimax-m3
+  provider: null
+  base_url: null
+  request_url: null
+  transport: null
+  transport_revision: null
+  thinking_mode: null
+  max_tokens: null
+  temperature: null
+protocol:
+  declared_campaign_revision: hybridpatch/6
+  observed_valid_envelope_revisions:
+  - hybridpatch/6
+  prompt_revision: null
+  prompt_fingerprint: 81668ab72e5d
+  executor_fingerprint: a4ea477217b0
+  runner_fingerprint: 291ec60aa8df
+data:
+  dataset: DELEGATE-52
+  split: frozen dev20
+  planned_sample_ids:
+  - circuit2
+  - docker6
+  - edifact6
+  - fonteng3
+  - foodmenu6
+  - geotrack3
+  - landmarks1
+  - latex2
+  - makefile4
+  - malware6
+  - mathlean2
+  - molecule2
+  - musicsheet2
+  - protein1
+  - python7
+  - quantum4
+  - satellite6
+  - screenplay6
+  - starcatalog4
+  - translation4
+  canonical_sample_ids:
+  - circuit2
+  - docker6
+  - edifact6
+  - fonteng3
+  - foodmenu6
+  - geotrack3
+  - landmarks1
+  - latex2
+  - makefile4
+  - malware6
+  - mathlean2
+  - molecule2
+  - musicsheet2
+  - protein1
+  - python7
+  - quantum4
+  - satellite6
+  - screenplay6
+  - starcatalog4
+  - translation4
+  excluded_samples: []
+  task_plan_source: task plans stored in the experiment archive and frozen baseline
+time:
+  started_at_local: '2026-07-10T00:27:31'
+  last_dispatch_started_at_local: '2026-07-10T05:57:27'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: dev20_complete_pairs
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: HP_V6/exp_20260710_hybridv6dev20full/analysis/comparison.md
+  source_report_sha256: b0a520d291e251bd5b188fcad75b938774860b7e7a01b1a89379974d077b20fb
+  source_report_embedded: true
+  source_report_embedding_policy: sanitized_snapshot_v1
+  selection_reason: HybridPatch live arm paired with immutable FullRewrite baseline rows
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: HP_V6/exp_20260710_hybridv6dev20full/analysis/comparison.md
+  role: source_analysis
+  sha256: b0a520d291e251bd5b188fcad75b938774860b7e7a01b1a89379974d077b20fb
+  size_bytes: 5340
+- path: docs/FINDINGS.md
+  role: mechanism_and_repair_audit
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+noncanonical_reports:
+- source_report_ref: docs/FINDINGS.md
+  role: mechanism_and_repair_audit
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: pass
+  replayed_backward_rows: 400
+  canonical_backward_rows: 400
+  source: HP_V6/VERSION.md
+  log: _attic/logs_root/v7regress_verify_20260710_hybridv6dev20full.log
+  exceptions: []
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+- field: model.transport_revision
+  reason: Legacy run metadata did not record a transport revision.
+  impact: Transport semantics must be interpreted from versioned project documentation.
+known_exceptions:
+- Only the HybridPatch arm was live in this directory; FullRewrite rows were copied byte-for-byte from
+  the frozen baseline.
+raw_manifest_ref: raw_manifest.json

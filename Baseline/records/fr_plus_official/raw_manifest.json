@@ -1,0 +1,42 @@
+{
+  "artifacts": [
+    {
+      "archive_status": "not_compressed",
+      "artifact_id": "fr_plus_official-raw-v1",
+      "artifact_kind": "logical_manifest_view",
+      "compression": null,
+      "content_flags": {
+        "contains_full_prompts": false,
+        "contains_model_outputs": false,
+        "contains_source_documents": false,
+        "contains_transport_details": false
+      },
+      "credential_scan": {
+        "scanned_at": null,
+        "scanner_version": null,
+        "status": "not_applicable"
+      },
+      "file_count": 7,
+      "retention": "logical_manifest",
+      "sanitization": {
+        "sanitizer_version": null,
+        "status": "curated_manifest"
+      },
+      "shareability": "repository_safe",
+      "size_bytes": 140845,
+      "skipped_sensitive_files": [],
+      "skipped_symlinks": [],
+      "source_experiments": [
+        "Baseline/exp_20260710_frbaseline234",
+        "Baseline/exp_20260713_frbaseline_v2_rerun",
+        "transport/exp_20260713_problem15_official"
+      ],
+      "storage": "repository_worktree_derived_view",
+      "storage_key": "Baseline/FR+Official",
+      "tree_hash_algorithm": "sha256-tree-v1",
+      "tree_sha256": "9bb77674c6a7ac989239ffbba0781931eb4bab87f4b1cf32b3442a1d89db8db0"
+    }
+  ],
+  "experiment_id": "fr_plus_official",
+  "schema": "hybridpatch.raw_manifest/1"
+}

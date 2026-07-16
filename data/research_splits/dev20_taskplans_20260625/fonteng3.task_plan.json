@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "lookups_renamed_state",
+    "psts_split_by_vowel_state",
+    "anchors_sorted_with_stats_state",
+    "gdef_decomposed_state",
+    "sorted_rules_with_counts_state",
+    "split_gsub_gpos_state",
+    "lookups_renamed_state",
+    "sorted_rules_with_counts_state",
+    "anchors_sorted_with_stats_state",
+    "gdef_decomposed_state"
+  ]
+}

@@ -1,0 +1,48 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.pyc
+*.pyo
+
+*.pid
+*.stdout.log
+*.stderr.log
+*.log
+
+logs/
+runs/
+results/
+_tmp_rawlog/
+api_raw/
+exp_*/
+
+# Compact audit overlays are Git-tracked; raw exp_* directories remain ignored.
+!**/records/
+!**/records/*/
+**/records/*/*
+!**/records/*/experiment.yaml
+!**/records/*/report.md
+!**/records/*/summary.json
+!**/records/*/samples.csv
+!**/records/*/casebook.jsonl
+!**/records/*/failure_stats.json
+!**/records/*/representative_failures.jsonl
+!**/records/*/verification.txt
+!**/records/*/raw_manifest.json
+
+data/samples_delegate52/
+
+_snap_val40/
+
+# HP_Vx uses local Windows junctions to the shared read-only dataset.
+HP_V*/data/
+
+# Original ignored V6 disk snapshot retained only as local provenance.
+HP_V6/_snapshot_provenance/
+
+# Ignored/ephemeral inputs retained in the attic without re-adding their bytes.
+_attic/reconstruction_attempts/
+_attic/_tmp_rawlog/
+_attic/sensitive_snapshot_env/

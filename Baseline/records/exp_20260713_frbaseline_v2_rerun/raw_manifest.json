@@ -1,0 +1,43 @@
+{
+  "artifacts": [
+    {
+      "archive_status": "not_compressed",
+      "artifact_id": "exp_20260713_frbaseline_v2_rerun-raw-v1",
+      "artifact_kind": "experiment_directory",
+      "compression": null,
+      "content_flags": {
+        "contains_full_prompts": true,
+        "contains_model_outputs": true,
+        "contains_source_documents": true,
+        "contains_transport_details": true
+      },
+      "credential_scan": {
+        "exact_local_secret_match_count": 0,
+        "files_scanned": 12249,
+        "heuristic_marker_match_count": 0,
+        "heuristic_matches": {},
+        "local_secret_value_count": 14,
+        "scanned_at": null,
+        "scanner_version": "hybridpatch.raw_credential_scan/1",
+        "status": "pass_zero_matches"
+      },
+      "file_count": 12249,
+      "retention": "source",
+      "sanitization": {
+        "sanitizer_version": null,
+        "status": "raw"
+      },
+      "shareability": "private_only",
+      "size_bytes": 112115676,
+      "skipped_sensitive_files": [],
+      "skipped_symlinks": [],
+      "source_experiments": [],
+      "storage": "ignored_local_directory",
+      "storage_key": "Baseline/exp_20260713_frbaseline_v2_rerun",
+      "tree_hash_algorithm": "sha256-tree-v1",
+      "tree_sha256": "f7ecec3d0590920f7c109740564b56132602857af05d886191a3146fe9cf8542"
+    }
+  ],
+  "experiment_id": "exp_20260713_frbaseline_v2_rerun",
+  "schema": "hybridpatch.raw_manifest/1"
+}

@@ -1,0 +1,19 @@
+# Version snapshots and transport sync sources are byte-preserved artifacts.
+# Do not let core.autocrlf rewrite historical fingerprints on add/checkout.
+HP_V*/src/** -text
+HP_V*/requirements.txt -text
+HP_V*/prompts/** -text
+transport/src/** -text
+
+# Canonical audit surfaces are hashed and regenerated across platforms.
+# Keep their checkout bytes stable so records-only validation also passes on
+# Windows clients with core.autocrlf enabled.
+tools/experiment_records_catalog.json text eol=lf
+**/records/** text eol=lf
+HP_V*/EXPERIMENTS.md text eol=lf
+Baseline/EXPERIMENTS.md text eol=lf
+transport/EXPERIMENTS.md text eol=lf
+docs/EXPERIMENT_INDEX.md text eol=lf
+/.gitattributes text eol=lf
+/README.md text eol=lf
+/SECURITY.md text eol=lf

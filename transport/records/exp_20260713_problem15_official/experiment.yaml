@@ -1,0 +1,216 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260713_problem15_official
+record_kind: run
+owner: transport
+title: Official non-stream problem-sample diagnostic and four-chain fill source for FR+Official.
+purpose: Official non-stream problem-sample diagnostic and four-chain fill source for FR+Official.
+lifecycle_status: incomplete
+evidence_role: transport
+claim_eligibility: diagnostic_only
+source:
+  experiment_root_ref: transport/exp_20260713_problem15_official
+  run_metadata_schema: anchorpatch.run_metadata/2
+  raw_artifact_id: exp_20260713_problem15_official-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 3
+  fingerprints:
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: dd3f706bdd51
+    hybrid_schema.py: 93e8b9c78f12
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: 79ef3e766a00
+    hybrid_gate.py: 06299fbd4822
+    model_openai.py: d29548b00b5e
+    run_meta.py: e0d7d7861cfb
+    requirements.txt: 38ffe361be94
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: dd3f706bdd51
+    hybrid_schema.py: 93e8b9c78f12
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: 79ef3e766a00
+    hybrid_gate.py: 06299fbd4822
+    model_openai.py: e203226ae495
+    run_meta.py: e0d7d7861cfb
+    requirements.txt: 38ffe361be94
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: 3ba8a50dfad3
+    hybrid_schema.py: 93e8b9c78f12
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: 79ef3e766a00
+    hybrid_gate.py: 06299fbd4822
+    model_openai.py: 0839fc1ed6ea
+    run_meta.py: e0d7d7861cfb
+    requirements.txt: 38ffe361be94
+  version_reference: transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md
+execution:
+  working_directory_ref: null
+  command_templates:
+  - python src/experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 131072 --out_dir exp_20260713_problem15_official --notes problem15
+    FR-only, MiniMax official nonstream, worker A
+  - python src/experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 131072 --out_dir exp_20260713_problem15_official --notes problem15
+    FR-only, MiniMax official nonstream, worker B
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 131072 --out_dir exp_20260713_problem15_official --notes problem15
+    HP arm, robotics1, display-fix shakedown, MiniMax official nonstream
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch fullrewrite --num_round_trips
+    10 --skip_distractor --model minimax-m3 --max_tokens 131072 --out_dir exp_20260713_problem15_official
+    --notes problem15 diagnostic, MiniMax official nonstream baseline-aligned, worker A
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch fullrewrite --num_round_trips
+    10 --skip_distractor --model minimax-m3 --max_tokens 131072 --out_dir exp_20260713_problem15_official
+    --notes problem15 diagnostic, MiniMax official nonstream baseline-aligned, worker B
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch fullrewrite --num_round_trips
+    10 --skip_distractor --model minimax-m3 --max_tokens 131072 --out_dir exp_20260713_problem15_official
+    --notes problem15 diagnostic, MiniMax official nonstream baseline-aligned, worker C
+  methods:
+  - hybridpatch
+  - fullrewrite
+  arms:
+    hybridpatch: partial_live_official_nonstream
+    fullrewrite: partially_complete_live_official_nonstream
+  seed: 42
+  round_trips: 10
+  distractor: false
+  comparison_policy: transport diagnostic only; incomplete campaign cannot support a method comparison
+model:
+  name: minimax-m3
+  provider: minimax_official
+  base_url: https://api.minimaxi.com/v1
+  request_url: https://api.minimaxi.com/v1/chat/completions
+  transport: openai_sdk_nonstream
+  transport_revision: minimax_official_nonstream/1
+  thinking_mode: adaptive
+  max_tokens: 131072
+  temperature: null
+protocol:
+  declared_campaign_revision: hybridpatch/7
+  observed_valid_envelope_revisions:
+  - hybridpatch/7
+  prompt_revision: null
+  prompt_fingerprint: null
+  executor_fingerprint: null
+  runner_fingerprint: null
+data:
+  dataset: DELEGATE-52
+  split: 15 preselected problem samples
+  planned_sample_ids:
+  - crystal6
+  - earncall1
+  - filesystem3
+  - foodmenu6
+  - json4
+  - landmarks3
+  - mathlean2
+  - obj3d2
+  - protein1
+  - robotics1
+  - satellite4
+  - satellite6
+  - spreadsheet1
+  - translation4
+  - treebank4
+  canonical_sample_ids:
+  - crystal6
+  - earncall1
+  - filesystem3
+  - json4
+  - landmarks3
+  - obj3d2
+  - protein1
+  - robotics1
+  - satellite4
+  - spreadsheet1
+  - treebank4
+  excluded_samples:
+  - sample_id: foodmenu6
+    reason: No committed result rows.
+  - sample_id: mathlean2
+    reason: No committed result rows.
+  - sample_id: satellite6
+    reason: No committed result rows.
+  - sample_id: translation4
+    reason: No committed result rows.
+  task_plan_source: task plans stored in the diagnostic archive
+time:
+  started_at_local: '2026-07-12T22:25:28'
+  last_dispatch_started_at_local: '2026-07-13T00:08:14'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: committed_partial_11_samples
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md
+  source_report_sha256: 552223974cd6ce34b0ba4bfd999cf96438cc90c7606bd01b3f9e36c8844e7c6f
+  source_report_embedded: false
+  source_report_embedding_policy: linked_repository_source
+  selection_reason: transport diagnostic only; incomplete campaign cannot support a method comparison
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md
+  role: source_canonical_transport_interpretation
+  sha256: 552223974cd6ce34b0ba4bfd999cf96438cc90c7606bd01b3f9e36c8844e7c6f
+  size_bytes: 10496
+- path: Baseline/FR+Official/source_manifest.csv
+  role: four_selected_fill_chains
+  sha256: 31b5cf26661c73191e5668ca4e82e43711b111f69c148aedbeb1089e352adc3d
+  size_bytes: 56872
+- path: transport/exp_20260713_problem15_official/RESUME.md
+  role: frozen_status_note
+  sha256: d9dcfefdc6aa3b562215cd97712294386ffde74650df5b3ac1bd95ce2a0b0c78
+  size_bytes: 1726
+noncanonical_reports:
+- source_report_ref: Baseline/FR+Official/source_manifest.csv
+  role: four_selected_fill_chains
+  sha256: 31b5cf26661c73191e5668ca4e82e43711b111f69c148aedbeb1089e352adc3d
+  size_bytes: 56872
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+- source_report_ref: transport/exp_20260713_problem15_official/RESUME.md
+  role: frozen_status_note
+  sha256: d9dcfefdc6aa3b562215cd97712294386ffde74650df5b3ac1bd95ce2a0b0c78
+  size_bytes: 1726
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: pass
+  replayed_backward_rows: 109
+  canonical_backward_rows: 109
+  source: docs/restructure_final_report.md
+  log: null
+  exceptions:
+  - The campaign is intentionally frozen partial and must not be analyzed as a complete paired experiment.
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+known_exceptions:
+- The problem-sample selection cannot estimate provider background rates.
+- Four complete FullRewrite chains are consumed by FR+Official.
+raw_manifest_ref: raw_manifest.json

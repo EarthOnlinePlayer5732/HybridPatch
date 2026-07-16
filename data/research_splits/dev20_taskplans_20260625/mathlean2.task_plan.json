@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "explicit_calc_state",
+    "reordered_state",
+    "cpx_fixedpoints_def_state",
+    "cpx_decl_grouping_state",
+    "merged_namespace_state",
+    "explicit_universes_state",
+    "split_files_state",
+    "consistent_names_state",
+    "explicit_calc_state",
+    "cpx_decl_grouping_state"
+  ]
+}

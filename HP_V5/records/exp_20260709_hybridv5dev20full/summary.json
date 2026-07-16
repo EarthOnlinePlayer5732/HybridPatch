@@ -1,0 +1,160 @@
+{
+  "canonical_scope_id": "dev20_complete_pairs",
+  "comparisons": [
+    {
+      "cohen_d": 0.0994014716606356,
+      "delta_a_minus_b": 0.03471112949770172,
+      "headline": true,
+      "mean_a": 0.8491092562373255,
+      "mean_b": 0.8143981267396238,
+      "method_a": "hybridpatch",
+      "method_b": "fullrewrite",
+      "p": 0.1613580260477802,
+      "paired_backward_rows": 200,
+      "scope_id": "dev20_complete_pairs",
+      "t": 1.4057490934231576
+    }
+  ],
+  "experiment_id": "exp_20260709_hybridv5dev20full",
+  "methods": {
+    "fullrewrite": {
+      "backward_rows": 200,
+      "commit_outcomes": {
+        "not_applicable": 400
+      },
+      "committed_rows": 400,
+      "critical_failures": {
+        "count": 12,
+        "theta": 0.1,
+        "transitions": 180
+      },
+      "execution_status": {
+        "degraded": 11,
+        "failure": 7,
+        "success": 382
+      },
+      "failure_labels": {
+        "content_regression": 14,
+        "empty_response": 3,
+        "near_empty_response": 1
+      },
+      "latency_ms": {
+        "count": 400,
+        "max": 1868099,
+        "mean": 110099.152,
+        "median": 48960.5
+      },
+      "mean_backward_rs": 0.8143981267396238,
+      "preservation_violations": {
+        "max": null,
+        "recorded_rows": 0,
+        "total": 0,
+        "unknown_rows": 400
+      },
+      "routes": {
+        "fullrewrite": 400
+      },
+      "rs_at_k": {
+        "1": 0.9487476399978164,
+        "10": 0.6719540877394471,
+        "5": 0.8583378885662932
+      },
+      "tokens": {
+        "input": 1623260,
+        "input_plus_output": 7809126,
+        "output": 6185866,
+        "semantic_call_total": 7809126,
+        "total": 7809126
+      }
+    },
+    "hybridpatch": {
+      "backward_rows": 200,
+      "commit_outcomes": {
+        "applied": 393,
+        "kept_context": 7
+      },
+      "committed_rows": 400,
+      "critical_failures": {
+        "count": 10,
+        "theta": 0.1,
+        "transitions": 180
+      },
+      "execution_status": {
+        "degraded": 19,
+        "success": 381
+      },
+      "failure_labels": {
+        "content_regression": 8,
+        "text_truncated": 3,
+        "unknown_failure": 1,
+        "validation_gate": 7
+      },
+      "latency_ms": {
+        "count": 400,
+        "max": 2063528,
+        "mean": 221740.81,
+        "median": 142325.5
+      },
+      "mean_backward_rs": 0.8491092562373255,
+      "preservation_violations": {
+        "max": 0,
+        "recorded_rows": 400,
+        "total": 0,
+        "unknown_rows": 0
+      },
+      "routes": {
+        "bounded_rewrite": 230,
+        "bulk_patch": 49,
+        "local_patch": 121
+      },
+      "rs_at_k": {
+        "1": 0.9817075077806224,
+        "10": 0.8038222394988392,
+        "5": 0.8414185698587606
+      },
+      "tokens": {
+        "input": 4323460,
+        "input_plus_output": 15861272,
+        "output": 11537812,
+        "semantic_call_total": 15861272,
+        "total": 15861272
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": null,
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 400,
+    "canonical_committed_rows": 800,
+    "canonical_samples": 20,
+    "committed_rows": 800,
+    "excluded_samples": [],
+    "planned_rows": 800,
+    "planned_samples": 20
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "HP_V5/exp_20260709_hybridv5dev20full",
+    "HP_V5/exp_20260709_hybridv5dev20full/analysis/comparison.md",
+    "docs/FINDINGS.md"
+  ],
+  "verification": {
+    "canonical_backward_rows": 400,
+    "exceptions": [],
+    "log": "_attic/logs_root/v7regress_verify_20260709_hybridv5dev20full.log",
+    "replayed_backward_rows": 400,
+    "source": "HP_V5/VERSION.md",
+    "status": "pass"
+  }
+}

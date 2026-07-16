@@ -1,0 +1,3857 @@
+{
+  "schema": "anchorpatch.contamination_registry/1",
+  "created_local": "2026-06-25T08:51:39",
+  "workspace": "F:\\Code\\AnchorPatch_goal_promptgen_20260624",
+  "policy": {
+    "artifact_path_scan_roots": [
+      "anchorpatch/exp_*",
+      "anchorpatch/experiment_results",
+      "anchorpatch/runs"
+    ],
+    "split_metadata_paths": [
+      "anchorpatch/research_splits/dev20_20260625.json",
+      "anchorpatch/research_splits/holdout_protocol_20260625.json"
+    ],
+    "path_level_sample_id_match": true,
+    "text_inventory_scan": false,
+    "fresh_holdout30_allowed_use": "aggregate_failure_attribution_only",
+    "future_holdout_rule": "exclude contaminated, dev, smoke, manual-analysis, and reserve-used samples"
+  },
+  "fixed_sets": {
+    "original_frozen10": [
+      "treebank3",
+      "fonteng2",
+      "quantum2",
+      "json6",
+      "crystal4",
+      "weather4",
+      "graphviz6",
+      "infra5",
+      "vector2",
+      "latex1"
+    ],
+    "fresh_holdout30": [
+      "dbschema1",
+      "libcatalog6",
+      "vector6",
+      "crystal1",
+      "fonteng4",
+      "latex6",
+      "quantum6",
+      "treebank6",
+      "graphviz3",
+      "infra1",
+      "docker1",
+      "python5",
+      "dbschema2",
+      "filesystem1",
+      "landmarks6",
+      "subtitles3",
+      "hamradio1",
+      "jobboard5",
+      "edifact2",
+      "geodata2",
+      "foodmenu5",
+      "spreadsheet5",
+      "molecule6",
+      "obj3d4",
+      "screenplay1",
+      "accounting6",
+      "robotics2",
+      "emails6",
+      "dns3",
+      "starcatalog6"
+    ],
+    "dev20_20260625": [
+      "circuit2",
+      "docker6",
+      "edifact6",
+      "fonteng3",
+      "foodmenu6",
+      "geotrack3",
+      "landmarks1",
+      "latex2",
+      "makefile4",
+      "malware6",
+      "mathlean2",
+      "molecule2",
+      "musicsheet2",
+      "protein1",
+      "python7",
+      "quantum4",
+      "satellite6",
+      "screenplay6",
+      "starcatalog4",
+      "translation4"
+    ],
+    "holdout_reserve_20260625": [
+      "chess2",
+      "circuit1",
+      "crystal6",
+      "dbschema4",
+      "docker3",
+      "earncall1",
+      "edifact3",
+      "emails5",
+      "filesystem2",
+      "filesystem3",
+      "fonteng1",
+      "fonteng5",
+      "foodmenu1",
+      "genealogy6",
+      "geodata1",
+      "geodata4",
+      "geotrack5",
+      "geotrack6",
+      "graphviz1",
+      "hamradio6",
+      "infra2",
+      "jobboard3",
+      "json2",
+      "json4",
+      "landmarks2",
+      "landmarks3",
+      "latex5",
+      "libcatalog2",
+      "libcatalog5",
+      "makefile6",
+      "malware3",
+      "mathlean4",
+      "mathlean5",
+      "molecule3",
+      "musicsheet1",
+      "obj3d2",
+      "obj3d5",
+      "protein3",
+      "python6",
+      "quantum1",
+      "quantum5",
+      "recipe1",
+      "robotics1",
+      "robotics3",
+      "satellite4",
+      "screenplay4",
+      "screenplay5",
+      "slides1",
+      "spreadsheet1",
+      "spreadsheet6",
+      "starcatalog5",
+      "subtitles2",
+      "subtitles6",
+      "transit1",
+      "transit2",
+      "translation2",
+      "treebank2",
+      "treebank4",
+      "vector5",
+      "weather1"
+    ],
+    "unsupported_sample_types": [
+      "audiosyn",
+      "image"
+    ]
+  },
+  "summary": {
+    "total_samples": 234,
+    "contaminated_samples": 88,
+    "reserved_holdout_candidate_samples": 60,
+    "clean_candidate_samples": 86,
+    "clean_available_non_unsupported": 84
+  },
+  "entries": [
+    {
+      "sample_id": "accounting1",
+      "sample_type": "accounting",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 2,
+      "evidence_examples": [
+        "anchorpatch/experiment_results/accounting1.task_plan.json",
+        "anchorpatch/experiment_results/logs/accounting1.log"
+      ]
+    },
+    {
+      "sample_id": "accounting2",
+      "sample_type": "accounting",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 2,
+      "evidence_examples": [
+        "anchorpatch/experiment_results/accounting2.task_plan.json",
+        "anchorpatch/experiment_results/logs/accounting2.log"
+      ]
+    },
+    {
+      "sample_id": "accounting3",
+      "sample_type": "accounting",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 2,
+      "evidence_examples": [
+        "anchorpatch/experiment_results/accounting3.task_plan.json",
+        "anchorpatch/experiment_results/logs/accounting3.log"
+      ]
+    },
+    {
+      "sample_id": "accounting4",
+      "sample_type": "accounting",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 2,
+      "evidence_examples": [
+        "anchorpatch/experiment_results/accounting4.task_plan.json",
+        "anchorpatch/experiment_results/logs/accounting4.log"
+      ]
+    },
+    {
+      "sample_id": "accounting5",
+      "sample_type": "accounting",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 2,
+      "evidence_examples": [
+        "anchorpatch/experiment_results/accounting5.task_plan.json",
+        "anchorpatch/experiment_results/logs/accounting5.log"
+      ]
+    },
+    {
+      "sample_id": "accounting6",
+      "sample_type": "accounting",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 306,
+      "evidence_examples": [
+        "anchorpatch/experiment_results/accounting6.task_plan.json",
+        "anchorpatch/experiment_results/logs/accounting6.log",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/accounting6.task_plan.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/accounting6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/accounting6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/accounting6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/accounting6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/accounting6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/accounting6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/accounting6/rt01_bwd_basic_state/utah_food_bank.ledger",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/accounting6/rt01_fwd_pounds_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/accounting6/rt01_fwd_pounds_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "audiosyn1",
+      "sample_type": "audiosyn",
+      "status": "clean_candidate",
+      "unavailable_reason": "unsupported_generation_domain",
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "audiosyn4",
+      "sample_type": "audiosyn",
+      "status": "clean_candidate",
+      "unavailable_reason": "unsupported_generation_domain",
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "calendar1",
+      "sample_type": "calendar",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 118,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch/calendar1.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch/calendar1.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2/calendar1.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2/calendar1.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2_2/calendar1.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2_2/calendar1.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/calendar1.task_plan.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/calendar1",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/calendar1/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/calendar1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/calendar1/rt01_bwd_basic_state/calendar.ics",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/calendar1/rt01_fwd_timezone_ist"
+      ]
+    },
+    {
+      "sample_id": "calendar5",
+      "sample_type": "calendar",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 4,
+      "evidence_examples": [
+        "anchorpatch/experiment_results/anchorpatch/calendar5.ckpt.json",
+        "anchorpatch/experiment_results/anchorpatch/calendar5.jsonl",
+        "anchorpatch/experiment_results/calendar5.task_plan.json",
+        "anchorpatch/experiment_results/logs/calendar5.log"
+      ]
+    },
+    {
+      "sample_id": "chess2",
+      "sample_type": "chess",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "chess3",
+      "sample_type": "chess",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 134,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/chess3.task_plan.json",
+        "anchorpatch/exp_ap8_rt10/anchorpatch_v2/chess3.ckpt.json",
+        "anchorpatch/exp_ap8_rt10/anchorpatch_v2/chess3.jsonl",
+        "anchorpatch/exp_ap8_rt10/chess3.task_plan.json",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/chess3",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/chess3/rt01_bwd_basic_state",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/chess3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/chess3/rt01_bwd_basic_state/fredymam_vs_hgrey_french.pgn",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/chess3/rt01_fwd_commentary_state",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/chess3/rt01_fwd_commentary_state/_step.json",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/chess3/rt01_fwd_commentary_state/fredymam_vs_hgrey_french.pgn",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/chess3/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "chess4",
+      "sample_type": "chess",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "chess5",
+      "sample_type": "chess",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 6,
+      "evidence_examples": [
+        "anchorpatch/exp_chess_dns/anchorpatch/chess5.ckpt.json",
+        "anchorpatch/exp_chess_dns/anchorpatch/chess5.jsonl",
+        "anchorpatch/exp_chess_dns/chess5.task_plan.json",
+        "anchorpatch/exp_chess_dns/fullrewrite/chess5.ckpt.json",
+        "anchorpatch/exp_chess_dns/fullrewrite/chess5.jsonl",
+        "anchorpatch/exp_chess_dns/logs/chess5.log"
+      ]
+    },
+    {
+      "sample_id": "chess6",
+      "sample_type": "chess",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 26,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/chess6.ckpt.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/chess6.jsonl",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/chess6.task_plan.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6/rt01_fwd_blunders_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6/rt01_fwd_blunders_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6/rt02_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6/rt02_fwd_coordination_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/chess6/rt02_fwd_coordination_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "circuit1",
+      "sample_type": "circuit",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "circuit2",
+      "sample_type": "circuit",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 685,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/circuit2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/circuit2.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/api_raw/anchorpatch_c10_hybrid/circuit2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/circuit2.task_plan.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/circuit2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/circuit2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/circuit2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/circuit2/rt01_bwd_basic_state/dac_r2r.cir",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/circuit2/rt01_bwd_basic_state/subckt_order.txt",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/circuit2/rt01_fwd_subcircuits_sorted",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/circuit2/rt01_fwd_subcircuits_sorted/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/circuit2/rt01_fwd_subcircuits_sorted/dac_r2r.cir"
+      ]
+    },
+    {
+      "sample_id": "circuit4",
+      "sample_type": "circuit",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "circuit5",
+      "sample_type": "circuit",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "crystal1",
+      "sample_type": "crystal",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 303,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/crystal1.ckpt.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/crystal1.jsonl",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch_v2_2/crystal1.ckpt.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch_v2_2/crystal1.jsonl",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/crystal1.task_plan.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/crystal1",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/crystal1/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/crystal1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/crystal1/rt01_bwd_basic_state/cu_oxalurate.cif",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/crystal1/rt01_fwd_cartesian_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/crystal1/rt01_fwd_cartesian_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/crystal1/rt01_fwd_cartesian_state/cu_oxalurate.cif"
+      ]
+    },
+    {
+      "sample_id": "crystal4",
+      "sample_type": "crystal",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 771,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch/crystal4.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch/crystal4.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2/crystal4.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2/crystal4.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2_2/crystal4.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2_2/crystal4.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/crystal4.task_plan.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/crystal4",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/crystal4/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/crystal4/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/crystal4/rt01_bwd_basic_state/ba2pbi4.cif",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/crystal4/rt01_fwd_symmetry_matrix_state"
+      ]
+    },
+    {
+      "sample_id": "crystal6",
+      "sample_type": "crystal",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "dbschema1",
+      "sample_type": "dbschema",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 305,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/dbschema1.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/dbschema1.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/dbschema1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/dbschema1.task_plan.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema1/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema1/rt01_bwd_basic_state/schema.sql",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema1/rt01_fwd_merged_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema1/rt01_fwd_merged_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema1/rt01_fwd_merged_state/schema.sql",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema1/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "dbschema2",
+      "sample_type": "dbschema",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 323,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/dbschema2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/dbschema2.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/dbschema2",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/dbschema2.task_plan.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema2",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema2/rt01_bwd_basic_state/roundcube_schema.sql",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema2/rt01_fwd_cache_merged_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema2/rt01_fwd_cache_merged_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema2/rt01_fwd_cache_merged_state/roundcube_schema.sql",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/dbschema2/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "dbschema3",
+      "sample_type": "dbschema",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "dbschema4",
+      "sample_type": "dbschema",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "dbschema5",
+      "sample_type": "dbschema",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 5,
+      "evidence_examples": [
+        "anchorpatch/exp_crystal_dbschema_emails/anchorpatch/dbschema5.ckpt.json",
+        "anchorpatch/exp_crystal_dbschema_emails/anchorpatch/dbschema5.jsonl",
+        "anchorpatch/exp_crystal_dbschema_emails/dbschema5.task_plan.json",
+        "anchorpatch/exp_crystal_dbschema_emails/fullrewrite/dbschema5.ckpt.json",
+        "anchorpatch/exp_crystal_dbschema_emails/fullrewrite/dbschema5.jsonl"
+      ]
+    },
+    {
+      "sample_id": "dbschema6",
+      "sample_type": "dbschema",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "dns1",
+      "sample_type": "dns",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 6,
+      "evidence_examples": [
+        "anchorpatch/exp_chess_dns/anchorpatch/dns1.ckpt.json",
+        "anchorpatch/exp_chess_dns/anchorpatch/dns1.jsonl",
+        "anchorpatch/exp_chess_dns/dns1.task_plan.json",
+        "anchorpatch/exp_chess_dns/fullrewrite/dns1.ckpt.json",
+        "anchorpatch/exp_chess_dns/fullrewrite/dns1.jsonl",
+        "anchorpatch/exp_chess_dns/logs/dns1.log"
+      ]
+    },
+    {
+      "sample_id": "dns3",
+      "sample_type": "dns",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 400,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch/dns3.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch/dns3.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2/dns3.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2/dns3.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2_2/dns3.ckpt.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/anchorpatch_v2_2/dns3.jsonl",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/dns3.task_plan.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/dns3",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/dns3/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/dns3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/dns3/rt01_bwd_basic_state/dd-ix.net.zone",
+        "anchorpatch/exp_20260620_calendar-crystal-dns__seed42/docs/anchorpatch_v2_2/dns3/rt01_fwd_role_annotated"
+      ]
+    },
+    {
+      "sample_id": "docker1",
+      "sample_type": "docker",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 305,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/docker1.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/docker1.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/docker1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docker1.task_plan.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/docker1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/docker1/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/docker1/rt01_bwd_basic_state/Dockerfile",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/docker1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/docker1/rt01_fwd_compose_extracted",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/docker1/rt01_fwd_compose_extracted/Dockerfile",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/docker1/rt01_fwd_compose_extracted/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/docker1/rt01_fwd_compose_extracted/docker-compose.yml"
+      ]
+    },
+    {
+      "sample_id": "docker2",
+      "sample_type": "docker",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 33,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/docker2.ckpt.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/docker2.jsonl",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docker2.task_plan.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2/rt01_bwd_basic_state/Dockerfile",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2/rt01_fwd_cve_annotated_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2/rt01_fwd_cve_annotated_state/Dockerfile",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2/rt01_fwd_cve_annotated_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker2/rt02_bwd_basic_state/Dockerfile"
+      ]
+    },
+    {
+      "sample_id": "docker3",
+      "sample_type": "docker",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "docker4",
+      "sample_type": "docker",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 164,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/docker4.ckpt.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/docker4.jsonl",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docker4.task_plan.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4/rt01_bwd_basic_state/Dockerfile",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4/rt01_fwd_categorized_packages_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4/rt01_fwd_categorized_packages_state/Dockerfile",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4/rt01_fwd_categorized_packages_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/docker4/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "docker5",
+      "sample_type": "docker",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "docker6",
+      "sample_type": "docker",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 610,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/docker6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/docker6.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/api_raw/anchorpatch_c10_hybrid/docker6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docker6.task_plan.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/docker6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/docker6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/docker6/rt01_bwd_basic_state/Dockerfile",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/docker6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/docker6/rt01_fwd_env_individual_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/docker6/rt01_fwd_env_individual_state/Dockerfile",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/docker6/rt01_fwd_env_individual_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/docker6/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "earncall1",
+      "sample_type": "earncall",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "earncall2",
+      "sample_type": "earncall",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "earncall3",
+      "sample_type": "earncall",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "earncall4",
+      "sample_type": "earncall",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "earncall5",
+      "sample_type": "earncall",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "earncall6",
+      "sample_type": "earncall",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "edifact1",
+      "sample_type": "edifact",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "edifact2",
+      "sample_type": "edifact",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 268,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/edifact2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/edifact2.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/edifact2",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2/rt01_bwd_basic_state/invoic.edi",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2/rt01_fwd_merge_consolidated_invoice_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2/rt01_fwd_merge_consolidated_invoice_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2/rt01_fwd_merge_consolidated_invoice_state/invoic.edi",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/edifact2/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "edifact3",
+      "sample_type": "edifact",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "edifact6",
+      "sample_type": "edifact",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 352,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/edifact6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/edifact6.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/edifact6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/edifact6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/edifact6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/edifact6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/edifact6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/edifact6/rt01_bwd_basic_state/invoice.edi",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/edifact6/rt01_fwd_codify_parties_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/edifact6/rt01_fwd_codify_parties_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/edifact6/rt01_fwd_codify_parties_state/invoice.edi",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/edifact6/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "emails5",
+      "sample_type": "emails",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "emails6",
+      "sample_type": "emails",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 325,
+      "evidence_examples": [
+        "anchorpatch/exp_crystal_dbschema_emails/anchorpatch/emails6.ckpt.json",
+        "anchorpatch/exp_crystal_dbschema_emails/anchorpatch/emails6.jsonl",
+        "anchorpatch/exp_crystal_dbschema_emails/emails6.task_plan.json",
+        "anchorpatch/exp_crystal_dbschema_emails/fullrewrite/emails6.ckpt.json",
+        "anchorpatch/exp_crystal_dbschema_emails/fullrewrite/emails6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/emails6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/emails6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/emails6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/emails6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/emails6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/emails6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/emails6/rt01_bwd_basic_state/blame_thread.eml"
+      ]
+    },
+    {
+      "sample_id": "filesystem1",
+      "sample_type": "filesystem",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 272,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/filesystem1.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/filesystem1.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/filesystem1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1/rt01_bwd_basic_state/flask.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1/rt01_fwd_colocated_tests_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1/rt01_fwd_colocated_tests_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1/rt01_fwd_colocated_tests_state/flask.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/filesystem1/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "filesystem2",
+      "sample_type": "filesystem",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "filesystem3",
+      "sample_type": "filesystem",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "filesystem4",
+      "sample_type": "filesystem",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "filesystem5",
+      "sample_type": "filesystem",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "filesystem6",
+      "sample_type": "filesystem",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "fonteng1",
+      "sample_type": "fonteng",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "fonteng2",
+      "sample_type": "fonteng",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 1400,
+      "evidence_examples": [
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/fonteng2.ckpt.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/fonteng2.jsonl",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/anchorpatch_v2/fonteng2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/fullrewrite/fonteng2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/fonteng2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/fonteng2/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/fonteng2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/fonteng2/rt01_bwd_basic_state/features.fea",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/fonteng2/rt01_fwd_lookup_wrapped",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/fonteng2/rt01_fwd_lookup_wrapped/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/fonteng2/rt01_fwd_lookup_wrapped/features.fea",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/fonteng2/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "fonteng3",
+      "sample_type": "fonteng",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 329,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/fonteng3.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/fonteng3.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/fonteng3",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/fonteng3",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/fonteng3",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/fonteng3/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/fonteng3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/fonteng3/rt01_bwd_basic_state/features.fea",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/fonteng3/rt01_fwd_lookups_renamed_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/fonteng3/rt01_fwd_lookups_renamed_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/fonteng3/rt01_fwd_lookups_renamed_state/features.fea",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/fonteng3/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "fonteng4",
+      "sample_type": "fonteng",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 264,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/fonteng4.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/fonteng4.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/fonteng4",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4/rt01_bwd_basic_state/features.fea",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4/rt01_fwd_classes_expanded_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4/rt01_fwd_classes_expanded_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4/rt01_fwd_classes_expanded_state/features.fea",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/fonteng4/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "fonteng5",
+      "sample_type": "fonteng",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "fonteng6",
+      "sample_type": "fonteng",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "foodmenu1",
+      "sample_type": "foodmenu",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "foodmenu2",
+      "sample_type": "foodmenu",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "foodmenu3",
+      "sample_type": "foodmenu",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "foodmenu4",
+      "sample_type": "foodmenu",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "foodmenu5",
+      "sample_type": "foodmenu",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 281,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/foodmenu5.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/foodmenu5.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/foodmenu5",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5/rt01_bwd_basic_state/san_carlos_coffee_shop_menu.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5/rt01_fwd_quick_counter",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5/rt01_fwd_quick_counter/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5/rt01_fwd_quick_counter/counter_service.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5/rt01_fwd_quick_counter/san_carlos_coffee_shop_menu.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/foodmenu5/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "foodmenu6",
+      "sample_type": "foodmenu",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 673,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/foodmenu6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/foodmenu6.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/api_raw/anchorpatch_c10_hybrid/foodmenu6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6/rt01_bwd_basic_state/healys_42nd_street_menu.txt",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6/rt01_fwd_house_specials",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6/rt01_fwd_house_specials/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6/rt01_fwd_house_specials/healys_42nd_street_menu.txt",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/foodmenu6/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "genealogy5",
+      "sample_type": "genealogy",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "genealogy6",
+      "sample_type": "genealogy",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "geodata1",
+      "sample_type": "geodata",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "geodata2",
+      "sample_type": "geodata",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 357,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/geodata2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/geodata2.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/geodata2",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2/rt01_bwd_basic_state/parks.geojson",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2/rt01_fwd_region_split_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2/rt01_fwd_region_split_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2/rt01_fwd_region_split_state/parks.geojson",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/geodata2/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "geodata4",
+      "sample_type": "geodata",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "geotrack1",
+      "sample_type": "geotrack",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "geotrack2",
+      "sample_type": "geotrack",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "geotrack3",
+      "sample_type": "geotrack",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 133,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/geotrack3.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/geotrack3.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/geotrack3",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/geotrack3",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/geotrack3",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/geotrack3/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/geotrack3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/geotrack3/rt01_bwd_basic_state/melk_ride.gpx",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/geotrack3/rt01_fwd_elevation_classified",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/geotrack3/rt01_fwd_elevation_classified/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/geotrack3/rt01_fwd_elevation_classified/melk_ride.gpx",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/geotrack3/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "geotrack4",
+      "sample_type": "geotrack",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "geotrack5",
+      "sample_type": "geotrack",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "geotrack6",
+      "sample_type": "geotrack",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "graphviz1",
+      "sample_type": "graphviz",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "graphviz3",
+      "sample_type": "graphviz",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 356,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/graphviz3.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/graphviz3.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/graphviz3",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3/rt01_bwd_basic_state/les_miserables.dot",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3/rt01_fwd_valjean_centric",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3/rt01_fwd_valjean_centric/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3/rt01_fwd_valjean_centric/layout.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3/rt01_fwd_valjean_centric/les_miserables.dot",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/graphviz3/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "graphviz4",
+      "sample_type": "graphviz",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "graphviz5",
+      "sample_type": "graphviz",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "graphviz6",
+      "sample_type": "graphviz",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 590,
+      "evidence_examples": [
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/graphviz6.ckpt.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/graphviz6.jsonl",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/anchorpatch_v2/graphviz6",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/fullrewrite/graphviz6",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/graphviz6",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/graphviz6/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/graphviz6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/graphviz6/rt01_bwd_basic_state/unix_sort.dot",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/graphviz6/rt01_fwd_call_pairs",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/graphviz6/rt01_fwd_call_pairs/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/graphviz6/rt01_fwd_call_pairs/calls.csv",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/graphviz6/rt01_fwd_call_pairs/unix_sort.dot"
+      ]
+    },
+    {
+      "sample_id": "hamradio1",
+      "sample_type": "hamradio",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 305,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/hamradio1.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/hamradio1.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/hamradio1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1/rt01_bwd_basic_state/naqp_log.adi",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1/rt01_fwd_cqzone_grouped",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1/rt01_fwd_cqzone_grouped/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1/rt01_fwd_cqzone_grouped/cqzone_3.adi",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1/rt01_fwd_cqzone_grouped/cqzone_4.adi",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/hamradio1/rt01_fwd_cqzone_grouped/cqzone_5.adi"
+      ]
+    },
+    {
+      "sample_id": "hamradio2",
+      "sample_type": "hamradio",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "hamradio3",
+      "sample_type": "hamradio",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 151,
+      "evidence_examples": [
+        "anchorpatch/exp_ap5_rt10/anchorpatch_v2/hamradio3.ckpt.json",
+        "anchorpatch/exp_ap5_rt10/anchorpatch_v2/hamradio3.jsonl",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt01_bwd_basic_state",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt01_bwd_basic_state/vhf_contest.adi",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt01_fwd_grid_distance_state",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt01_fwd_grid_distance_state/_step.json",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt01_fwd_grid_distance_state/distance_metadata.json",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt01_fwd_grid_distance_state/vhf_contest.adi",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt02_bwd_basic_state",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/hamradio3/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "hamradio5",
+      "sample_type": "hamradio",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "hamradio6",
+      "sample_type": "hamradio",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "infra1",
+      "sample_type": "infra",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 317,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/infra1.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/infra1.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/infra1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1/rt01_bwd_basic_state/main.tf",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1/rt01_fwd_json_repr",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1/rt01_fwd_json_repr/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1/rt01_fwd_json_repr/infra.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/infra1/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "infra2",
+      "sample_type": "infra",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "infra3",
+      "sample_type": "infra",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "infra4",
+      "sample_type": "infra",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "infra5",
+      "sample_type": "infra",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 633,
+      "evidence_examples": [
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/infra5.ckpt.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/infra5.jsonl",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/anchorpatch_v2/infra5",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/fullrewrite/infra5",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/infra5",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/infra5/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/infra5/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/infra5/rt01_bwd_basic_state/main.tf",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/infra5/rt01_fwd_for_each_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/infra5/rt01_fwd_for_each_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/infra5/rt01_fwd_for_each_state/main.tf",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/infra5/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "infra6",
+      "sample_type": "infra",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "jobboard1",
+      "sample_type": "jobboard",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 60,
+      "evidence_examples": [
+        "anchorpatch/exp_ap5_rt10/anchorpatch_v2/jobboard1.ckpt.json",
+        "anchorpatch/exp_ap5_rt10/anchorpatch_v2/jobboard1.jsonl",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt01_bwd_basic_state",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt01_bwd_basic_state/jobboard.txt",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt01_fwd_skills_matrix",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt01_fwd_skills_matrix/_step.json",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt01_fwd_skills_matrix/jobs_summary.txt",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt01_fwd_skills_matrix/skills_matrix.csv",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt02_bwd_basic_state",
+        "anchorpatch/exp_ap5_rt10/docs/anchorpatch_v2/jobboard1/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "jobboard2",
+      "sample_type": "jobboard",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "jobboard3",
+      "sample_type": "jobboard",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "jobboard4",
+      "sample_type": "jobboard",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "jobboard5",
+      "sample_type": "jobboard",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 347,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/jobboard5.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/jobboard5.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/jobboard5",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5/rt01_bwd_basic_state/jobboard_leadership.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5/rt01_fwd_company_stage_split",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5/rt01_fwd_company_stage_split/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5/rt01_fwd_company_stage_split/company_stage.csv",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5/rt01_fwd_company_stage_split/consulting.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/jobboard5/rt01_fwd_company_stage_split/enterprise.txt"
+      ]
+    },
+    {
+      "sample_id": "jobboard6",
+      "sample_type": "jobboard",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "json1",
+      "sample_type": "json",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "json2",
+      "sample_type": "json",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "json3",
+      "sample_type": "json",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 1,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/json3.task_plan.json"
+      ]
+    },
+    {
+      "sample_id": "json4",
+      "sample_type": "json",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "json5",
+      "sample_type": "json",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "json6",
+      "sample_type": "json",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 617,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/json6.ckpt.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/anchorpatch/json6.jsonl",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt01_bwd_basic_state/nushell_releases.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt01_fwd_contributor_centric",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt01_fwd_contributor_centric/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt01_fwd_contributor_centric/nushell_releases.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt02_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/docs/anchorpatch/json6/rt02_bwd_basic_state/nushell_releases.json"
+      ]
+    },
+    {
+      "sample_id": "landmarks1",
+      "sample_type": "landmarks",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 144,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/landmarks1.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/landmarks1.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/landmarks1",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/landmarks1",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/landmarks1",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/landmarks1/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/landmarks1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/landmarks1/rt01_bwd_basic_state/attractions.kml",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/landmarks1/rt01_fwd_geojson_format",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/landmarks1/rt01_fwd_geojson_format/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/landmarks1/rt01_fwd_geojson_format/attractions.geojson",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/landmarks1/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "landmarks2",
+      "sample_type": "landmarks",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "landmarks3",
+      "sample_type": "landmarks",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "landmarks4",
+      "sample_type": "landmarks",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "landmarks5",
+      "sample_type": "landmarks",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "landmarks6",
+      "sample_type": "landmarks",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 284,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/landmarks6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/landmarks6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/landmarks6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6/rt01_bwd_basic_state/tokyo_temples.kml",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6/rt01_fwd_spiritual_tourist",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6/rt01_fwd_spiritual_tourist/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6/rt01_fwd_spiritual_tourist/other_religions.kml",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6/rt01_fwd_spiritual_tourist/traditional_japanese.kml",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/landmarks6/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "latex1",
+      "sample_type": "latex",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 643,
+      "evidence_examples": [
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/latex1.ckpt.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/latex1.jsonl",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/anchorpatch_v2/latex1",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/fullrewrite/latex1",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/latex1",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/latex1/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/latex1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/latex1/rt01_bwd_basic_state/bibtex.bib",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/latex1/rt01_bwd_basic_state/llm_multiterm_conversation.tex",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/latex1/rt01_fwd_cpx_topic_clustered_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/latex1/rt01_fwd_cpx_topic_clustered_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/latex1/rt01_fwd_cpx_topic_clustered_state/bibtex.bib"
+      ]
+    },
+    {
+      "sample_id": "latex2",
+      "sample_type": "latex",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 588,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/latex2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/latex2.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/api_raw/anchorpatch_c10_hybrid/latex2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2/rt01_bwd_basic_state/bibtex.bib",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2/rt01_bwd_basic_state/deepphysinet_weather.tex",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2/rt01_fwd_split_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2/rt01_fwd_split_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2/rt01_fwd_split_state/bibtex.bib",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/latex2/rt01_fwd_split_state/experiments.tex"
+      ]
+    },
+    {
+      "sample_id": "latex3",
+      "sample_type": "latex",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "latex4",
+      "sample_type": "latex",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "latex5",
+      "sample_type": "latex",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "latex6",
+      "sample_type": "latex",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 395,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/latex6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/latex6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/latex6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6/rt01_bwd_basic_state/amie_medical_ai.tex",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6/rt01_bwd_basic_state/bibtex.bib",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6/rt01_fwd_contributions_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6/rt01_fwd_contributions_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6/rt01_fwd_contributions_state/amie_medical_ai.tex",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/latex6/rt01_fwd_contributions_state/bibtex.bib"
+      ]
+    },
+    {
+      "sample_id": "libcatalog2",
+      "sample_type": "libcatalog",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "libcatalog3",
+      "sample_type": "libcatalog",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "libcatalog5",
+      "sample_type": "libcatalog",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "libcatalog6",
+      "sample_type": "libcatalog",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 293,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/libcatalog6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/libcatalog6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/libcatalog6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6/rt01_bwd_basic_state/catalog.xml",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6/rt01_fwd_cataloging_timeline_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6/rt01_fwd_cataloging_timeline_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6/rt01_fwd_cataloging_timeline_state/catalog.xml",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6/rt01_fwd_cataloging_timeline_state/timeline.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/libcatalog6/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "makefile1",
+      "sample_type": "makefile",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "makefile2",
+      "sample_type": "makefile",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "makefile3",
+      "sample_type": "makefile",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "makefile4",
+      "sample_type": "makefile",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 146,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/makefile4.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/makefile4.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/makefile4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/makefile4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/makefile4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/makefile4/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/makefile4/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/makefile4/rt01_bwd_basic_state/traefik.mk",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/makefile4/rt01_fwd_container_abstracted",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/makefile4/rt01_fwd_container_abstracted/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/makefile4/rt01_fwd_container_abstracted/traefik.mk",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/makefile4/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "makefile6",
+      "sample_type": "makefile",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "malware1",
+      "sample_type": "malware",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "malware2",
+      "sample_type": "malware",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "malware3",
+      "sample_type": "malware",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "malware4",
+      "sample_type": "malware",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "malware5",
+      "sample_type": "malware",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "malware6",
+      "sample_type": "malware",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 137,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/malware6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/malware6.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/malware6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/malware6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/malware6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/malware6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/malware6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/malware6/rt01_bwd_basic_state/gen_susp_obfuscation.yar",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/malware6/rt01_fwd_score_recalibrated_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/malware6/rt01_fwd_score_recalibrated_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/malware6/rt01_fwd_score_recalibrated_state/gen_susp_obfuscation.yar",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/malware6/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "mathlean1",
+      "sample_type": "mathlean",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 171,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/anchorpatch_v2/mathlean1.ckpt.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/anchorpatch_v2/mathlean1.jsonl",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/mathlean1",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/mathlean1/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/mathlean1/rt01_bwd_basic_state/SumTwoSquares.lean",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/mathlean1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/mathlean1/rt01_fwd_cpx_dep_subsections_state",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/mathlean1/rt01_fwd_cpx_dep_subsections_state/SumTwoSquares.lean",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/mathlean1/rt01_fwd_cpx_dep_subsections_state/_step.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/mathlean1.task_plan.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/mathlean1.ckpt.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/mathlean1.jsonl"
+      ]
+    },
+    {
+      "sample_id": "mathlean2",
+      "sample_type": "mathlean",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 346,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/mathlean2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/mathlean2.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/mathlean2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/mathlean2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/mathlean2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/mathlean2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/mathlean2/rt01_bwd_basic_state/Derangements.lean",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/mathlean2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/mathlean2/rt01_fwd_explicit_calc_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/mathlean2/rt01_fwd_explicit_calc_state/Derangements.lean",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/mathlean2/rt01_fwd_explicit_calc_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/mathlean2/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "mathlean3",
+      "sample_type": "mathlean",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 34,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/anchorpatch_v2_2/mathlean3.ckpt.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/anchorpatch_v2_2/mathlean3.jsonl",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt01_bwd_basic_state/ConvexFunc.lean",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt01_fwd_bernoulli_namespace_state",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt01_fwd_bernoulli_namespace_state/ConvexFunc.lean",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt01_fwd_bernoulli_namespace_state/_step.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt02_bwd_basic_state/ConvexFunc.lean",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2_2/mathlean3/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "mathlean4",
+      "sample_type": "mathlean",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "mathlean5",
+      "sample_type": "mathlean",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "mathlean6",
+      "sample_type": "mathlean",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "molecule1",
+      "sample_type": "molecule",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "molecule2",
+      "sample_type": "molecule",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 138,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/molecule2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/molecule2.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/molecule2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/molecule2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/molecule2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/molecule2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/molecule2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/molecule2/rt01_bwd_basic_state/molecules.sdf",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/molecule2/rt01_fwd_fema_screened_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/molecule2/rt01_fwd_fema_screened_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/molecule2/rt01_fwd_fema_screened_state/molecules.sdf",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/molecule2/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "molecule3",
+      "sample_type": "molecule",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "molecule4",
+      "sample_type": "molecule",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "molecule5",
+      "sample_type": "molecule",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "molecule6",
+      "sample_type": "molecule",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 291,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/molecule6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/molecule6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/molecule6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6/rt01_bwd_basic_state/molecules.sdf",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6/rt01_fwd_heteroatom_split_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6/rt01_fwd_heteroatom_split_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6/rt01_fwd_heteroatom_split_state/carbocyclic.sdf",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6/rt01_fwd_heteroatom_split_state/compound_index.csv",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/molecule6/rt01_fwd_heteroatom_split_state/heterocyclic.sdf"
+      ]
+    },
+    {
+      "sample_id": "musicsheet1",
+      "sample_type": "musicsheet",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "musicsheet2",
+      "sample_type": "musicsheet",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 364,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/musicsheet2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/musicsheet2.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/musicsheet2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/musicsheet2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/musicsheet2",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/musicsheet2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/musicsheet2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/musicsheet2/rt01_bwd_basic_state/ragtime_piano.ly",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/musicsheet2/rt01_fwd_split_strains_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/musicsheet2/rt01_fwd_split_strains_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/musicsheet2/rt01_fwd_split_strains_state/intro.ly",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/musicsheet2/rt01_fwd_split_strains_state/strain_a.ly"
+      ]
+    },
+    {
+      "sample_id": "musicsheet3",
+      "sample_type": "musicsheet",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "musicsheet4",
+      "sample_type": "musicsheet",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "musicsheet5",
+      "sample_type": "musicsheet",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 35,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/musicsheet5.task_plan.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/musicsheet5.ckpt.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/musicsheet5.jsonl",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5/rt01_bwd_basic_state/koto_traditional.ly",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5/rt01_fwd_cpx_theme_sections_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5/rt01_fwd_cpx_theme_sections_state/_step.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5/rt01_fwd_cpx_theme_sections_state/koto_traditional.ly",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/musicsheet5/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "musicsheet6",
+      "sample_type": "musicsheet",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 1,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/musicsheet6.task_plan.json"
+      ]
+    },
+    {
+      "sample_id": "obj3d1",
+      "sample_type": "obj3d",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "obj3d2",
+      "sample_type": "obj3d",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "obj3d3",
+      "sample_type": "obj3d",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "obj3d4",
+      "sample_type": "obj3d",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "obj3d5",
+      "sample_type": "obj3d",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "obj3d6",
+      "sample_type": "obj3d",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "protein1",
+      "sample_type": "protein",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 382,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/protein1.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/protein1.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/protein1",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/protein1",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/protein1",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/protein1/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/protein1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/protein1/rt01_bwd_basic_state/structure.pdb",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/protein1/rt01_fwd_seqcryst_extracted",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/protein1/rt01_fwd_seqcryst_extracted/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/protein1/rt01_fwd_seqcryst_extracted/crystal_params.txt",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/protein1/rt01_fwd_seqcryst_extracted/sequence.fasta"
+      ]
+    },
+    {
+      "sample_id": "protein2",
+      "sample_type": "protein",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "protein3",
+      "sample_type": "protein",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "protein4",
+      "sample_type": "protein",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "protein5",
+      "sample_type": "protein",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "protein6",
+      "sample_type": "protein",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "python1",
+      "sample_type": "python",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "python2",
+      "sample_type": "python",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 162,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/python2.task_plan.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/python2.ckpt.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/python2.jsonl",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2/rt01_bwd_basic_state/relativedelta.py",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2/rt01_fwd_cpx_computed_constants_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2/rt01_fwd_cpx_computed_constants_state/_step.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2/rt01_fwd_cpx_computed_constants_state/relativedelta.py",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/python2/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "python3",
+      "sample_type": "python",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 1,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/python3.task_plan.json"
+      ]
+    },
+    {
+      "sample_id": "python4",
+      "sample_type": "python",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "python5",
+      "sample_type": "python",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 268,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/python5.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/python5.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/python5",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5/rt01_bwd_basic_state/patterns.py",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5/rt01_fwd_split_files",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5/rt01_fwd_split_files/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5/rt01_fwd_split_files/filters.py",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5/rt01_fwd_split_files/matchers.py",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/python5/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "python6",
+      "sample_type": "python",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "python7",
+      "sample_type": "python",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 342,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/python7.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/python7.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/python7",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/python7",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/python7",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/python7/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/python7/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/python7/rt01_bwd_basic_state/calculator.py",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/python7/rt01_fwd_variables",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/python7/rt01_fwd_variables/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/python7/rt01_fwd_variables/calculator.py",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/python7/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "quantum1",
+      "sample_type": "quantum",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "quantum2",
+      "sample_type": "quantum",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 640,
+      "evidence_examples": [
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/quantum2.ckpt.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/quantum2.jsonl",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/anchorpatch_v2/quantum2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/fullrewrite/quantum2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/quantum2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/quantum2/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/quantum2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/quantum2/rt01_bwd_basic_state/msd.qasm",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/quantum2/rt01_fwd_gate_count_sorted_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/quantum2/rt01_fwd_gate_count_sorted_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/quantum2/rt01_fwd_gate_count_sorted_state/msd.qasm",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/quantum2/rt01_fwd_gate_count_sorted_state/subroutine_order.txt"
+      ]
+    },
+    {
+      "sample_id": "quantum3",
+      "sample_type": "quantum",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "quantum4",
+      "sample_type": "quantum",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 198,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/quantum4.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/quantum4.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/quantum4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/quantum4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/quantum4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/quantum4/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/quantum4/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/quantum4/rt01_bwd_basic_state/ipe.qasm",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/quantum4/rt01_bwd_basic_state/rus.qasm",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/quantum4/rt01_bwd_basic_state/vqe.qasm",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/quantum4/rt01_fwd_extern_interface_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/quantum4/rt01_fwd_extern_interface_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "quantum5",
+      "sample_type": "quantum",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "quantum6",
+      "sample_type": "quantum",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 420,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/quantum6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/quantum6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/quantum6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6/rt01_bwd_basic_state/Simple1dIsingOrder1.qasm",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6/rt01_bwd_basic_state/adder.qasm",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6/rt01_bwd_basic_state/t1.qasm",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6/rt01_fwd_discipline_prefixed_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6/rt01_fwd_discipline_prefixed_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/quantum6/rt01_fwd_discipline_prefixed_state/arith_ripple_carry.qasm"
+      ]
+    },
+    {
+      "sample_id": "recipe1",
+      "sample_type": "recipe",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "robotics1",
+      "sample_type": "robotics",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "robotics2",
+      "sample_type": "robotics",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 280,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/robotics2.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/robotics2.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/robotics2",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2/rt01_bwd_basic_state/robot.urdf",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2/rt01_fwd_mesh_tokens_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2/rt01_fwd_mesh_tokens_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2/rt01_fwd_mesh_tokens_state/mesh_registry.yaml",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2/rt01_fwd_mesh_tokens_state/robot.urdf",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/robotics2/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "robotics3",
+      "sample_type": "robotics",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "satellite1",
+      "sample_type": "satellite",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "satellite2",
+      "sample_type": "satellite",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "satellite3",
+      "sample_type": "satellite",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "satellite4",
+      "sample_type": "satellite",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "satellite5",
+      "sample_type": "satellite",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "satellite6",
+      "sample_type": "satellite",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 131,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/satellite6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/satellite6.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/satellite6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/satellite6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/satellite6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/satellite6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/satellite6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/satellite6/rt01_bwd_basic_state/satellites.tle",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/satellite6/rt01_fwd_name_standardized_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/satellite6/rt01_fwd_name_standardized_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/satellite6/rt01_fwd_name_standardized_state/satellites.tle",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/satellite6/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "screenplay1",
+      "sample_type": "screenplay",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 260,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/screenplay1.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/screenplay1.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/screenplay1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1/rt01_bwd_basic_state/screenplay.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1/rt01_fwd_extracted_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1/rt01_fwd_extracted_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1/rt01_fwd_extracted_state/screenplay.txt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/screenplay1/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "screenplay2",
+      "sample_type": "screenplay",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 162,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/screenplay2.task_plan.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/screenplay2.ckpt.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/screenplay2.jsonl",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2/rt01_bwd_basic_state/the_sun.txt",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2/rt01_fwd_blocking_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2/rt01_fwd_blocking_state/_step.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2/rt01_fwd_blocking_state/the_sun.txt",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/screenplay2/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "screenplay3",
+      "sample_type": "screenplay",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 34,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/anchorpatch_v2/screenplay3.ckpt.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/anchorpatch_v2/screenplay3.jsonl",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/anchorpatch_v2_2/screenplay3.ckpt.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/anchorpatch_v2_2/screenplay3.jsonl",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/screenplay3",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/screenplay3/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/screenplay3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/screenplay3/rt01_bwd_basic_state/defeat.txt",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/screenplay3/rt01_fwd_beats_state",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/screenplay3/rt01_fwd_beats_state/_step.json",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/screenplay3/rt01_fwd_beats_state/defeat.txt",
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/docs/anchorpatch_v2/screenplay3/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "screenplay4",
+      "sample_type": "screenplay",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "screenplay5",
+      "sample_type": "screenplay",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "screenplay6",
+      "sample_type": "screenplay",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 610,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/screenplay6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/anchorpatch_c10_hybrid/screenplay6.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/api_raw/anchorpatch_c10_hybrid/screenplay6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6/rt01_bwd_basic_state/the_first_and_the_last.txt",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6/rt01_fwd_relationship_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6/rt01_fwd_relationship_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6/rt01_fwd_relationship_state/the_first_and_the_last.txt",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_ap_failure_output_file_fallback/docs/anchorpatch_c10_hybrid/screenplay6/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "slides1",
+      "sample_type": "slides",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "spreadsheet1",
+      "sample_type": "spreadsheet",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "spreadsheet2",
+      "sample_type": "spreadsheet",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "spreadsheet3",
+      "sample_type": "spreadsheet",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "spreadsheet4",
+      "sample_type": "spreadsheet",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "spreadsheet5",
+      "sample_type": "spreadsheet",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 360,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/spreadsheet5.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/spreadsheet5.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/spreadsheet5",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5/rt01_bwd_basic_state/launches.csv",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5/rt01_fwd_country_split",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5/rt01_fwd_country_split/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5/rt01_fwd_country_split/china.csv",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5/rt01_fwd_country_split/europe.csv",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/spreadsheet5/rt01_fwd_country_split/india.csv"
+      ]
+    },
+    {
+      "sample_id": "spreadsheet6",
+      "sample_type": "spreadsheet",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "starcatalog1",
+      "sample_type": "starcatalog",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "starcatalog2",
+      "sample_type": "starcatalog",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 1,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/starcatalog2.task_plan.json"
+      ]
+    },
+    {
+      "sample_id": "starcatalog3",
+      "sample_type": "starcatalog",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 74,
+      "evidence_examples": [
+        "anchorpatch/exp_20260620_suitable-ceiling-5dom/starcatalog3.task_plan.json",
+        "anchorpatch/exp_ap8_rt10/anchorpatch_v2/starcatalog3.ckpt.json",
+        "anchorpatch/exp_ap8_rt10/anchorpatch_v2/starcatalog3.jsonl",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/starcatalog3",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/starcatalog3/rt01_bwd_basic_state",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/starcatalog3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/starcatalog3/rt01_bwd_basic_state/open_clusters.xml",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/starcatalog3/rt01_fwd_age_classification_sorted_state",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/starcatalog3/rt01_fwd_age_classification_sorted_state/_step.json",
+        "anchorpatch/exp_ap8_rt10/docs/anchorpatch_v2/starcatalog3/rt01_fwd_age_classification_sorted_state/open_clusters.xml",
+        "anchorpatch/exp_ap8_rt10/docs/fullrewrite/starcatalog3",
+        "anchorpatch/exp_ap8_rt10/docs/fullrewrite/starcatalog3/rt01_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "starcatalog4",
+      "sample_type": "starcatalog",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 129,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/starcatalog4.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/starcatalog4.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/starcatalog4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/starcatalog4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/starcatalog4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/starcatalog4/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/starcatalog4/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/starcatalog4/rt01_bwd_basic_state/rosat_sources.xml",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/starcatalog4/rt01_fwd_hardness_classified_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/starcatalog4/rt01_fwd_hardness_classified_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/starcatalog4/rt01_fwd_hardness_classified_state/rosat_sources.xml",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/starcatalog4/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "starcatalog5",
+      "sample_type": "starcatalog",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "starcatalog6",
+      "sample_type": "starcatalog",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 265,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/starcatalog6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/starcatalog6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/starcatalog6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6/rt01_bwd_basic_state/atnf_pulsars.xml",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6/rt01_fwd_binary_isolated_split_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6/rt01_fwd_binary_isolated_split_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6/rt01_fwd_binary_isolated_split_state/atnf_pulsars.xml",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/starcatalog6/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "subtitles2",
+      "sample_type": "subtitles",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "subtitles3",
+      "sample_type": "subtitles",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 316,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/subtitles3.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/subtitles3.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/subtitles3",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3/rt01_bwd_basic_state/apollo_11_moon.srt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3/rt01_fwd_milestone_split",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3/rt01_fwd_milestone_split/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3/rt01_fwd_milestone_split/milestone_order.csv",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3/rt01_fwd_milestone_split/phase_goddard_center.srt",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/subtitles3/rt01_fwd_milestone_split/phase_jfk_speech.srt"
+      ]
+    },
+    {
+      "sample_id": "subtitles4",
+      "sample_type": "subtitles",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "subtitles5",
+      "sample_type": "subtitles",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "subtitles6",
+      "sample_type": "subtitles",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "transit1",
+      "sample_type": "transit",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "transit2",
+      "sample_type": "transit",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "transit3",
+      "sample_type": "transit",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "transit5",
+      "sample_type": "transit",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "translation1",
+      "sample_type": "translation",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "translation2",
+      "sample_type": "translation",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "translation3",
+      "sample_type": "translation",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "translation4",
+      "sample_type": "translation",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "dev20_20260625",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 170,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/translation4.ckpt.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/anchorpatch_c10_hybrid/translation4.jsonl",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/anchorpatch_c10_hybrid/translation4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/api_raw/fullrewrite/translation4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/translation4",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/translation4/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/translation4/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/translation4/rt01_fwd_msgid_length_ranked_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/translation4/rt01_fwd_msgid_length_ranked_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/translation4/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/translation4/rt02_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260625_minimax_m3_dev20_c10_devfull10_eval/docs/anchorpatch_c10_hybrid/translation4/rt02_fwd_completion_triage_state"
+      ]
+    },
+    {
+      "sample_id": "translation5",
+      "sample_type": "translation",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "translation6",
+      "sample_type": "translation",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "treebank1",
+      "sample_type": "treebank",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "treebank2",
+      "sample_type": "treebank",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "treebank3",
+      "sample_type": "treebank",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 1536,
+      "evidence_examples": [
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/treebank3.ckpt.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/treebank3.jsonl",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/anchorpatch_v2/treebank3",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/fullrewrite/treebank3",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/treebank3",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/treebank3/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/treebank3/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/treebank3/rt01_bwd_basic_state/treebank.conllu",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/treebank3/rt01_fwd_topic_sections",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/treebank3/rt01_fwd_topic_sections/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/treebank3/rt01_fwd_topic_sections/background.conllu",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/treebank3/rt01_fwd_topic_sections/headline.conllu"
+      ]
+    },
+    {
+      "sample_id": "treebank4",
+      "sample_type": "treebank",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "treebank5",
+      "sample_type": "treebank",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "treebank6",
+      "sample_type": "treebank",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 283,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/treebank6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/treebank6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/treebank6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6/rt01_bwd_basic_state/treebank.conllu",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6/rt01_fwd_lemma_uppercased_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6/rt01_fwd_lemma_uppercased_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6/rt01_fwd_lemma_uppercased_state/treebank.conllu",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/treebank6/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "vector2",
+      "sample_type": "vector",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 482,
+      "evidence_examples": [
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/vector2.ckpt.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/anchorpatch_v2/vector2.jsonl",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/anchorpatch_v2/vector2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/api_raw/fullrewrite/vector2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/vector2",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/vector2/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/vector2/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/vector2/rt01_bwd_basic_state/state_diagram.svg",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/vector2/rt01_fwd_topology_sorted_state",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/vector2/rt01_fwd_topology_sorted_state/_step.json",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/vector2/rt01_fwd_topology_sorted_state/state_diagram.svg",
+        "anchorpatch/exp_20260624_promptgen10__baseline/docs/anchorpatch_v2/vector2/rt02_bwd_basic_state"
+      ]
+    },
+    {
+      "sample_id": "vector5",
+      "sample_type": "vector",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "vector6",
+      "sample_type": "vector",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "fresh_holdout30",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 266,
+      "evidence_examples": [
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/vector6.ckpt.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/anchorpatch_v2/vector6.jsonl",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/api_raw/anchorpatch_v2/vector6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6/rt01_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6/rt01_bwd_basic_state/system_diagram.svg",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6/rt01_fwd_fiber_band_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6/rt01_fwd_fiber_band_state/_step.json",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6/rt01_fwd_fiber_band_state/system_diagram.svg",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6/rt02_bwd_basic_state",
+        "anchorpatch/runs/promptgen_20260624_minimax_m3_holdout30_ap_v21_c15/docs/anchorpatch_v2/vector6/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "weather1",
+      "sample_type": "weather",
+      "status": "reserved_holdout_candidate",
+      "unavailable_reason": null,
+      "uses": [
+        "holdout_reserve_20260625"
+      ],
+      "first_exposure_local": "2026-06-25",
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "weather2",
+      "sample_type": "weather",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "weather3",
+      "sample_type": "weather",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    },
+    {
+      "sample_id": "weather4",
+      "sample_type": "weather",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "original_frozen10",
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "2026-06-24",
+      "evidence_count": 490,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/weather4.task_plan.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/weather4.ckpt.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/anchorpatch_v2/weather4.jsonl",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4/rt01_bwd_basic_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4/rt01_bwd_basic_state/_step.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4/rt01_bwd_basic_state/bulletin.txt",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4/rt01_fwd_density_altitude_sorted",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4/rt01_fwd_density_altitude_sorted/_step.json",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4/rt01_fwd_density_altitude_sorted/bulletin.txt",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4/rt02_bwd_basic_state",
+        "anchorpatch/exp_20260623_v21_deepseek_flash_5way/docs/anchorpatch_v2/weather4/rt02_bwd_basic_state/_step.json"
+      ]
+    },
+    {
+      "sample_id": "weather5",
+      "sample_type": "weather",
+      "status": "contaminated",
+      "unavailable_reason": null,
+      "uses": [
+        "experiment_artifact_path"
+      ],
+      "first_exposure_local": "pre-2026-06-25-artifact-scan",
+      "evidence_count": 1,
+      "evidence_examples": [
+        "anchorpatch/exp_20260621_suitable-ceiling-set2/weather5.task_plan.json"
+      ]
+    },
+    {
+      "sample_id": "weather6",
+      "sample_type": "weather",
+      "status": "clean_candidate",
+      "unavailable_reason": null,
+      "uses": [],
+      "first_exposure_local": null,
+      "evidence_count": 0,
+      "evidence_examples": []
+    }
+  ]
+}

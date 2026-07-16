@@ -1,0 +1,111 @@
+{
+  "canonical_scope_id": "complete83_source_chains",
+  "comparisons": [],
+  "experiment_id": "exp_20260713_frbaseline_v2_rerun",
+  "methods": {
+    "fullrewrite": {
+      "backward_rows": 830,
+      "commit_outcomes": {
+        "not_applicable": 1572,
+        "unchanged": 88
+      },
+      "committed_rows": 1660,
+      "critical_failures": {
+        "count": 85,
+        "theta": 0.1,
+        "transitions": 747
+      },
+      "execution_status": {
+        "degraded": 183,
+        "failure": 401,
+        "success": 1076
+      },
+      "failure_labels": {
+        "content_regression": 186,
+        "empty_response": 172,
+        "evaluator_error": 23,
+        "near_empty_response": 112,
+        "rate_limit": 4,
+        "text_truncated": 87
+      },
+      "latency_ms": {
+        "count": 1660,
+        "max": 6026564,
+        "mean": 74224.742,
+        "median": 18629.5
+      },
+      "mean_backward_rs": 0.1447024845076005,
+      "preservation_violations": {
+        "max": null,
+        "recorded_rows": 0,
+        "total": 0,
+        "unknown_rows": 1660
+      },
+      "routes": {
+        "fullrewrite": 1660
+      },
+      "rs_at_k": {
+        "1": 0.35736894642579986,
+        "10": 0.11516026332830478,
+        "5": 0.11667436940894647
+      },
+      "tokens": {
+        "input": 2292013,
+        "input_plus_output": 12426967,
+        "output": 10134954,
+        "semantic_call_total": 12426967,
+        "total": 12426967
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": null,
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 830,
+    "canonical_committed_rows": 1660,
+    "canonical_samples": 83,
+    "committed_rows": 1666,
+    "excluded_samples": [
+      {
+        "reason": "Incomplete or missing result trajectory; source-only canonical scope requires a complete chain.",
+        "sample_id": "musicsheet3"
+      },
+      {
+        "reason": "Incomplete or missing result trajectory; source-only canonical scope requires a complete chain.",
+        "sample_id": "transit2"
+      }
+    ],
+    "planned_rows": 1700,
+    "planned_samples": 85
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "Baseline/exp_20260713_frbaseline_v2_rerun",
+    "Baseline/FR+Official/README.md",
+    "Baseline/FR+Official/source_manifest.csv",
+    "Baseline/exp_20260713_frbaseline_v2_rerun/RESUME.md"
+  ],
+  "verification": {
+    "canonical_backward_rows": 830,
+    "exceptions": [
+      "No completed independent result replay is recorded for this rerun source.",
+      "transit2 is partial and musicsheet3 has no result file; neither is selected into FR+Official."
+    ],
+    "log": null,
+    "replayed_backward_rows": null,
+    "source": "Baseline/build_fr_plus_official.py",
+    "status": "not_run",
+    "structural_validation_status": "pass"
+  }
+}

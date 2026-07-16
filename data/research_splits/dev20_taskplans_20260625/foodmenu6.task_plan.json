@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "house_specials",
+    "kitchen_timing",
+    "cpx_sauce_index_state",
+    "meatless_tuesday",
+    "cpx_prohibition_prep_state",
+    "shellfish_safe",
+    "fish_detailed",
+    "full_allergen_review",
+    "pretheater",
+    "cpx_sauce_index_state"
+  ]
+}

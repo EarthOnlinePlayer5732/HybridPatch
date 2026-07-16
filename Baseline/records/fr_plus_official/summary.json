@@ -1,0 +1,116 @@
+{
+  "canonical_scope_id": "logical233",
+  "comparisons": [],
+  "experiment_id": "fr_plus_official",
+  "methods": {
+    "fullrewrite": {
+      "backward_rows": 2330,
+      "commit_outcomes": {
+        "not_applicable": 4555,
+        "unchanged": 105
+      },
+      "committed_rows": 4660,
+      "critical_failures": {
+        "count": 162,
+        "theta": 0.1,
+        "transitions": 2097
+      },
+      "execution_status": {
+        "degraded": 258,
+        "failure": 461,
+        "success": 3941
+      },
+      "failure_labels": {
+        "content_regression": 279,
+        "empty_response": 187,
+        "evaluator_error": 33,
+        "near_empty_response": 120,
+        "rate_limit": 4,
+        "text_truncated": 96
+      },
+      "latency_ms": {
+        "count": 4660,
+        "max": 6026564,
+        "mean": 102731.719,
+        "median": 49141.0
+      },
+      "mean_backward_rs": 0.5644413609555615,
+      "preservation_violations": {
+        "max": null,
+        "recorded_rows": 0,
+        "total": 0,
+        "unknown_rows": 4660
+      },
+      "routes": {
+        "fullrewrite": 4660
+      },
+      "rs_at_k": {
+        "1": 0.7348326941120181,
+        "10": 0.5075834697891178,
+        "5": 0.5501212351063606
+      },
+      "tokens": {
+        "input": 14787544,
+        "input_plus_output": 71420901,
+        "output": 56633357,
+        "semantic_call_total": 71420901,
+        "total": 71420901
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": {
+    "cohen_d": 0.6153227978570159,
+    "delta_hybridpatch_minus_fullrewrite": 0.2616616798973263,
+    "fullrewrite_mean": 0.5637799526027186,
+    "hybridpatch_mean": 0.825441632500045,
+    "interpretation": "This is the result aligned with the paper's stated non-streaming one-shot baseline processing policy.",
+    "machine_source_ref": "Baseline/FR+Official/summary.json",
+    "official_replacements_in_scope": 16,
+    "p": 2.5415324699725913e-28,
+    "paired_backward_rows": 380,
+    "protocol_condition": "When the paper defines FullRewrite by the MiniMax official non-streaming one-shot response policy, use the FR+Official strict38 comparison.",
+    "scope_id": "strict38_paper_protocol",
+    "source_ref": "Baseline/FR+Official/val40_comparison.md",
+    "status": "paper_protocol_aligned_available_estimate",
+    "validity_caveat": "It remains a mixed-source post-hoc estimate because only 16 strict38 FullRewrite chains have complete official reruns; report this caveat alongside the result."
+  },
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 2330,
+    "canonical_committed_rows": 4660,
+    "canonical_samples": 233,
+    "committed_rows": 4660,
+    "excluded_samples": [],
+    "planned_rows": 4660,
+    "planned_samples": 233
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "Baseline/FR+Official",
+    "Baseline/FR+Official/README.md",
+    "Baseline/FR+Official/summary.json",
+    "Baseline/FR+Official/val40_comparison.md"
+  ],
+  "verification": {
+    "canonical_backward_rows": 2330,
+    "derivation_validation_status": "pass",
+    "exceptions": [
+      "Independent result replay was not rerun; the view inherits source results and validates file/task-plan hashes plus complete-chain structure."
+    ],
+    "log": null,
+    "replayed_backward_rows": null,
+    "source": "Baseline/build_fr_plus_official.py",
+    "status": "not_run"
+  }
+}

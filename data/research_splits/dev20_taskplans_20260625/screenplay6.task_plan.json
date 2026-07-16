@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "relationship_state",
+    "set_state",
+    "cpx_prosecution_brief_state",
+    "cpx_cue_sides_state",
+    "evidence_state",
+    "timed_state",
+    "legal_state",
+    "exchanges_state",
+    "relationship_state",
+    "cpx_cue_sides_state"
+  ]
+}

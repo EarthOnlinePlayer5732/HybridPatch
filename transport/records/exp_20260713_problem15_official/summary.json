@@ -1,0 +1,182 @@
+{
+  "canonical_scope_id": "committed_partial_11_samples",
+  "comparisons": [
+    {
+      "cohen_d": 1.4713714970255247,
+      "delta_a_minus_b": 0.6553184102424422,
+      "headline": false,
+      "mean_a": 0.977635573483656,
+      "mean_b": 0.32231716324121384,
+      "method_a": "hybridpatch",
+      "method_b": "fullrewrite",
+      "p": 0.0022440457868919492,
+      "paired_backward_rows": 9,
+      "scope_id": "committed_partial_11_samples",
+      "t": 4.414114491076575
+    }
+  ],
+  "experiment_id": "exp_20260713_problem15_official",
+  "methods": {
+    "fullrewrite": {
+      "backward_rows": 100,
+      "commit_outcomes": {
+        "not_applicable": 185,
+        "unchanged": 15
+      },
+      "committed_rows": 200,
+      "critical_failures": {
+        "count": 12,
+        "theta": 0.1,
+        "transitions": 89
+      },
+      "execution_status": {
+        "degraded": 29,
+        "failure": 59,
+        "success": 112
+      },
+      "failure_labels": {
+        "content_regression": 27,
+        "empty_response": 21,
+        "evaluator_error": 4,
+        "near_empty_response": 20,
+        "text_truncated": 16
+      },
+      "latency_ms": {
+        "count": 200,
+        "max": 2675208,
+        "mean": 45892.41,
+        "median": 11430.0
+      },
+      "mean_backward_rs": 0.08178275684128837,
+      "preservation_violations": {
+        "max": null,
+        "recorded_rows": 0,
+        "total": 0,
+        "unknown_rows": 200
+      },
+      "routes": {
+        "fullrewrite": 200
+      },
+      "rs_at_k": {
+        "1": 0.3438053097345133,
+        "10": 0.004185990056103372,
+        "5": 0.07898892112216925
+      },
+      "tokens": {
+        "input": 262041,
+        "input_plus_output": 1081173,
+        "output": 819132,
+        "semantic_call_total": 1081173,
+        "total": 1081173
+      }
+    },
+    "hybridpatch": {
+      "backward_rows": 9,
+      "commit_outcomes": {
+        "applied": 7,
+        "kept_context": 6,
+        "unchanged": 5
+      },
+      "committed_rows": 18,
+      "critical_failures": {
+        "count": 0,
+        "theta": 0.1,
+        "transitions": 4
+      },
+      "execution_status": {
+        "degraded": 6,
+        "success": 12
+      },
+      "failure_labels": {
+        "empty_response": 6
+      },
+      "latency_ms": {
+        "count": 18,
+        "max": 398833,
+        "mean": 113324.556,
+        "median": 44307.5
+      },
+      "mean_backward_rs": 0.977635573483656,
+      "preservation_violations": {
+        "max": 0,
+        "recorded_rows": 12,
+        "total": 0,
+        "unknown_rows": 6
+      },
+      "routes": {
+        "bounded_rewrite": 5,
+        "bulk_patch": 2,
+        "hybridpatch_protocol_failure_kept_context": 6,
+        "local_patch": 5
+      },
+      "rs_at_k": {
+        "1": 0.999783326309875,
+        "10": null,
+        "5": null
+      },
+      "tokens": {
+        "input": 313546,
+        "input_plus_output": 639797,
+        "output": 326251,
+        "semantic_call_total": 639797,
+        "total": 639797
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": null,
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 109,
+    "canonical_committed_rows": 218,
+    "canonical_samples": 11,
+    "committed_rows": 218,
+    "excluded_samples": [
+      {
+        "reason": "No committed result rows.",
+        "sample_id": "foodmenu6"
+      },
+      {
+        "reason": "No committed result rows.",
+        "sample_id": "mathlean2"
+      },
+      {
+        "reason": "No committed result rows.",
+        "sample_id": "satellite6"
+      },
+      {
+        "reason": "No committed result rows.",
+        "sample_id": "translation4"
+      }
+    ],
+    "planned_rows": 600,
+    "planned_samples": 15
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "transport/exp_20260713_problem15_official",
+    "transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md",
+    "Baseline/FR+Official/source_manifest.csv",
+    "transport/exp_20260713_problem15_official/RESUME.md"
+  ],
+  "verification": {
+    "canonical_backward_rows": 109,
+    "exceptions": [
+      "The campaign is intentionally frozen partial and must not be analyzed as a complete paired experiment."
+    ],
+    "log": null,
+    "replayed_backward_rows": 109,
+    "source": "docs/restructure_final_report.md",
+    "status": "pass"
+  }
+}

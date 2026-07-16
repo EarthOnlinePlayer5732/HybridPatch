@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "elevation_classified",
+    "reversed_direction",
+    "hourly_split",
+    "via_legs",
+    "geojson_format",
+    "distance_annotated",
+    "elevation_classified",
+    "geojson_format",
+    "hourly_split",
+    "via_legs"
+  ]
+}

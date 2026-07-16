@@ -1,0 +1,621 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260710_frbaseline234
+record_kind: run
+owner: Baseline
+title: Frozen one-shot FullRewrite baseline; canonical scope excludes python1.
+purpose: Frozen one-shot FullRewrite baseline; canonical scope excludes python1.
+lifecycle_status: complete
+evidence_role: baseline
+claim_eligibility: canonical
+source:
+  experiment_root_ref: Baseline/exp_20260710_frbaseline234
+  run_metadata_schema: anchorpatch.run_metadata/1
+  raw_artifact_id: exp_20260710_frbaseline234-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 1
+  fingerprints:
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: 291ec60aa8df
+    hybrid_schema.py: edbd2517894a
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: a4ea477217b0
+    hybrid_gate.py: 3143bd4b3d0a
+  version_reference: Baseline/FR冻结计划.md
+execution:
+  working_directory_ref: null
+  command_templates:
+  - python src\experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_frbaseline234 --notes FR frozen baseline
+    one-shot 234, no rewind, key=<key_label>
+  - python src\experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260710_frbaseline234 --notes FR frozen baseline
+    python1 rerun after utils_eval reconstruction + win devnull shim + Levenshtein install, key=<key_label>
+  methods:
+  - fullrewrite
+  arms:
+    fullrewrite: live_one_shot_no_rewind
+  seed: 42
+  round_trips: 10
+  distractor: false
+  comparison_policy: 233-sample frozen baseline; archive analysis/comparison.md is an outdated 234-sample
+    diagnostic
+model:
+  name: minimax-m3
+  provider: null
+  base_url: null
+  request_url: null
+  transport: null
+  transport_revision: null
+  thinking_mode: null
+  max_tokens: null
+  temperature: null
+protocol:
+  declared_campaign_revision: null
+  observed_valid_envelope_revisions: []
+  prompt_revision: null
+  prompt_fingerprint: 81668ab72e5d
+  executor_fingerprint: a4ea477217b0
+  runner_fingerprint: 291ec60aa8df
+data:
+  dataset: DELEGATE-52
+  split: 233-sample frozen FullRewrite baseline; python1 excluded
+  planned_sample_ids:
+  - accounting1
+  - accounting2
+  - accounting3
+  - accounting4
+  - accounting5
+  - accounting6
+  - audiosyn1
+  - audiosyn4
+  - calendar1
+  - calendar5
+  - chess2
+  - chess3
+  - chess4
+  - chess5
+  - chess6
+  - circuit1
+  - circuit2
+  - circuit4
+  - circuit5
+  - crystal1
+  - crystal4
+  - crystal6
+  - dbschema1
+  - dbschema2
+  - dbschema3
+  - dbschema4
+  - dbschema5
+  - dbschema6
+  - dns1
+  - dns3
+  - docker1
+  - docker2
+  - docker3
+  - docker4
+  - docker5
+  - docker6
+  - earncall1
+  - earncall2
+  - earncall3
+  - earncall4
+  - earncall5
+  - earncall6
+  - edifact1
+  - edifact2
+  - edifact3
+  - edifact6
+  - emails5
+  - emails6
+  - filesystem1
+  - filesystem2
+  - filesystem3
+  - filesystem4
+  - filesystem5
+  - filesystem6
+  - fonteng1
+  - fonteng2
+  - fonteng3
+  - fonteng4
+  - fonteng5
+  - fonteng6
+  - foodmenu1
+  - foodmenu2
+  - foodmenu3
+  - foodmenu4
+  - foodmenu5
+  - foodmenu6
+  - genealogy5
+  - genealogy6
+  - geodata1
+  - geodata2
+  - geodata4
+  - geotrack1
+  - geotrack2
+  - geotrack3
+  - geotrack4
+  - geotrack5
+  - geotrack6
+  - graphviz1
+  - graphviz3
+  - graphviz4
+  - graphviz5
+  - graphviz6
+  - hamradio1
+  - hamradio2
+  - hamradio3
+  - hamradio5
+  - hamradio6
+  - infra1
+  - infra2
+  - infra3
+  - infra4
+  - infra5
+  - infra6
+  - jobboard1
+  - jobboard2
+  - jobboard3
+  - jobboard4
+  - jobboard5
+  - jobboard6
+  - json1
+  - json2
+  - json3
+  - json4
+  - json5
+  - json6
+  - landmarks1
+  - landmarks2
+  - landmarks3
+  - landmarks4
+  - landmarks5
+  - landmarks6
+  - latex1
+  - latex2
+  - latex3
+  - latex4
+  - latex5
+  - latex6
+  - libcatalog2
+  - libcatalog3
+  - libcatalog5
+  - libcatalog6
+  - makefile1
+  - makefile2
+  - makefile3
+  - makefile4
+  - makefile6
+  - malware1
+  - malware2
+  - malware3
+  - malware4
+  - malware5
+  - malware6
+  - mathlean1
+  - mathlean2
+  - mathlean3
+  - mathlean4
+  - mathlean5
+  - mathlean6
+  - molecule1
+  - molecule2
+  - molecule3
+  - molecule4
+  - molecule5
+  - molecule6
+  - musicsheet1
+  - musicsheet2
+  - musicsheet3
+  - musicsheet4
+  - musicsheet5
+  - musicsheet6
+  - obj3d1
+  - obj3d2
+  - obj3d3
+  - obj3d4
+  - obj3d5
+  - obj3d6
+  - protein1
+  - protein2
+  - protein3
+  - protein4
+  - protein5
+  - protein6
+  - python1
+  - python2
+  - python3
+  - python4
+  - python5
+  - python6
+  - python7
+  - quantum1
+  - quantum2
+  - quantum3
+  - quantum4
+  - quantum5
+  - quantum6
+  - recipe1
+  - robotics1
+  - robotics2
+  - robotics3
+  - satellite1
+  - satellite2
+  - satellite3
+  - satellite4
+  - satellite5
+  - satellite6
+  - screenplay1
+  - screenplay2
+  - screenplay3
+  - screenplay4
+  - screenplay5
+  - screenplay6
+  - slides1
+  - spreadsheet1
+  - spreadsheet2
+  - spreadsheet3
+  - spreadsheet4
+  - spreadsheet5
+  - spreadsheet6
+  - starcatalog1
+  - starcatalog2
+  - starcatalog3
+  - starcatalog4
+  - starcatalog5
+  - starcatalog6
+  - subtitles2
+  - subtitles3
+  - subtitles4
+  - subtitles5
+  - subtitles6
+  - transit1
+  - transit2
+  - transit3
+  - transit5
+  - translation1
+  - translation2
+  - translation3
+  - translation4
+  - translation5
+  - translation6
+  - treebank1
+  - treebank2
+  - treebank3
+  - treebank4
+  - treebank5
+  - treebank6
+  - vector2
+  - vector5
+  - vector6
+  - weather1
+  - weather2
+  - weather3
+  - weather4
+  - weather5
+  - weather6
+  canonical_sample_ids:
+  - accounting1
+  - accounting2
+  - accounting3
+  - accounting4
+  - accounting5
+  - accounting6
+  - audiosyn1
+  - audiosyn4
+  - calendar1
+  - calendar5
+  - chess2
+  - chess3
+  - chess4
+  - chess5
+  - chess6
+  - circuit1
+  - circuit2
+  - circuit4
+  - circuit5
+  - crystal1
+  - crystal4
+  - crystal6
+  - dbschema1
+  - dbschema2
+  - dbschema3
+  - dbschema4
+  - dbschema5
+  - dbschema6
+  - dns1
+  - dns3
+  - docker1
+  - docker2
+  - docker3
+  - docker4
+  - docker5
+  - docker6
+  - earncall1
+  - earncall2
+  - earncall3
+  - earncall4
+  - earncall5
+  - earncall6
+  - edifact1
+  - edifact2
+  - edifact3
+  - edifact6
+  - emails5
+  - emails6
+  - filesystem1
+  - filesystem2
+  - filesystem3
+  - filesystem4
+  - filesystem5
+  - filesystem6
+  - fonteng1
+  - fonteng2
+  - fonteng3
+  - fonteng4
+  - fonteng5
+  - fonteng6
+  - foodmenu1
+  - foodmenu2
+  - foodmenu3
+  - foodmenu4
+  - foodmenu5
+  - foodmenu6
+  - genealogy5
+  - genealogy6
+  - geodata1
+  - geodata2
+  - geodata4
+  - geotrack1
+  - geotrack2
+  - geotrack3
+  - geotrack4
+  - geotrack5
+  - geotrack6
+  - graphviz1
+  - graphviz3
+  - graphviz4
+  - graphviz5
+  - graphviz6
+  - hamradio1
+  - hamradio2
+  - hamradio3
+  - hamradio5
+  - hamradio6
+  - infra1
+  - infra2
+  - infra3
+  - infra4
+  - infra5
+  - infra6
+  - jobboard1
+  - jobboard2
+  - jobboard3
+  - jobboard4
+  - jobboard5
+  - jobboard6
+  - json1
+  - json2
+  - json3
+  - json4
+  - json5
+  - json6
+  - landmarks1
+  - landmarks2
+  - landmarks3
+  - landmarks4
+  - landmarks5
+  - landmarks6
+  - latex1
+  - latex2
+  - latex3
+  - latex4
+  - latex5
+  - latex6
+  - libcatalog2
+  - libcatalog3
+  - libcatalog5
+  - libcatalog6
+  - makefile1
+  - makefile2
+  - makefile3
+  - makefile4
+  - makefile6
+  - malware1
+  - malware2
+  - malware3
+  - malware4
+  - malware5
+  - malware6
+  - mathlean1
+  - mathlean2
+  - mathlean3
+  - mathlean4
+  - mathlean5
+  - mathlean6
+  - molecule1
+  - molecule2
+  - molecule3
+  - molecule4
+  - molecule5
+  - molecule6
+  - musicsheet1
+  - musicsheet2
+  - musicsheet3
+  - musicsheet4
+  - musicsheet5
+  - musicsheet6
+  - obj3d1
+  - obj3d2
+  - obj3d3
+  - obj3d4
+  - obj3d5
+  - obj3d6
+  - protein1
+  - protein2
+  - protein3
+  - protein4
+  - protein5
+  - protein6
+  - python2
+  - python3
+  - python4
+  - python5
+  - python6
+  - python7
+  - quantum1
+  - quantum2
+  - quantum3
+  - quantum4
+  - quantum5
+  - quantum6
+  - recipe1
+  - robotics1
+  - robotics2
+  - robotics3
+  - satellite1
+  - satellite2
+  - satellite3
+  - satellite4
+  - satellite5
+  - satellite6
+  - screenplay1
+  - screenplay2
+  - screenplay3
+  - screenplay4
+  - screenplay5
+  - screenplay6
+  - slides1
+  - spreadsheet1
+  - spreadsheet2
+  - spreadsheet3
+  - spreadsheet4
+  - spreadsheet5
+  - spreadsheet6
+  - starcatalog1
+  - starcatalog2
+  - starcatalog3
+  - starcatalog4
+  - starcatalog5
+  - starcatalog6
+  - subtitles2
+  - subtitles3
+  - subtitles4
+  - subtitles5
+  - subtitles6
+  - transit1
+  - transit2
+  - transit3
+  - transit5
+  - translation1
+  - translation2
+  - translation3
+  - translation4
+  - translation5
+  - translation6
+  - treebank1
+  - treebank2
+  - treebank3
+  - treebank4
+  - treebank5
+  - treebank6
+  - vector2
+  - vector5
+  - vector6
+  - weather1
+  - weather2
+  - weather3
+  - weather4
+  - weather5
+  - weather6
+  excluded_samples:
+  - sample_id: python1
+    reason: Evaluator packaging failure; four committed RTs are retained but excluded from the 233-sample
+      baseline.
+  task_plan_source: task plans stored in the baseline archive
+time:
+  started_at_local: '2026-07-10T07:48:32'
+  last_dispatch_started_at_local: '2026-07-11T03:36:03'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: frozen233
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: Baseline/FR冻结计划.md
+  source_report_sha256: 67e22e3ca67d75e4e0521570dd766ddbd625e301146e5b099af671456ac0d70a
+  source_report_embedded: false
+  source_report_embedding_policy: linked_repository_source
+  selection_reason: 233-sample frozen baseline; archive analysis/comparison.md is an outdated 234-sample
+    diagnostic
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: Baseline/FR冻结计划.md
+  role: source_canonical_policy_and_result
+  sha256: 67e22e3ca67d75e4e0521570dd766ddbd625e301146e5b099af671456ac0d70a
+  size_bytes: 16041
+- path: docs/FINDINGS.md
+  role: source_canonical_interpretation
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+- path: Baseline/exp_20260710_frbaseline234/analysis/comparison.md
+  role: outdated_234_sample_diagnostic_only
+  sha256: a9603351e889088db79b9e8f8a8c74b92100d87a14e32e902e45e1219631f4a6
+  size_bytes: 8934
+noncanonical_reports:
+- source_report_ref: docs/FINDINGS.md
+  role: source_canonical_interpretation
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+- source_report_ref: Baseline/exp_20260710_frbaseline234/analysis/comparison.md
+  role: outdated_234_sample_diagnostic_only
+  sha256: a9603351e889088db79b9e8f8a8c74b92100d87a14e32e902e45e1219631f4a6
+  size_bytes: 8934
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: pass
+  replayed_backward_rows: 2330
+  canonical_backward_rows: 2330
+  archive_inclusive_replayed_backward_rows: 2334
+  excluded_replayed_backward_rows: 4
+  source: Baseline/FR冻结计划.md
+  archive_inclusive_source: docs/restructure_final_report.md
+  log: Baseline/exp_20260710_frbaseline234/verify_fr233.stdout.log
+  exceptions:
+  - The linked verifier log covers the 2330 canonical rows; a separate archive-inclusive replay reports
+    2334 rows including four retained python1 rows outside the canonical baseline.
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+- field: model.transport_revision
+  reason: Legacy run metadata did not record a transport revision.
+  impact: Transport semantics must be interpreted from versioned project documentation.
+known_exceptions:
+- The baseline is a dated sample of provider behavior and uses the pre-transport-v3 OpenCode path.
+- run_metadata.jsonl records code fingerprints but not a Git commit.
+raw_manifest_ref: raw_manifest.json

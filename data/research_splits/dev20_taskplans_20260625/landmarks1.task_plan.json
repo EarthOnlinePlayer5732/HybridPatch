@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "geojson_format",
+    "guide_format",
+    "cpx_lookat_state",
+    "district_folders",
+    "cpx_contact_qc_state",
+    "category_split",
+    "evening_split",
+    "accessible_split",
+    "distance_sorted",
+    "cpx_lookat_state"
+  ]
+}

@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "container_abstracted",
+    "webui_split",
+    "cpx_webui_cache_state",
+    "cpx_portability_audit_state",
+    "platforms_manifest",
+    "ldflags_external",
+    "docs_extracted",
+    "category_split",
+    "container_abstracted",
+    "cpx_portability_audit_state"
+  ]
+}

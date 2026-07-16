@@ -1,0 +1,226 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260711_hybridv6val40
+record_kind: run
+owner: HP_V6
+title: HybridPatch/6 validation on val20 plus unused_reserve20, paired with copied frozen FullRewrite
+  rows.
+purpose: HybridPatch/6 validation on val20 plus unused_reserve20, paired with copied frozen FullRewrite
+  rows.
+lifecycle_status: complete
+evidence_role: primary
+claim_eligibility: canonical
+source:
+  experiment_root_ref: HP_V6/exp_20260711_hybridv6val40
+  run_metadata_schema: anchorpatch.run_metadata/1
+  raw_artifact_id: exp_20260711_hybridv6val40-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 1
+  fingerprints:
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: 291ec60aa8df
+    hybrid_schema.py: edbd2517894a
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: a4ea477217b0
+    hybrid_gate.py: 3143bd4b3d0a
+  version_reference: HP_V6/VERSION.md
+execution:
+  working_directory_ref: HP_V6
+  command_templates:
+  - python src\experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir <absolute-path> --notes hybridpatch/6 val40 single-arm
+    campaign vs frozen FR baseline (val20+unused_reserve20), key=<key_label>
+  methods:
+  - hybridpatch
+  - fullrewrite
+  arms:
+    hybridpatch: live_from_frozen_v6_snapshot
+    fullrewrite: copied_frozen_baseline
+  seed: 42
+  round_trips: 10
+  distractor: false
+  comparison_policy: HybridPatch live validation paired with immutable FullRewrite baseline rows
+model:
+  name: minimax-m3
+  provider: null
+  base_url: null
+  request_url: null
+  transport: null
+  transport_revision: null
+  thinking_mode: null
+  max_tokens: null
+  temperature: null
+protocol:
+  declared_campaign_revision: hybridpatch/6
+  observed_valid_envelope_revisions:
+  - hybridpatch/6
+  prompt_revision: null
+  prompt_fingerprint: 81668ab72e5d
+  executor_fingerprint: a4ea477217b0
+  runner_fingerprint: 291ec60aa8df
+data:
+  dataset: DELEGATE-52
+  split: val20 + unused_reserve20
+  planned_sample_ids:
+  - crystal6
+  - docker3
+  - earncall1
+  - emails5
+  - filesystem2
+  - filesystem3
+  - fonteng1
+  - fonteng5
+  - foodmenu1
+  - geodata1
+  - geodata4
+  - geotrack5
+  - geotrack6
+  - hamradio6
+  - jobboard3
+  - json2
+  - json4
+  - landmarks2
+  - landmarks3
+  - libcatalog2
+  - libcatalog5
+  - mathlean4
+  - mathlean5
+  - obj3d2
+  - obj3d5
+  - quantum1
+  - quantum5
+  - robotics1
+  - robotics3
+  - satellite4
+  - screenplay4
+  - screenplay5
+  - spreadsheet1
+  - spreadsheet6
+  - subtitles2
+  - subtitles6
+  - transit1
+  - transit2
+  - treebank2
+  - treebank4
+  canonical_sample_ids:
+  - crystal6
+  - docker3
+  - earncall1
+  - emails5
+  - filesystem2
+  - filesystem3
+  - fonteng1
+  - fonteng5
+  - foodmenu1
+  - geodata1
+  - geodata4
+  - geotrack5
+  - geotrack6
+  - hamradio6
+  - jobboard3
+  - json2
+  - json4
+  - landmarks2
+  - landmarks3
+  - libcatalog2
+  - libcatalog5
+  - mathlean4
+  - mathlean5
+  - obj3d2
+  - obj3d5
+  - quantum1
+  - quantum5
+  - robotics1
+  - robotics3
+  - satellite4
+  - screenplay4
+  - screenplay5
+  - spreadsheet1
+  - spreadsheet6
+  - subtitles2
+  - subtitles6
+  - transit1
+  - transit2
+  - treebank2
+  - treebank4
+  excluded_samples: []
+  task_plan_source: task plans copied byte-for-byte from the frozen FullRewrite baseline
+time:
+  started_at_local: '2026-07-11T04:24:32'
+  last_dispatch_started_at_local: '2026-07-11T05:00:22'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: val40_complete_pairs
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: HP_V6/exp_20260711_hybridv6val40/analysis/comparison.md
+  source_report_sha256: 55f79c232907247b162d6f7ec33d65d9b816b793aa2404652f4b01d03536ed65
+  source_report_embedded: true
+  source_report_embedding_policy: sanitized_snapshot_v1
+  selection_reason: HybridPatch live validation paired with immutable FullRewrite baseline rows
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: HP_V6/exp_20260711_hybridv6val40/analysis/comparison.md
+  role: source_analysis
+  sha256: 55f79c232907247b162d6f7ec33d65d9b816b793aa2404652f4b01d03536ed65
+  size_bytes: 6033
+- path: HP_V6/exp_20260711_hybridv6val40/val40_materialization.json
+  role: split_materialization
+  sha256: 23f37cc0b7f5fb3c26b0f5cc62b725ca13b9f35167d19037581ff2f3f96cfd19
+  size_bytes: 2924
+- path: docs/FINDINGS.md
+  role: mechanism_and_failure_attribution
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+noncanonical_reports:
+- source_report_ref: HP_V6/exp_20260711_hybridv6val40/val40_materialization.json
+  role: split_materialization
+  sha256: 23f37cc0b7f5fb3c26b0f5cc62b725ca13b9f35167d19037581ff2f3f96cfd19
+  size_bytes: 2924
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+- source_report_ref: docs/FINDINGS.md
+  role: mechanism_and_failure_attribution
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: pass
+  replayed_backward_rows: 800
+  canonical_backward_rows: 800
+  source: HP_V6/VERSION.md
+  log: _attic/logs_root/val40_verify.log
+  exceptions: []
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+- field: model.transport_revision
+  reason: Legacy run metadata did not record a transport revision.
+  impact: Transport semantics must be interpreted from versioned project documentation.
+known_exceptions:
+- val20 had prior early-method exposure; unused_reserve20 was fresh to HybridPatch.
+- FullRewrite rows were copied from the frozen baseline rather than run live.
+raw_manifest_ref: raw_manifest.json

@@ -1,0 +1,811 @@
+{
+  "schema": "anchorpatch.research_split_protocol/1",
+  "created_local": "2026-06-25T03:00:04",
+  "workspace": "F:\\Code\\AnchorPatch_goal_promptgen_20260624",
+  "no_api_calls": true,
+  "seeds": {
+    "dev20_seed": 2026062501,
+    "reserve_seed": 2026062502,
+    "holdout_materialization_seed": 2026062503,
+    "task_plan_seed": 42
+  },
+  "sizes": {
+    "dev20": 20,
+    "holdout_reserve": 60,
+    "sealed_holdout_materialized_size": 20
+  },
+  "exclusion_rules": [
+    "exclude contaminated samples from CONTAMINATION_REGISTRY.json",
+    "exclude unsupported generation domains audiosyn and image",
+    "choose holdout reserve before dev20; dev20 cannot draw from reserve",
+    "after any sample is used in smoke/dev/manual analysis, add it to registry before future sealed selection"
+  ],
+  "ap_eligibility_rule_v0": {
+    "inputs_allowed": [
+      "task instruction text",
+      "current file surface statistics",
+      "current file extensions"
+    ],
+    "inputs_forbidden": [
+      "domain name",
+      "sample id",
+      "task id",
+      "target answer",
+      "reference final state",
+      "evaluator score",
+      "historical holdout score"
+    ],
+    "AP_PURE": [
+      "local_edit",
+      "reorder"
+    ],
+    "AP_HYBRID": [
+      "split_or_classify",
+      "merge"
+    ],
+    "CONTROLLED_COMPOSE_OR_FR": [
+      "compose_or_format"
+    ],
+    "UNKNOWN": [
+      "unclassified"
+    ]
+  },
+  "holdout_materialization_rule": [
+    "after a candidate passes dev-full, start from holdout_reserve_samples in listed order",
+    "remove any sample newly marked contaminated after this file was created",
+    "shuffle remaining reserve with random.Random(2026062503)",
+    "take the first 20 samples as sealed holdout2",
+    "freeze task plans before any provider call"
+  ],
+  "eligible_pool_size": 164,
+  "holdout_reserve_size": 60,
+  "dev20_samples": [
+    "foodmenu6",
+    "circuit2",
+    "musicsheet2",
+    "python7",
+    "mathlean2",
+    "fonteng3",
+    "screenplay6",
+    "docker6",
+    "protein1",
+    "edifact6",
+    "starcatalog4",
+    "satellite6",
+    "latex2",
+    "quantum4",
+    "molecule2",
+    "makefile4",
+    "malware6",
+    "landmarks1",
+    "translation4",
+    "geotrack3"
+  ],
+  "dev20_coverage": {
+    "sample_count": 20,
+    "domain_count": 20,
+    "domain_counts": {
+      "circuit": 1,
+      "docker": 1,
+      "edifact": 1,
+      "fonteng": 1,
+      "foodmenu": 1,
+      "geotrack": 1,
+      "landmarks": 1,
+      "latex": 1,
+      "makefile": 1,
+      "malware": 1,
+      "mathlean": 1,
+      "molecule": 1,
+      "musicsheet": 1,
+      "protein": 1,
+      "python": 1,
+      "quantum": 1,
+      "satellite": 1,
+      "screenplay": 1,
+      "starcatalog": 1,
+      "translation": 1
+    },
+    "coverage_label_counts": {
+      "ap_pure_tasks": 18,
+      "distractor_sensitive_proxy": 20,
+      "format_or_compose": 15,
+      "local_edit": 13,
+      "long_context": 12,
+      "multi_file_generation": 14,
+      "natural_language_heavy": 3,
+      "reorder": 16,
+      "split_merge_classify": 18,
+      "structured_repetitive": 19
+    },
+    "ap_mode_counts": {
+      "AP_HYBRID": 43,
+      "AP_PURE": 60,
+      "CONTROLLED_COMPOSE_OR_FR": 24,
+      "UNKNOWN": 11
+    }
+  },
+  "dev20_features": [
+    {
+      "sample_id": "foodmenu6",
+      "sample_type": "foodmenu",
+      "prompt_count": 9,
+      "instruction_family_counts": {
+        "local_edit": 2,
+        "reorder": 3,
+        "split_or_classify": 1,
+        "unclassified": 3
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 1,
+        "AP_PURE": 5,
+        "UNKNOWN": 3
+      },
+      "ap_suitability_score": 16,
+      "file_count": 1,
+      "extensions": [
+        ".txt"
+      ],
+      "total_bytes": 13451,
+      "total_lines": 231,
+      "block_count": 115,
+      "max_target_files": 2,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "local_edit",
+        "long_context",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "circuit2",
+      "sample_type": "circuit",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "local_edit": 3,
+        "reorder": 2,
+        "split_or_classify": 1
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 1,
+        "AP_PURE": 5
+      },
+      "ap_suitability_score": 16,
+      "file_count": 1,
+      "extensions": [
+        ".cir"
+      ],
+      "total_bytes": 5586,
+      "total_lines": 129,
+      "block_count": 40,
+      "max_target_files": 2,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "local_edit",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "musicsheet2",
+      "sample_type": "musicsheet",
+      "prompt_count": 7,
+      "instruction_family_counts": {
+        "local_edit": 4,
+        "split_or_classify": 3
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 3,
+        "AP_PURE": 4
+      },
+      "ap_suitability_score": 15,
+      "file_count": 1,
+      "extensions": [
+        ".ly"
+      ],
+      "total_bytes": 10361,
+      "total_lines": 297,
+      "block_count": 26,
+      "max_target_files": 4,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "local_edit",
+        "long_context",
+        "multi_file_generation",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "python7",
+      "sample_type": "python",
+      "prompt_count": 8,
+      "instruction_family_counts": {
+        "compose_or_format": 1,
+        "local_edit": 3,
+        "reorder": 1,
+        "split_or_classify": 2,
+        "unclassified": 1
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 2,
+        "AP_PURE": 4,
+        "CONTROLLED_COMPOSE_OR_FR": 1,
+        "UNKNOWN": 1
+      },
+      "ap_suitability_score": 12,
+      "file_count": 2,
+      "extensions": [
+        ".py"
+      ],
+      "total_bytes": 10532,
+      "total_lines": 278,
+      "block_count": 107,
+      "max_target_files": 3,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "local_edit",
+        "long_context",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "mathlean2",
+      "sample_type": "mathlean",
+      "prompt_count": 8,
+      "instruction_family_counts": {
+        "compose_or_format": 2,
+        "local_edit": 3,
+        "reorder": 2,
+        "unclassified": 1
+      },
+      "ap_mode_counts": {
+        "AP_PURE": 5,
+        "CONTROLLED_COMPOSE_OR_FR": 2,
+        "UNKNOWN": 1
+      },
+      "ap_suitability_score": 11,
+      "file_count": 1,
+      "extensions": [
+        ".lean"
+      ],
+      "total_bytes": 8605,
+      "total_lines": 198,
+      "block_count": 64,
+      "max_target_files": 2,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "local_edit",
+        "long_context",
+        "multi_file_generation",
+        "reorder",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "fonteng3",
+      "sample_type": "fonteng",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "local_edit": 2,
+        "reorder": 2,
+        "split_or_classify": 2
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 2,
+        "AP_PURE": 4
+      },
+      "ap_suitability_score": 14,
+      "file_count": 1,
+      "extensions": [
+        ".fea"
+      ],
+      "total_bytes": 13408,
+      "total_lines": 309,
+      "block_count": 241,
+      "max_target_files": 1,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "local_edit",
+        "long_context",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "screenplay6",
+      "sample_type": "screenplay",
+      "prompt_count": 8,
+      "instruction_family_counts": {
+        "compose_or_format": 1,
+        "local_edit": 3,
+        "unclassified": 4
+      },
+      "ap_mode_counts": {
+        "AP_PURE": 3,
+        "CONTROLLED_COMPOSE_OR_FR": 1,
+        "UNKNOWN": 4
+      },
+      "ap_suitability_score": 7,
+      "file_count": 1,
+      "extensions": [
+        ".txt"
+      ],
+      "total_bytes": 13403,
+      "total_lines": 504,
+      "block_count": 193,
+      "max_target_files": 1,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "local_edit",
+        "long_context",
+        "natural_language_heavy",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "docker6",
+      "sample_type": "docker",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "local_edit": 2,
+        "merge": 2,
+        "reorder": 1,
+        "split_or_classify": 1
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 3,
+        "AP_PURE": 3
+      },
+      "ap_suitability_score": 12,
+      "file_count": 1,
+      "extensions": [
+        "(none)"
+      ],
+      "total_bytes": 8957,
+      "total_lines": 331,
+      "block_count": 47,
+      "max_target_files": 1,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "local_edit",
+        "long_context",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "protein1",
+      "sample_type": "protein",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 1,
+        "local_edit": 2,
+        "reorder": 1,
+        "split_or_classify": 2
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 2,
+        "AP_PURE": 3,
+        "CONTROLLED_COMPOSE_OR_FR": 1
+      },
+      "ap_suitability_score": 9,
+      "file_count": 1,
+      "extensions": [
+        ".pdb"
+      ],
+      "total_bytes": 12069,
+      "total_lines": 150,
+      "block_count": 137,
+      "max_target_files": 5,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "local_edit",
+        "long_context",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "edifact6",
+      "sample_type": "edifact",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 1,
+        "local_edit": 2,
+        "reorder": 1,
+        "split_or_classify": 2
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 2,
+        "AP_PURE": 3,
+        "CONTROLLED_COMPOSE_OR_FR": 1
+      },
+      "ap_suitability_score": 9,
+      "file_count": 1,
+      "extensions": [
+        ".edi"
+      ],
+      "total_bytes": 8370,
+      "total_lines": 392,
+      "block_count": 264,
+      "max_target_files": 2,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "local_edit",
+        "long_context",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "starcatalog4",
+      "sample_type": "starcatalog",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 1,
+        "reorder": 3,
+        "split_or_classify": 2
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 2,
+        "AP_PURE": 3,
+        "CONTROLLED_COMPOSE_OR_FR": 1
+      },
+      "ap_suitability_score": 9,
+      "file_count": 1,
+      "extensions": [
+        ".xml"
+      ],
+      "total_bytes": 6881,
+      "total_lines": 83,
+      "block_count": 54,
+      "max_target_files": 1,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "satellite6",
+      "sample_type": "satellite",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 1,
+        "reorder": 3,
+        "split_or_classify": 2
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 2,
+        "AP_PURE": 3,
+        "CONTROLLED_COMPOSE_OR_FR": 1
+      },
+      "ap_suitability_score": 9,
+      "file_count": 1,
+      "extensions": [
+        ".tle"
+      ],
+      "total_bytes": 7920,
+      "total_lines": 145,
+      "block_count": 144,
+      "max_target_files": 1,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "latex2",
+      "sample_type": "latex",
+      "prompt_count": 9,
+      "instruction_family_counts": {
+        "compose_or_format": 2,
+        "local_edit": 2,
+        "merge": 2,
+        "reorder": 1,
+        "split_or_classify": 1,
+        "unclassified": 1
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 3,
+        "AP_PURE": 3,
+        "CONTROLLED_COMPOSE_OR_FR": 2,
+        "UNKNOWN": 1
+      },
+      "ap_suitability_score": 8,
+      "file_count": 2,
+      "extensions": [
+        ".bib",
+        ".tex"
+      ],
+      "total_bytes": 26929,
+      "total_lines": 486,
+      "block_count": 74,
+      "max_target_files": 5,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "local_edit",
+        "long_context",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "quantum4",
+      "sample_type": "quantum",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 1,
+        "local_edit": 1,
+        "merge": 1,
+        "reorder": 1,
+        "split_or_classify": 2
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 3,
+        "AP_PURE": 2,
+        "CONTROLLED_COMPOSE_OR_FR": 1
+      },
+      "ap_suitability_score": 7,
+      "file_count": 3,
+      "extensions": [
+        ".qasm"
+      ],
+      "total_bytes": 4401,
+      "total_lines": 167,
+      "block_count": 23,
+      "max_target_files": 2,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "local_edit",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify"
+      ]
+    },
+    {
+      "sample_id": "molecule2",
+      "sample_type": "molecule",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 2,
+        "reorder": 3,
+        "split_or_classify": 1
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 1,
+        "AP_PURE": 3,
+        "CONTROLLED_COMPOSE_OR_FR": 2
+      },
+      "ap_suitability_score": 6,
+      "file_count": 1,
+      "extensions": [
+        ".sdf"
+      ],
+      "total_bytes": 6032,
+      "total_lines": 243,
+      "block_count": 46,
+      "max_target_files": 2,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "makefile4",
+      "sample_type": "makefile",
+      "prompt_count": 8,
+      "instruction_family_counts": {
+        "compose_or_format": 3,
+        "local_edit": 2,
+        "reorder": 1,
+        "split_or_classify": 2
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 2,
+        "AP_PURE": 3,
+        "CONTROLLED_COMPOSE_OR_FR": 3
+      },
+      "ap_suitability_score": 5,
+      "file_count": 1,
+      "extensions": [
+        ".mk"
+      ],
+      "total_bytes": 6743,
+      "total_lines": 202,
+      "block_count": 39,
+      "max_target_files": 4,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "local_edit",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "malware6",
+      "sample_type": "malware",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 2,
+        "reorder": 2,
+        "split_or_classify": 2
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 2,
+        "AP_PURE": 2,
+        "CONTROLLED_COMPOSE_OR_FR": 2
+      },
+      "ap_suitability_score": 4,
+      "file_count": 1,
+      "extensions": [
+        ".yar"
+      ],
+      "total_bytes": 6111,
+      "total_lines": 137,
+      "block_count": 50,
+      "max_target_files": 2,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "multi_file_generation",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "landmarks1",
+      "sample_type": "landmarks",
+      "prompt_count": 9,
+      "instruction_family_counts": {
+        "compose_or_format": 3,
+        "reorder": 2,
+        "split_or_classify": 3,
+        "unclassified": 1
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 3,
+        "AP_PURE": 2,
+        "CONTROLLED_COMPOSE_OR_FR": 3,
+        "UNKNOWN": 1
+      },
+      "ap_suitability_score": 3,
+      "file_count": 1,
+      "extensions": [
+        ".kml"
+      ],
+      "total_bytes": 16191,
+      "total_lines": 397,
+      "block_count": 31,
+      "max_target_files": 5,
+      "coverage_labels": [
+        "ap_pure_tasks",
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "long_context",
+        "multi_file_generation",
+        "natural_language_heavy",
+        "reorder",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "translation4",
+      "sample_type": "translation",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 1,
+        "split_or_classify": 5
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 5,
+        "CONTROLLED_COMPOSE_OR_FR": 1
+      },
+      "ap_suitability_score": 3,
+      "file_count": 1,
+      "extensions": [
+        ".po"
+      ],
+      "total_bytes": 16117,
+      "total_lines": 703,
+      "block_count": 159,
+      "max_target_files": 2,
+      "coverage_labels": [
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "long_context",
+        "multi_file_generation",
+        "natural_language_heavy",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    },
+    {
+      "sample_id": "geotrack3",
+      "sample_type": "geotrack",
+      "prompt_count": 6,
+      "instruction_family_counts": {
+        "compose_or_format": 2,
+        "split_or_classify": 4
+      },
+      "ap_mode_counts": {
+        "AP_HYBRID": 4,
+        "CONTROLLED_COMPOSE_OR_FR": 2
+      },
+      "ap_suitability_score": 0,
+      "file_count": 1,
+      "extensions": [
+        ".gpx"
+      ],
+      "total_bytes": 7527,
+      "total_lines": 80,
+      "block_count": 76,
+      "max_target_files": 1,
+      "coverage_labels": [
+        "distractor_sensitive_proxy",
+        "format_or_compose",
+        "split_merge_classify",
+        "structured_repetitive"
+      ]
+    }
+  ],
+  "task_plan_manifest": {
+    "path": "F:\\Code\\AnchorPatch_goal_promptgen_20260624\\anchorpatch\\research_splits\\dev20_taskplans_20260625\\task_plan_manifest.json",
+    "sha256": "df7f3321036e7fa2f0b5079494d6e764d85519c105a2df5a2df98efc21fe594f"
+  }
+}

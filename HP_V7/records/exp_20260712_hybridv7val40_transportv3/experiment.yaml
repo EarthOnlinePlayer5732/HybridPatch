@@ -1,0 +1,236 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260712_hybridv7val40_transportv3
+record_kind: run
+owner: HP_V7
+title: Current canonical same-transport comparison of HybridPatch/7 and FullRewrite under transport-v3.
+purpose: Current canonical same-transport comparison of HybridPatch/7 and FullRewrite under transport-v3.
+lifecycle_status: complete
+evidence_role: primary
+claim_eligibility: canonical
+source:
+  experiment_root_ref: HP_V7/exp_20260712_hybridv7val40_transportv3
+  run_metadata_schema: anchorpatch.run_metadata/2
+  raw_artifact_id: exp_20260712_hybridv7val40_transportv3-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 1
+  fingerprints:
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: dd3f706bdd51
+    hybrid_schema.py: 93e8b9c78f12
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: 79ef3e766a00
+    hybrid_gate.py: 06299fbd4822
+    model_openai.py: 6ddfdafcd065
+    run_meta.py: e0d7d7861cfb
+    requirements.txt: 38ffe361be94
+  version_reference: HP_V7/VERSION.md
+execution:
+  working_directory_ref: HP_V7
+  command_templates:
+  - python src\experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 131072 --out_dir exp_20260712_hybridv7val40_transportv3 --notes val40
+    transport-v3 FR arm (frozen FR-v3 baseline for this set); same plans and dir as HP arm, key=<key_label>
+  - python src\experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 131072 --out_dir exp_20260712_hybridv7val40_transportv3 --notes v7
+    val40 under transport-v3; HP arm; plans from frozen FR baseline seed42; paired FR-v3 arm follows in
+    same dir, key=<key_label>
+  methods:
+  - hybridpatch
+  - fullrewrite
+  arms:
+    hybridpatch: live_transport_v3
+    fullrewrite: live_transport_v3
+  seed: 42
+  round_trips: 10
+  distractor: false
+  comparison_policy: strict38 complete-pair analysis; partial committed rows remain auditable but are
+    excluded from canonical statistics
+model:
+  name: minimax-m3
+  provider: opencode_go
+  base_url: https://opencode.ai/zen/go
+  request_url: https://opencode.ai/zen/go/v1/messages
+  transport: anthropic_sdk_v2
+  transport_revision: opencode_anthropic_sdk/3
+  thinking_mode: adaptive
+  max_tokens: 131072
+  temperature: null
+protocol:
+  declared_campaign_revision: hybridpatch/7
+  observed_valid_envelope_revisions:
+  - hybridpatch/7
+  prompt_revision: null
+  prompt_fingerprint: 81668ab72e5d
+  executor_fingerprint: 79ef3e766a00
+  runner_fingerprint: dd3f706bdd51
+data:
+  dataset: DELEGATE-52
+  split: val20 + unused_reserve20; strict38 canonical subset
+  planned_sample_ids:
+  - crystal6
+  - docker3
+  - earncall1
+  - emails5
+  - filesystem2
+  - filesystem3
+  - fonteng1
+  - fonteng5
+  - foodmenu1
+  - geodata1
+  - geodata4
+  - geotrack5
+  - geotrack6
+  - hamradio6
+  - jobboard3
+  - json2
+  - json4
+  - landmarks2
+  - landmarks3
+  - libcatalog2
+  - libcatalog5
+  - mathlean4
+  - mathlean5
+  - obj3d2
+  - obj3d5
+  - quantum1
+  - quantum5
+  - robotics1
+  - robotics3
+  - satellite4
+  - screenplay4
+  - screenplay5
+  - spreadsheet1
+  - spreadsheet6
+  - subtitles2
+  - subtitles6
+  - transit1
+  - transit2
+  - treebank2
+  - treebank4
+  canonical_sample_ids:
+  - crystal6
+  - docker3
+  - emails5
+  - filesystem2
+  - filesystem3
+  - fonteng1
+  - fonteng5
+  - foodmenu1
+  - geodata1
+  - geodata4
+  - geotrack5
+  - geotrack6
+  - hamradio6
+  - jobboard3
+  - json2
+  - landmarks2
+  - landmarks3
+  - libcatalog2
+  - libcatalog5
+  - mathlean4
+  - mathlean5
+  - obj3d2
+  - obj3d5
+  - quantum1
+  - quantum5
+  - robotics1
+  - robotics3
+  - satellite4
+  - screenplay4
+  - screenplay5
+  - spreadsheet1
+  - spreadsheet6
+  - subtitles2
+  - subtitles6
+  - transit1
+  - transit2
+  - treebank2
+  - treebank4
+  excluded_samples:
+  - sample_id: earncall1
+    reason: FullRewrite infrastructure failure after RT6; score=null and excluded from canonical pairing.
+  - sample_id: json4
+    reason: Both arms infrastructure failure after RT2; score=null and excluded from canonical pairing.
+  task_plan_source: task plans copied byte-for-byte from the frozen FullRewrite baseline
+time:
+  started_at_local: '2026-07-12T07:08:36'
+  last_dispatch_started_at_local: '2026-07-12T12:58:39'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: strict38_complete_pairs
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/val40v3_38sample_paired.md
+  source_report_sha256: 37ee058c0557cd045cf3e2d80bdfeb00d04a8a9af63cca61a64f549425be2eb5
+  source_report_embedded: true
+  source_report_embedding_policy: sanitized_snapshot_v1
+  selection_reason: strict38 complete-pair analysis; partial committed rows remain auditable but are excluded
+    from canonical statistics
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/val40v3_38sample_paired.md
+  role: source_canonical_scope
+  sha256: 37ee058c0557cd045cf3e2d80bdfeb00d04a8a9af63cca61a64f549425be2eb5
+  size_bytes: 3922
+- path: HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/comparison.md
+  role: full_directory_diagnostic_only
+  sha256: 930430b070a8a756cbff59d25cd59a243ac1d97544fc311fbbbf08ece017c55e
+  size_bytes: 6065
+- path: docs/FINDINGS.md
+  role: method_interpretation
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+noncanonical_reports:
+- source_report_ref: HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/comparison.md
+  role: full_directory_diagnostic_only
+  sha256: 930430b070a8a756cbff59d25cd59a243ac1d97544fc311fbbbf08ece017c55e
+  size_bytes: 6065
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+- source_report_ref: docs/FINDINGS.md
+  role: method_interpretation
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: pass
+  replayed_backward_rows: 780
+  canonical_backward_rows: 760
+  canonical_paired_backward_rows: 380
+  source: HP_V7/VERSION.md
+  log: _attic/logs_root/val40v3_verify.log
+  exceptions:
+  - Twenty replayed backward rows belong to the preserved partial histories of excluded infrastructure-failure
+    samples.
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+known_exceptions:
+- analysis/comparison.md includes partial committed rows and is not the canonical statistical scope.
+- Current HP_V7 runtime fingerprints differ from the archived runtime in experiment_runner.py and model_openai.py;
+  archive metadata is authoritative.
+raw_manifest_ref: raw_manifest.json

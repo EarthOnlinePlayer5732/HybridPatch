@@ -1,0 +1,76 @@
+{
+  "affected_sample_methods": 28,
+  "by_label": {
+    "content_regression": {
+      "canonical_row_count": 39,
+      "row_count": 39,
+      "sample_method_count": 21
+    },
+    "empty_response": {
+      "canonical_row_count": 19,
+      "row_count": 19,
+      "sample_method_count": 15
+    },
+    "evaluator_error": {
+      "canonical_row_count": 1,
+      "row_count": 1,
+      "sample_method_count": 1
+    },
+    "near_empty_response": {
+      "canonical_row_count": 6,
+      "row_count": 6,
+      "sample_method_count": 3
+    },
+    "text_truncated": {
+      "canonical_row_count": 2,
+      "row_count": 2,
+      "sample_method_count": 1
+    },
+    "unknown_failure": {
+      "canonical_row_count": 1,
+      "row_count": 1,
+      "sample_method_count": 1
+    },
+    "validation_gate": {
+      "canonical_row_count": 6,
+      "row_count": 6,
+      "sample_method_count": 4
+    }
+  },
+  "by_method": {
+    "fullrewrite": {
+      "content_regression": 33,
+      "empty_response": 17,
+      "evaluator_error": 1,
+      "near_empty_response": 6
+    },
+    "hybridpatch": {
+      "content_regression": 6,
+      "empty_response": 2,
+      "text_truncated": 2,
+      "unknown_failure": 1,
+      "validation_gate": 6
+    }
+  },
+  "by_stage": {
+    "evaluator": 1,
+    "gate": 6,
+    "model": 27,
+    "quality": 39,
+    "unknown": 1
+  },
+  "canonical_exclusions": {},
+  "committed_rows": 800,
+  "critical_failures": {
+    "by_method": {
+      "fullrewrite": 22,
+      "hybridpatch": 10
+    },
+    "count": 32
+  },
+  "experiment_id": "exp_20260707_hybridv3dev20",
+  "non_none_failure_rows": 74,
+  "primary_label_policy": "deterministic_root_cause_v1",
+  "schema": "hybridpatch.failure_stats/1",
+  "total_planned_rows": 800
+}

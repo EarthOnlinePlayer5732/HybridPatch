@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "variables",
+    "match_dispatch",
+    "cpx_parse_context_state",
+    "cpx_contextvar_stack_state",
+    "split_files",
+    "documented",
+    "ast_based",
+    "more_functions",
+    "variables",
+    "cpx_contextvar_stack_state"
+  ]
+}

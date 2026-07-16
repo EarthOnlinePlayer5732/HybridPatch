@@ -1,0 +1,43 @@
+{
+  "artifacts": [
+    {
+      "archive_status": "not_compressed",
+      "artifact_id": "exp_20260709_hybridv4smoke-raw-v1",
+      "artifact_kind": "experiment_directory",
+      "compression": null,
+      "content_flags": {
+        "contains_full_prompts": true,
+        "contains_model_outputs": true,
+        "contains_source_documents": true,
+        "contains_transport_details": true
+      },
+      "credential_scan": {
+        "exact_local_secret_match_count": 0,
+        "files_scanned": 965,
+        "heuristic_marker_match_count": 0,
+        "heuristic_matches": {},
+        "local_secret_value_count": 14,
+        "scanned_at": null,
+        "scanner_version": "hybridpatch.raw_credential_scan/1",
+        "status": "pass_zero_matches"
+      },
+      "file_count": 965,
+      "retention": "diagnostic",
+      "sanitization": {
+        "sanitizer_version": null,
+        "status": "raw"
+      },
+      "shareability": "private_only",
+      "size_bytes": 42175616,
+      "skipped_sensitive_files": [],
+      "skipped_symlinks": [],
+      "source_experiments": [],
+      "storage": "ignored_local_directory",
+      "storage_key": "HP_V4/exp_20260709_hybridv4smoke",
+      "tree_hash_algorithm": "sha256-tree-v1",
+      "tree_sha256": "edd9a12138b85942ed5d99b4c8f77cf564b5674887f2c5953d47b5277420b5f6"
+    }
+  ],
+  "experiment_id": "exp_20260709_hybridv4smoke",
+  "schema": "hybridpatch.raw_manifest/1"
+}

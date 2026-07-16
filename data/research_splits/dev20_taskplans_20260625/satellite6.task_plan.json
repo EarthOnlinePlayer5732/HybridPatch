@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "name_standardized_state",
+    "eccentricity_orbit_split_state",
+    "csv_keplerian_state",
+    "co_launch_groups_state",
+    "inclination_regime_sorted_state",
+    "mission_age_profile_state",
+    "name_standardized_state",
+    "inclination_regime_sorted_state",
+    "csv_keplerian_state",
+    "co_launch_groups_state"
+  ]
+}

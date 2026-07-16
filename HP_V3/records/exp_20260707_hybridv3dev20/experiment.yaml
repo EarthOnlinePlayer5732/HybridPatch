@@ -1,0 +1,195 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260707_hybridv3dev20
+record_kind: run
+owner: HP_V3
+title: HybridPatch/3 first dev20 run retained as a replay-regression reference.
+purpose: HybridPatch/3 first dev20 run retained as a replay-regression reference.
+lifecycle_status: superseded
+evidence_role: supporting
+claim_eligibility: supporting
+source:
+  experiment_root_ref: HP_V3/exp_20260707_hybridv3dev20
+  run_metadata_schema: anchorpatch.run_metadata/1
+  raw_artifact_id: exp_20260707_hybridv3dev20-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 2
+  fingerprints:
+  - patch_schema.py: b166af25b94e
+    splitters.py: 663c467adf3d
+    experiment_runner.py: b738f207b292
+    hybrid_schema.py: 9ada21329c38
+    hybrid_index.py: 65d390993c3e
+    hybrid_prompt.py: 27889c2a86ee
+    hybrid_executor.py: 9b16dad84d25
+    hybrid_gate.py: 48dd3e7af480
+  - patch_schema.py: b166af25b94e
+    splitters.py: 663c467adf3d
+    experiment_runner.py: 202fe11c8f17
+    hybrid_schema.py: 9ada21329c38
+    hybrid_index.py: 65d390993c3e
+    hybrid_prompt.py: ee41b055d51b
+    hybrid_executor.py: 9b16dad84d25
+    hybrid_gate.py: 48dd3e7af480
+  version_reference: HP_V3/VERSION.md
+execution:
+  working_directory_ref: HP_V3
+  command_templates:
+  - python src/experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260707_hybridv3dev20 --notes full FR baseline for
+    completed HP run; uncapped tokens; fresh API key
+  - python src/experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260707_hybridv3dev20 --notes paired FR baseline
+    subset for completed HP run; uncapped tokens
+  - python src/experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 64000 --out_dir exp_20260707_hybridv3dev20 --notes paired FR baseline,
+    thinking on
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 0 --out_dir exp_20260707_hybridv3dev20 --notes rerun empty-response
+    victims; uncapped tokens; schema-in-repair
+  - python src/experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 10 --skip_distractor
+    --model minimax-m3 --max_tokens 64000 --out_dir exp_20260707_hybridv3dev20 --notes hybridpatch/3 +
+    expanded grounded repair; dev20 full; clean repo
+  methods:
+  - hybridpatch
+  - fullrewrite
+  arms:
+    hybridpatch: live
+    fullrewrite: live
+  seed: 42
+  round_trips: 10
+  distractor: false
+  comparison_policy: live paired; superseded by exp_20260708_hybridv3dev20full
+model:
+  name: minimax-m3
+  provider: null
+  base_url: null
+  request_url: null
+  transport: null
+  transport_revision: null
+  thinking_mode: null
+  max_tokens: 64000
+  temperature: null
+protocol:
+  declared_campaign_revision: hybridpatch/3
+  observed_valid_envelope_revisions:
+  - hybridpatch/3
+  prompt_revision: null
+  prompt_fingerprint: null
+  executor_fingerprint: null
+  runner_fingerprint: null
+data:
+  dataset: DELEGATE-52
+  split: frozen dev20 actual sample set
+  planned_sample_ids:
+  - circuit2
+  - docker6
+  - edifact6
+  - fonteng3
+  - foodmenu6
+  - geotrack3
+  - landmarks1
+  - latex2
+  - makefile4
+  - malware6
+  - mathlean2
+  - molecule2
+  - musicsheet2
+  - protein1
+  - python7
+  - quantum4
+  - satellite6
+  - screenplay6
+  - starcatalog4
+  - translation4
+  canonical_sample_ids:
+  - circuit2
+  - docker6
+  - edifact6
+  - fonteng3
+  - foodmenu6
+  - geotrack3
+  - landmarks1
+  - latex2
+  - makefile4
+  - malware6
+  - mathlean2
+  - molecule2
+  - musicsheet2
+  - protein1
+  - python7
+  - quantum4
+  - satellite6
+  - screenplay6
+  - starcatalog4
+  - translation4
+  excluded_samples: []
+  task_plan_source: task plans stored in the experiment archive
+time:
+  started_at_local: '2026-07-07T09:33:57'
+  last_dispatch_started_at_local: '2026-07-08T04:58:21'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: historical20_complete_pairs
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: HP_V3/exp_20260707_hybridv3dev20/analysis/comparison.md
+  source_report_sha256: 10d315f0ffadc847e3fb93be59d875c94745b155032d112c9aaefbd31a21f2d3
+  source_report_embedded: true
+  source_report_embedding_policy: sanitized_snapshot_v1
+  selection_reason: live paired; superseded by exp_20260708_hybridv3dev20full
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: HP_V3/exp_20260707_hybridv3dev20/analysis/comparison.md
+  role: historical_analysis
+  sha256: 10d315f0ffadc847e3fb93be59d875c94745b155032d112c9aaefbd31a21f2d3
+  size_bytes: 5400
+- path: HP_V3/VERSION.md
+  role: version_provenance
+  sha256: e84aeb733f2d9779955b9e95efe2f3c6f1353fd4dae26a43509f5722fcf6bf12
+  size_bytes: 4780
+noncanonical_reports:
+- source_report_ref: HP_V3/VERSION.md
+  role: version_provenance
+  sha256: e84aeb733f2d9779955b9e95efe2f3c6f1353fd4dae26a43509f5722fcf6bf12
+  size_bytes: 4780
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: pass
+  replayed_backward_rows: 400
+  canonical_backward_rows: 400
+  source: HP_V3/VERSION.md
+  log: _attic/logs_root/v7regress_verify_20260707_hybridv3dev20.log
+  exceptions: []
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+- field: model.transport_revision
+  reason: Legacy run metadata did not record a transport revision.
+  impact: Transport semantics must be interpreted from versioned project documentation.
+known_exceptions:
+- run_metadata.jsonl contains two code fingerprints; this archive is not single-fingerprint canonical
+  evidence.
+raw_manifest_ref: raw_manifest.json

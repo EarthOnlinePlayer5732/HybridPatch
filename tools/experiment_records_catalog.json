@@ -1,0 +1,741 @@
+{
+  "schema_version": 1,
+  "record_sets": [
+    {
+      "owner": "HP_V3",
+      "version_reference": "HP_V3/VERSION.md",
+      "experiments": [
+        {
+          "experiment_id": "exp_20260707_hybridv3dev20",
+          "scope_id": "historical20_complete_pairs",
+          "archive_path": "HP_V3/exp_20260707_hybridv3dev20",
+          "status": "superseded",
+          "lifecycle_status": "superseded",
+          "evidence_role": "historical",
+          "research_stage": "dev",
+          "purpose": "HybridPatch/3 first dev20 run retained as a replay-regression reference.",
+          "round_trips": 10,
+          "expected_sample_count": 20,
+          "sample_policy": "complete_all_methods",
+          "protocol_revision": "hybridpatch/3",
+          "dataset": "DELEGATE-52",
+          "split": "frozen dev20 actual sample set",
+          "task_plan_source": "task plans stored in the experiment archive",
+          "arms": {
+            "hybridpatch": "live",
+            "fullrewrite": "live"
+          },
+          "code_reference": "HP_V3/VERSION.md",
+          "comparison_policy": "live paired; superseded by exp_20260708_hybridv3dev20full",
+          "canonical_source_report": "HP_V3/exp_20260707_hybridv3dev20/analysis/comparison.md",
+          "source_reports": [
+            {
+              "path": "HP_V3/exp_20260707_hybridv3dev20/analysis/comparison.md",
+              "role": "historical_analysis"
+            },
+            {
+              "path": "HP_V3/VERSION.md",
+              "role": "version_provenance"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 400,
+            "canonical_backward_rows": 400,
+            "source": "HP_V3/VERSION.md",
+            "log": "_attic/logs_root/v7regress_verify_20260707_hybridv3dev20.log",
+            "exceptions": []
+          },
+          "known_exceptions": [
+            "run_metadata.jsonl contains two code fingerprints; this archive is not single-fingerprint canonical evidence."
+          ],
+          "raw_retention": "historical",
+          "raw_credential_scan": "not_rechecked"
+        },
+        {
+          "experiment_id": "exp_20260708_hybridv3dev20full",
+          "scope_id": "dev20_complete_pairs",
+          "archive_path": "HP_V3/exp_20260708_hybridv3dev20full",
+          "status": "canonical",
+          "lifecycle_status": "complete",
+          "evidence_role": "canonical",
+          "research_stage": "dev",
+          "purpose": "Formal HybridPatch/3 dev20 paired experiment after targeted FullRewrite rewinds.",
+          "round_trips": 10,
+          "expected_sample_count": 20,
+          "sample_policy": "complete_all_methods",
+          "protocol_revision": "hybridpatch/3",
+          "dataset": "DELEGATE-52",
+          "split": "pre-freeze dev20 variant; accounting1 replaces python7",
+          "task_plan_source": "task plans stored in the experiment archive",
+          "arms": {
+            "hybridpatch": "live",
+            "fullrewrite": "live_with_targeted_rewinds"
+          },
+          "code_reference": "HP_V3/VERSION.md",
+          "comparison_policy": "post-rewind live pairing; pre-rewind delta is historical only",
+          "canonical_source_report": "HP_V3/exp_20260708_hybridv3dev20full/analysis/comparison.md",
+          "source_reports": [
+            {
+              "path": "HP_V3/exp_20260708_hybridv3dev20full/analysis/comparison.md",
+              "role": "source_analysis"
+            },
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "interpretation_and_known_exception"
+            }
+          ],
+          "verification": {
+            "status": "fail",
+            "replayed_backward_rows": 400,
+            "canonical_backward_rows": 400,
+            "exact_matches": 399,
+            "mismatches": 1,
+            "accepted_known_exception": true,
+            "source": "HP_V3/VERSION.md",
+            "log": "_attic/logs_root/v7regress_verify_20260708_hybridv3dev20full.log",
+            "exceptions": [
+              "hybridpatch/quantum4 RT9 stored=0.9850, recomputed=1.0000; documented evaluator environment sensitivity."
+            ]
+          },
+          "known_exceptions": [
+            "The actual sample set contains accounting1 and predates the later frozen dev20 split.",
+            "The stored quantum4 RT9 score is conservatively lower than replay by 0.015."
+          ],
+          "raw_retention": "formal",
+          "raw_credential_scan": "not_rechecked"
+        }
+      ]
+    },
+    {
+      "owner": "HP_V4",
+      "version_reference": "HP_V4/VERSION.md",
+      "experiments": [
+        {
+          "experiment_id": "exp_20260709_hybridv4smoke",
+          "scope_id": "smoke7_complete",
+          "archive_path": "HP_V4/exp_20260709_hybridv4smoke",
+          "status": "diagnostic",
+          "lifecycle_status": "complete",
+          "evidence_role": "diagnostic",
+          "research_stage": "targeted_smoke",
+          "purpose": "Seven-sample mechanism smoke for bulk file-level matching and routing pressure.",
+          "round_trips": 10,
+          "expected_sample_count": 7,
+          "sample_policy": "complete_all_methods",
+          "protocol_revision": "hybridpatch/4",
+          "dataset": "DELEGATE-52",
+          "split": "targeted seven-sample dev smoke",
+          "task_plan_source": "task plans stored in the experiment archive",
+          "arms": {
+            "hybridpatch": "live"
+          },
+          "code_reference": "HP_V4/VERSION.md",
+          "comparison_policy": "single-arm longitudinal diagnostic; not a live paired method claim",
+          "canonical_source_report": "HP_V4/exp_20260709_hybridv4smoke/analysis/comparison.md",
+          "source_reports": [
+            {
+              "path": "HP_V4/exp_20260709_hybridv4smoke/analysis/comparison.md",
+              "role": "source_analysis"
+            },
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "failure_attribution"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 70,
+            "canonical_backward_rows": 70,
+            "source": "HP_V4/VERSION.md",
+            "log": "_attic/logs_root/v6regress_verify_v4smoke.log",
+            "exceptions": []
+          },
+          "known_exceptions": [
+            "The run was interrupted by quota limits and later completed from checkpoints.",
+            "This targeted set is patch-friendly and is not an untargeted validation set."
+          ],
+          "raw_retention": "diagnostic",
+          "raw_credential_scan": "not_rechecked"
+        }
+      ]
+    },
+    {
+      "owner": "HP_V5",
+      "version_reference": "HP_V5/VERSION.md",
+      "experiments": [
+        {
+          "experiment_id": "exp_20260709_hybridv5dev20full",
+          "scope_id": "dev20_complete_pairs",
+          "archive_path": "HP_V5/exp_20260709_hybridv5dev20full",
+          "status": "canonical",
+          "lifecycle_status": "complete",
+          "evidence_role": "canonical",
+          "research_stage": "dev",
+          "purpose": "Formal HybridPatch/5 dev20 paired experiment.",
+          "round_trips": 10,
+          "expected_sample_count": 20,
+          "sample_policy": "complete_all_methods",
+          "protocol_revision": "hybridpatch/5",
+          "dataset": "DELEGATE-52",
+          "split": "frozen dev20",
+          "task_plan_source": "task plans stored in the experiment archive",
+          "arms": {
+            "hybridpatch": "live",
+            "fullrewrite": "live_with_targeted_rewinds"
+          },
+          "code_reference": "HP_V5/VERSION.md",
+          "comparison_policy": "live paired with targeted FullRewrite rewinds; not directly comparable to frozen-baseline policy",
+          "canonical_source_report": "HP_V5/exp_20260709_hybridv5dev20full/analysis/comparison.md",
+          "source_reports": [
+            {
+              "path": "HP_V5/exp_20260709_hybridv5dev20full/analysis/comparison.md",
+              "role": "source_analysis"
+            },
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "failure_attribution"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 400,
+            "canonical_backward_rows": 400,
+            "source": "HP_V5/VERSION.md",
+            "log": "_attic/logs_root/v7regress_verify_20260709_hybridv5dev20full.log",
+            "exceptions": []
+          },
+          "known_exceptions": [
+            "protein1, satellite6, and translation4 retained recurrent provider-empty contamination after the bounded rewind policy."
+          ],
+          "raw_retention": "formal",
+          "raw_credential_scan": "not_rechecked"
+        }
+      ]
+    },
+    {
+      "owner": "HP_V6",
+      "version_reference": "HP_V6/VERSION.md",
+      "experiments": [
+        {
+          "experiment_id": "exp_20260710_hybridv6dev20full",
+          "scope_id": "dev20_complete_pairs",
+          "archive_path": "HP_V6/exp_20260710_hybridv6dev20full",
+          "status": "canonical",
+          "lifecycle_status": "complete",
+          "evidence_role": "canonical",
+          "research_stage": "dev",
+          "purpose": "Formal HybridPatch/6 dev20 evaluation paired with the copied frozen FullRewrite baseline.",
+          "round_trips": 10,
+          "expected_sample_count": 20,
+          "sample_policy": "complete_all_methods",
+          "protocol_revision": "hybridpatch/6",
+          "dataset": "DELEGATE-52",
+          "split": "frozen dev20",
+          "task_plan_source": "task plans stored in the experiment archive and frozen baseline",
+          "arms": {
+            "hybridpatch": "live",
+            "fullrewrite": "copied_frozen_baseline"
+          },
+          "code_reference": "HP_V6/VERSION.md",
+          "comparison_policy": "HybridPatch live arm paired with immutable FullRewrite baseline rows",
+          "canonical_source_report": "HP_V6/exp_20260710_hybridv6dev20full/analysis/comparison.md",
+          "source_reports": [
+            {
+              "path": "HP_V6/exp_20260710_hybridv6dev20full/analysis/comparison.md",
+              "role": "source_analysis"
+            },
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "mechanism_and_repair_audit"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 400,
+            "canonical_backward_rows": 400,
+            "source": "HP_V6/VERSION.md",
+            "log": "_attic/logs_root/v7regress_verify_20260710_hybridv6dev20full.log",
+            "exceptions": []
+          },
+          "known_exceptions": [
+            "Only the HybridPatch arm was live in this directory; FullRewrite rows were copied byte-for-byte from the frozen baseline."
+          ],
+          "raw_retention": "formal",
+          "raw_credential_scan": "not_rechecked"
+        },
+        {
+          "experiment_id": "exp_20260711_hybridv6val40",
+          "scope_id": "val40_complete_pairs",
+          "archive_path": "HP_V6/exp_20260711_hybridv6val40",
+          "status": "canonical",
+          "lifecycle_status": "complete",
+          "evidence_role": "canonical",
+          "research_stage": "validation",
+          "purpose": "HybridPatch/6 validation on val20 plus unused_reserve20, paired with copied frozen FullRewrite rows.",
+          "round_trips": 10,
+          "expected_sample_count": 40,
+          "sample_policy": "complete_all_methods",
+          "protocol_revision": "hybridpatch/6",
+          "dataset": "DELEGATE-52",
+          "split": "val20 + unused_reserve20",
+          "task_plan_source": "task plans copied byte-for-byte from the frozen FullRewrite baseline",
+          "arms": {
+            "hybridpatch": "live_from_frozen_v6_snapshot",
+            "fullrewrite": "copied_frozen_baseline"
+          },
+          "code_reference": "HP_V6/VERSION.md",
+          "comparison_policy": "HybridPatch live validation paired with immutable FullRewrite baseline rows",
+          "canonical_source_report": "HP_V6/exp_20260711_hybridv6val40/analysis/comparison.md",
+          "source_reports": [
+            {
+              "path": "HP_V6/exp_20260711_hybridv6val40/analysis/comparison.md",
+              "role": "source_analysis"
+            },
+            {
+              "path": "HP_V6/exp_20260711_hybridv6val40/val40_materialization.json",
+              "role": "split_materialization"
+            },
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "mechanism_and_failure_attribution"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 800,
+            "canonical_backward_rows": 800,
+            "source": "HP_V6/VERSION.md",
+            "log": "_attic/logs_root/val40_verify.log",
+            "exceptions": []
+          },
+          "known_exceptions": [
+            "val20 had prior early-method exposure; unused_reserve20 was fresh to HybridPatch.",
+            "FullRewrite rows were copied from the frozen baseline rather than run live."
+          ],
+          "raw_retention": "formal",
+          "raw_credential_scan": "not_rechecked"
+        }
+      ]
+    },
+    {
+      "owner": "HP_V7",
+      "version_reference": "HP_V7/VERSION.md",
+      "experiments": [
+        {
+          "experiment_id": "exp_20260711_hybridv7dev20full",
+          "scope_id": "dev20_complete_pairs",
+          "archive_path": "HP_V7/exp_20260711_hybridv7dev20full",
+          "status": "canonical",
+          "lifecycle_status": "complete",
+          "evidence_role": "canonical",
+          "research_stage": "dev",
+          "purpose": "Live validation of HybridPatch/7 partial-acceptance policy on dev20.",
+          "round_trips": 10,
+          "expected_sample_count": 20,
+          "sample_policy": "complete_all_methods",
+          "protocol_revision": "hybridpatch/7",
+          "dataset": "DELEGATE-52",
+          "split": "frozen dev20",
+          "task_plan_source": "task plans stored in the experiment archive and frozen baseline",
+          "arms": {
+            "hybridpatch": "live",
+            "fullrewrite": "copied_frozen_baseline"
+          },
+          "code_reference": "HP_V7/VERSION.md",
+          "comparison_policy": "HybridPatch live arm paired with immutable FullRewrite baseline rows",
+          "canonical_source_report": "HP_V7/exp_20260711_hybridv7dev20full/analysis/comparison.md",
+          "source_reports": [
+            {
+              "path": "HP_V7/exp_20260711_hybridv7dev20full/analysis/comparison.md",
+              "role": "source_analysis"
+            },
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "partial_acceptance_counterfactuals"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 400,
+            "canonical_backward_rows": 400,
+            "source": "HP_V7/VERSION.md",
+            "log": "_attic/logs_root/v7dev20_verify.log",
+            "exceptions": []
+          },
+          "known_exceptions": [
+            "Current HP_V7 runtime fingerprints differ from the archived runtime in experiment_runner.py; archive metadata is authoritative."
+          ],
+          "raw_retention": "formal",
+          "raw_credential_scan": "not_rechecked"
+        },
+        {
+          "experiment_id": "exp_20260712_hybridv7val40_transportv3",
+          "scope_id": "strict38_complete_pairs",
+          "archive_path": "HP_V7/exp_20260712_hybridv7val40_transportv3",
+          "status": "canonical",
+          "lifecycle_status": "complete",
+          "evidence_role": "canonical",
+          "research_stage": "validation",
+          "purpose": "Current canonical same-transport comparison of HybridPatch/7 and FullRewrite under transport-v3.",
+          "round_trips": 10,
+          "expected_sample_count": 40,
+          "sample_policy": "exclude",
+          "protocol_revision": "hybridpatch/7",
+          "excluded_samples": {
+            "earncall1": "FullRewrite infrastructure failure after RT6; score=null and excluded from canonical pairing.",
+            "json4": "Both arms infrastructure failure after RT2; score=null and excluded from canonical pairing."
+          },
+          "dataset": "DELEGATE-52",
+          "split": "val20 + unused_reserve20; strict38 canonical subset",
+          "task_plan_source": "task plans copied byte-for-byte from the frozen FullRewrite baseline",
+          "arms": {
+            "hybridpatch": "live_transport_v3",
+            "fullrewrite": "live_transport_v3"
+          },
+          "code_reference": "HP_V7/VERSION.md",
+          "comparison_policy": "strict38 complete-pair analysis; partial committed rows remain auditable but are excluded from canonical statistics",
+          "canonical_source_report": "HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/val40v3_38sample_paired.md",
+          "source_reports": [
+            {
+              "path": "HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/val40v3_38sample_paired.md",
+              "role": "source_canonical_scope"
+            },
+            {
+              "path": "HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/comparison.md",
+              "role": "full_directory_diagnostic_only"
+            },
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "method_interpretation"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 780,
+            "canonical_backward_rows": 760,
+            "canonical_paired_backward_rows": 380,
+            "source": "HP_V7/VERSION.md",
+            "log": "_attic/logs_root/val40v3_verify.log",
+            "exceptions": [
+              "Twenty replayed backward rows belong to the preserved partial histories of excluded infrastructure-failure samples."
+            ]
+          },
+          "known_exceptions": [
+            "analysis/comparison.md includes partial committed rows and is not the canonical statistical scope.",
+            "Current HP_V7 runtime fingerprints differ from the archived runtime in experiment_runner.py and model_openai.py; archive metadata is authoritative."
+          ],
+          "raw_retention": "formal",
+          "raw_credential_scan": "not_rechecked"
+        }
+      ]
+    },
+    {
+      "owner": "Baseline",
+      "version_reference": "Baseline/FR冻结计划.md",
+      "experiments": [
+        {
+          "experiment_id": "exp_20260710_frbaseline234",
+          "scope_id": "frozen233",
+          "archive_path": "Baseline/exp_20260710_frbaseline234",
+          "status": "canonical",
+          "lifecycle_status": "complete",
+          "evidence_role": "canonical",
+          "research_stage": "baseline",
+          "purpose": "Frozen one-shot FullRewrite baseline; canonical scope excludes python1.",
+          "round_trips": 10,
+          "expected_sample_count": 234,
+          "sample_policy": "exclude",
+          "excluded_samples": {
+            "python1": "Evaluator packaging failure; four committed RTs are retained but excluded from the 233-sample baseline."
+          },
+          "dataset": "DELEGATE-52",
+          "split": "233-sample frozen FullRewrite baseline; python1 excluded",
+          "task_plan_source": "task plans stored in the baseline archive",
+          "arms": {
+            "fullrewrite": "live_one_shot_no_rewind"
+          },
+          "code_reference": "Baseline/FR冻结计划.md",
+          "comparison_policy": "233-sample frozen baseline; archive analysis/comparison.md is an outdated 234-sample diagnostic",
+          "canonical_source_report": "Baseline/FR冻结计划.md",
+          "source_reports": [
+            {
+              "path": "Baseline/FR冻结计划.md",
+              "role": "source_canonical_policy_and_result"
+            },
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "source_canonical_interpretation"
+            },
+            {
+              "path": "Baseline/exp_20260710_frbaseline234/analysis/comparison.md",
+              "role": "outdated_234_sample_diagnostic_only"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 2330,
+            "canonical_backward_rows": 2330,
+            "archive_inclusive_replayed_backward_rows": 2334,
+            "excluded_replayed_backward_rows": 4,
+            "source": "Baseline/FR冻结计划.md",
+            "archive_inclusive_source": "docs/restructure_final_report.md",
+            "log": "Baseline/exp_20260710_frbaseline234/verify_fr233.stdout.log",
+            "exceptions": [
+              "The linked verifier log covers the 2330 canonical rows; a separate archive-inclusive replay reports 2334 rows including four retained python1 rows outside the canonical baseline."
+            ]
+          },
+          "known_exceptions": [
+            "The baseline is a dated sample of provider behavior and uses the pre-transport-v3 OpenCode path.",
+            "run_metadata.jsonl records code fingerprints but not a Git commit."
+          ],
+          "raw_retention": "formal",
+          "raw_credential_scan": "not_rechecked"
+        },
+        {
+          "experiment_id": "exp_20260713_frbaseline_v2_rerun",
+          "scope_id": "complete83_source_chains",
+          "archive_path": "Baseline/exp_20260713_frbaseline_v2_rerun",
+          "status": "source-only",
+          "lifecycle_status": "incomplete",
+          "evidence_role": "source_only",
+          "research_stage": "baseline_source",
+          "purpose": "Official non-stream rerun source for FR+Official; only complete chains are eligible.",
+          "round_trips": 10,
+          "expected_sample_count": 85,
+          "sample_policy": "complete_all_methods",
+          "dataset": "DELEGATE-52",
+          "split": "85 preselected historically anomalous baseline samples",
+          "task_plan_source": "task plans stored in the source archive and checked against the frozen baseline",
+          "arms": {
+            "fullrewrite": "live_official_nonstream"
+          },
+          "code_reference": "transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md",
+          "comparison_policy": "source-only; no standalone method headline",
+          "canonical_source_report": null,
+          "source_reports": [
+            {
+              "path": "Baseline/FR+Official/README.md",
+              "role": "source_usage_report"
+            },
+            {
+              "path": "Baseline/FR+Official/source_manifest.csv",
+              "role": "selected_source_manifest"
+            },
+            {
+              "path": "Baseline/exp_20260713_frbaseline_v2_rerun/RESUME.md",
+              "role": "frozen_status_note"
+            }
+          ],
+          "verification": {
+            "status": "not_run",
+            "structural_validation_status": "pass",
+            "replayed_backward_rows": null,
+            "canonical_backward_rows": 830,
+            "source": "Baseline/build_fr_plus_official.py",
+            "log": null,
+            "exceptions": [
+              "No completed independent result replay is recorded for this rerun source.",
+              "transit2 is partial and musicsheet3 has no result file; neither is selected into FR+Official."
+            ]
+          },
+          "known_exceptions": [
+            "The sample pool was selected post-hoc for historical anomalies and cannot estimate official API background anomaly rates.",
+            "The rerun is frozen incomplete: transit2 has 3RT and musicsheet3 has no result file."
+          ],
+          "raw_retention": "source",
+          "raw_credential_scan": "not_rechecked"
+        },
+        {
+          "experiment_id": "fr_plus_official",
+          "scope_id": "logical233",
+          "kind": "manifest_view",
+          "archive_path": "Baseline/FR+Official",
+          "manifest_path": "Baseline/FR+Official/source_manifest.csv",
+          "status": "canonical",
+          "lifecycle_status": "complete",
+          "evidence_role": "sensitivity",
+          "research_stage": "derived_baseline",
+          "purpose": "Logical 233-sample derived baseline combining complete official trajectories with frozen FullRewrite fallback trajectories.",
+          "round_trips": 10,
+          "seed": 42,
+          "distractor": false,
+          "model": "minimax-m3",
+          "provider": "mixed_source",
+          "thinking_mode": "inherited_mixed_source",
+          "expected_sample_count": 233,
+          "sample_policy": "manifest_selected",
+          "dataset": "DELEGATE-52",
+          "split": "233-sample logical baseline view",
+          "task_plan_source": "task_plan_sha256 entries in Baseline/FR+Official/source_manifest.csv",
+          "arms": {
+            "fullrewrite": "logical_mixed_source_view"
+          },
+          "code_reference": "Baseline/build_fr_plus_official.py",
+          "comparison_policy": "canonical only for the FR+Official derived sensitivity baseline; not a replacement for same-transport method comparison",
+          "paper_reporting": {
+            "status": "paper_protocol_aligned_available_estimate",
+            "protocol_condition": "When the paper defines FullRewrite by the MiniMax official non-streaming one-shot response policy, use the FR+Official strict38 comparison.",
+            "scope_id": "strict38_paper_protocol",
+            "paired_backward_rows": 380,
+            "hybridpatch_mean": 0.825441632500045,
+            "fullrewrite_mean": 0.5637799526027186,
+            "delta_hybridpatch_minus_fullrewrite": 0.2616616798973263,
+            "p": 2.5415324699725913e-28,
+            "cohen_d": 0.6153227978570159,
+            "official_replacements_in_scope": 16,
+            "interpretation": "This is the result aligned with the paper's stated non-streaming one-shot baseline processing policy.",
+            "validity_caveat": "It remains a mixed-source post-hoc estimate because only 16 strict38 FullRewrite chains have complete official reruns; report this caveat alongside the result.",
+            "source_ref": "Baseline/FR+Official/val40_comparison.md",
+            "machine_source_ref": "Baseline/FR+Official/summary.json"
+          },
+          "canonical_source_report": "Baseline/FR+Official/README.md",
+          "source_reports": [
+            {
+              "path": "Baseline/FR+Official/README.md",
+              "role": "source_canonical_definition"
+            },
+            {
+              "path": "Baseline/FR+Official/summary.json",
+              "role": "source_machine_summary"
+            },
+            {
+              "path": "Baseline/FR+Official/val40_comparison.md",
+              "role": "secondary_sensitivity_analysis"
+            }
+          ],
+          "verification": {
+            "status": "not_run",
+            "derivation_validation_status": "pass",
+            "replayed_backward_rows": null,
+            "canonical_backward_rows": 2330,
+            "source": "Baseline/build_fr_plus_official.py",
+            "log": null,
+            "exceptions": [
+              "Independent result replay was not rerun; the view inherits source results and validates file/task-plan hashes plus complete-chain structure."
+            ]
+          },
+          "known_exceptions": [
+            "The view mixes transport sources.",
+            "Official trajectories come from a post-hoc anomalous/problem sample pool.",
+            "The strict38 delta is endpoint/policy sensitivity, not an unbiased method-effect estimate."
+          ],
+          "raw_retention": "logical_manifest",
+          "raw_credential_scan": "not_applicable"
+        }
+      ]
+    },
+    {
+      "owner": "transport",
+      "version_reference": "transport/API_ITERATION_LOG.md",
+      "experiments": [
+        {
+          "experiment_id": "exp_20260713_problem15_official",
+          "scope_id": "committed_partial_11_samples",
+          "archive_path": "transport/exp_20260713_problem15_official",
+          "status": "diagnostic",
+          "lifecycle_status": "incomplete",
+          "evidence_role": "diagnostic",
+          "research_stage": "transport_diagnostic",
+          "purpose": "Official non-stream problem-sample diagnostic and four-chain fill source for FR+Official.",
+          "round_trips": 10,
+          "expected_sample_count": 15,
+          "sample_policy": "all_result_samples",
+          "protocol_revision": "hybridpatch/7",
+          "dataset": "DELEGATE-52",
+          "split": "15 preselected problem samples",
+          "task_plan_source": "task plans stored in the diagnostic archive",
+          "arms": {
+            "hybridpatch": "partial_live_official_nonstream",
+            "fullrewrite": "partially_complete_live_official_nonstream"
+          },
+          "code_reference": "transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md",
+          "comparison_policy": "transport diagnostic only; incomplete campaign cannot support a method comparison",
+          "canonical_source_report": "transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md",
+          "source_reports": [
+            {
+              "path": "transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md",
+              "role": "source_canonical_transport_interpretation"
+            },
+            {
+              "path": "Baseline/FR+Official/source_manifest.csv",
+              "role": "four_selected_fill_chains"
+            },
+            {
+              "path": "transport/exp_20260713_problem15_official/RESUME.md",
+              "role": "frozen_status_note"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 109,
+            "canonical_backward_rows": 109,
+            "source": "docs/restructure_final_report.md",
+            "log": null,
+            "exceptions": [
+              "The campaign is intentionally frozen partial and must not be analyzed as a complete paired experiment."
+            ]
+          },
+          "known_exceptions": [
+            "The problem-sample selection cannot estimate provider background rates.",
+            "Four complete FullRewrite chains are consumed by FR+Official."
+          ],
+          "raw_retention": "diagnostic_source",
+          "raw_credential_scan": "not_rechecked"
+        },
+        {
+          "experiment_id": "exp_20260711_opencode_transport_v2_smoke5",
+          "scope_id": "transport_v2_smoke5_complete",
+          "archive_path": "_attic/exp_20260711_opencode_transport_v2_smoke5",
+          "status": "superseded",
+          "lifecycle_status": "superseded",
+          "evidence_role": "diagnostic",
+          "research_stage": "transport_smoke",
+          "purpose": "Forensic transport-v2 E2E smoke that exposed cumulative-snapshot O(n^2) raw-log amplification.",
+          "round_trips": 2,
+          "expected_sample_count": 5,
+          "sample_policy": "complete_all_methods",
+          "protocol_revision": "hybridpatch/7",
+          "dataset": "DELEGATE-52",
+          "split": "five representative transport-smoke samples",
+          "task_plan_source": "task plans stored in the attic archive",
+          "arms": {
+            "hybridpatch": "live_mixed_fingerprint",
+            "fullrewrite": "live_mixed_fingerprint"
+          },
+          "code_reference": "docs/FINDINGS.md",
+          "comparison_policy": "transport forensic evidence only; the paired score is not a method claim",
+          "canonical_source_report": "docs/FINDINGS.md",
+          "source_reports": [
+            {
+              "path": "docs/FINDINGS.md",
+              "role": "source_canonical_transport_interpretation"
+            },
+            {
+              "path": "transport/API_ITERATION_LOG.md",
+              "role": "transport_history"
+            },
+            {
+              "path": "_attic/exp_20260711_opencode_transport_v2_smoke5/analysis/comparison.md",
+              "role": "diagnostic_score_only"
+            }
+          ],
+          "verification": {
+            "status": "pass",
+            "replayed_backward_rows": 20,
+            "canonical_backward_rows": 20,
+            "source": "docs/FINDINGS.md",
+            "log": null,
+            "exceptions": []
+          },
+          "known_exceptions": [
+            "The two arms do not share one final code fingerprint because retry/logging fixes landed between them.",
+            "The inflated transport logs are retained for forensic evidence and are not normal second-tier artifacts."
+          ],
+          "raw_retention": "forensic",
+          "raw_credential_scan": "11 known Key values, zero matches across 305 files in the archived audit"
+        }
+      ]
+    }
+  ]
+}

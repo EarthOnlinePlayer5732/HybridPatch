@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "extern_interface_state",
+    "descriptive_constants_state",
+    "classified_catalog_state",
+    "alpha_subroutines_state",
+    "merged_algorithms_state",
+    "shots_error_analysis_state",
+    "extern_interface_state",
+    "merged_algorithms_state",
+    "classified_catalog_state",
+    "alpha_subroutines_state"
+  ]
+}

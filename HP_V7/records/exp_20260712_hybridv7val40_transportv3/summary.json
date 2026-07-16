@@ -1,0 +1,181 @@
+{
+  "canonical_scope_id": "strict38_complete_pairs",
+  "comparisons": [
+    {
+      "cohen_d": 0.033545731171577706,
+      "delta_a_minus_b": 0.008484205603405511,
+      "headline": true,
+      "mean_a": 0.825441632500045,
+      "mean_b": 0.8169574268966394,
+      "method_a": "hybridpatch",
+      "method_b": "fullrewrite",
+      "p": 0.5135556094597402,
+      "paired_backward_rows": 380,
+      "scope_id": "strict38_complete_pairs",
+      "t": 0.6539266857512303
+    }
+  ],
+  "experiment_id": "exp_20260712_hybridv7val40_transportv3",
+  "methods": {
+    "fullrewrite": {
+      "backward_rows": 380,
+      "commit_outcomes": {
+        "not_applicable": 758,
+        "unchanged": 2
+      },
+      "committed_rows": 760,
+      "critical_failures": {
+        "count": 21,
+        "theta": 0.1,
+        "transitions": 342
+      },
+      "execution_status": {
+        "degraded": 21,
+        "failure": 27,
+        "success": 712
+      },
+      "failure_labels": {
+        "content_regression": 28,
+        "evaluator_error": 15,
+        "near_empty_response": 3,
+        "thinking_budget_exhausted": 2
+      },
+      "latency_ms": {
+        "count": 760,
+        "max": 1195700,
+        "mean": 105519.541,
+        "median": 51372.5
+      },
+      "mean_backward_rs": 0.8169574268966394,
+      "preservation_violations": {
+        "max": null,
+        "recorded_rows": 0,
+        "total": 0,
+        "unknown_rows": 760
+      },
+      "routes": {
+        "fullrewrite": 760
+      },
+      "rs_at_k": {
+        "1": 0.9406907884283956,
+        "10": 0.7049459262466408,
+        "5": 0.8215238322147853
+      },
+      "tokens": {
+        "input": 2615851,
+        "input_plus_output": 15323074,
+        "output": 12707223,
+        "semantic_call_total": 16089314,
+        "total": 16089314
+      }
+    },
+    "hybridpatch": {
+      "backward_rows": 380,
+      "commit_outcomes": {
+        "applied": 730,
+        "kept_context": 14,
+        "partial_applied": 11,
+        "unchanged": 5
+      },
+      "committed_rows": 760,
+      "critical_failures": {
+        "count": 21,
+        "theta": 0.1,
+        "transitions": 342
+      },
+      "execution_status": {
+        "degraded": 44,
+        "failure": 7,
+        "success": 709
+      },
+      "failure_labels": {
+        "content_regression": 19,
+        "evaluator_error": 7,
+        "format_regression": 2,
+        "near_empty_response": 1,
+        "thinking_budget_exhausted": 7,
+        "validation_gate": 15
+      },
+      "latency_ms": {
+        "count": 760,
+        "max": 1043669,
+        "mean": 145880.001,
+        "median": 102975.0
+      },
+      "mean_backward_rs": 0.825441632500045,
+      "preservation_violations": {
+        "max": 0,
+        "recorded_rows": 752,
+        "total": 0,
+        "unknown_rows": 8
+      },
+      "routes": {
+        "bounded_rewrite": 473,
+        "bulk_patch": 93,
+        "hybridpatch_protocol_failure_kept_context": 8,
+        "local_patch": 186
+      },
+      "rs_at_k": {
+        "1": 0.97508603580098,
+        "10": 0.7236005835667307,
+        "5": 0.8306433940872275
+      },
+      "tokens": {
+        "input": 8102393,
+        "input_plus_output": 26623288,
+        "output": 18520895,
+        "semantic_call_total": 26879707,
+        "total": 26879707
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": null,
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 760,
+    "canonical_committed_rows": 1520,
+    "canonical_samples": 38,
+    "committed_rows": 1560,
+    "excluded_samples": [
+      {
+        "reason": "FullRewrite infrastructure failure after RT6; score=null and excluded from canonical pairing.",
+        "sample_id": "earncall1"
+      },
+      {
+        "reason": "Both arms infrastructure failure after RT2; score=null and excluded from canonical pairing.",
+        "sample_id": "json4"
+      }
+    ],
+    "planned_rows": 1600,
+    "planned_samples": 40
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "HP_V7/exp_20260712_hybridv7val40_transportv3",
+    "HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/val40v3_38sample_paired.md",
+    "HP_V7/exp_20260712_hybridv7val40_transportv3/analysis/comparison.md",
+    "docs/FINDINGS.md"
+  ],
+  "verification": {
+    "canonical_backward_rows": 760,
+    "canonical_paired_backward_rows": 380,
+    "exceptions": [
+      "Twenty replayed backward rows belong to the preserved partial histories of excluded infrastructure-failure samples."
+    ],
+    "log": "_attic/logs_root/val40v3_verify.log",
+    "replayed_backward_rows": 780,
+    "source": "HP_V7/VERSION.md",
+    "status": "pass"
+  }
+}

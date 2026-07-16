@@ -1,0 +1,1087 @@
+{
+  "schema": "anchorpatch.hybrid_split/1",
+  "created_local": "2026-07-03T12:56:19",
+  "workspace": "F:\\Code\\AnchorPatch_goal_promptgen_20260624",
+  "no_api_calls": true,
+  "policy": {
+    "dev_source": "anchorpatch/research_splits/dev20_20260625.json",
+    "val_test_source": "anchorpatch/research_splits/holdout_protocol_20260625.json",
+    "materialization": "reserve_order_first20_val_next20_test_remaining_unused",
+    "sizes": {
+      "dev": 20,
+      "val": 20,
+      "test": 20,
+      "unused_reserve": 20
+    },
+    "test_policy": "existing_holdout_reserve_materialization",
+    "unsupported_domains_excluded_by_registry": true
+  },
+  "critical_failure_theta": {
+    "status": "frozen_after_devmini_calibration",
+    "value": 0.1,
+    "candidate_values": [
+      0.05,
+      0.1,
+      0.15,
+      0.2
+    ],
+    "default_if_no_positive_drops": 0.1,
+    "rule": "smallest candidate value at or above p75 of positive nonzero adjacent backward RS drops; drops to 0 or evaluator error always count",
+    "calibration": {
+      "date": "2026-07-03",
+      "out_dir": "anchorpatch/exp_20260703_hybridsmoke",
+      "methods": [
+        "hybridpatch",
+        "fullrewrite"
+      ],
+      "samples": 10,
+      "round_trips": 10,
+      "positive_nonzero_drop_count": 53,
+      "p75_floor_index_value": 0.052855182599999995,
+      "selected_value": 0.1,
+      "honesty_replay": "PASS"
+    }
+  },
+  "source_hashes": {
+    "registry": {
+      "path": "F:\\Code\\AnchorPatch_goal_promptgen_20260624\\anchorpatch\\CONTAMINATION_REGISTRY.json",
+      "sha256": "c2e622f27e712c5cb3fbba06ae0a34d944e4d889d7658933d3b95f0ee222f305"
+    },
+    "dev20": {
+      "path": "F:\\Code\\AnchorPatch_goal_promptgen_20260624\\anchorpatch\\research_splits\\dev20_20260625.json",
+      "sha256": "9a02362c9ee603c601bdc2aa831c4567e91dd918a648d7d141ee6e508ed11838"
+    },
+    "reserve": {
+      "path": "F:\\Code\\AnchorPatch_goal_promptgen_20260624\\anchorpatch\\research_splits\\holdout_protocol_20260625.json",
+      "sha256": "787eecd01989e47dcc8417ee7a8319f795b78455581d5bb1d6352a5c0306784a"
+    },
+    "script": {
+      "path": "F:\\Code\\AnchorPatch_goal_promptgen_20260624\\anchorpatch\\build_hybrid_split.py",
+      "sha256": "5d95694bca4d73ccb45b0ecdd3ac6d8a2fd366a31bc73c92f9afffbddb26e84f"
+    }
+  },
+  "splits": {
+    "dev": [
+      "foodmenu6",
+      "circuit2",
+      "musicsheet2",
+      "python7",
+      "mathlean2",
+      "fonteng3",
+      "screenplay6",
+      "docker6",
+      "protein1",
+      "edifact6",
+      "starcatalog4",
+      "satellite6",
+      "latex2",
+      "quantum4",
+      "molecule2",
+      "makefile4",
+      "malware6",
+      "landmarks1",
+      "translation4",
+      "geotrack3"
+    ],
+    "val": [
+      "geodata4",
+      "screenplay5",
+      "libcatalog5",
+      "transit1",
+      "robotics3",
+      "subtitles2",
+      "json2",
+      "emails5",
+      "fonteng1",
+      "mathlean5",
+      "treebank4",
+      "spreadsheet6",
+      "landmarks3",
+      "crystal6",
+      "quantum1",
+      "filesystem3",
+      "obj3d5",
+      "geotrack6",
+      "hamradio6",
+      "foodmenu1"
+    ],
+    "test": [
+      "molecule3",
+      "genealogy6",
+      "weather1",
+      "circuit1",
+      "slides1",
+      "protein3",
+      "recipe1",
+      "vector5",
+      "makefile6",
+      "infra2",
+      "graphviz1",
+      "malware3",
+      "dbschema4",
+      "starcatalog5",
+      "edifact3",
+      "latex5",
+      "chess2",
+      "translation2",
+      "musicsheet1",
+      "python6"
+    ],
+    "unused_reserve": [
+      "satellite4",
+      "earncall1",
+      "jobboard3",
+      "docker3",
+      "geodata1",
+      "screenplay4",
+      "libcatalog2",
+      "transit2",
+      "robotics1",
+      "subtitles6",
+      "json4",
+      "fonteng5",
+      "mathlean4",
+      "treebank2",
+      "spreadsheet1",
+      "landmarks2",
+      "quantum5",
+      "filesystem2",
+      "obj3d2",
+      "geotrack5"
+    ]
+  },
+  "coverage": {
+    "dev": {
+      "sample_count": 20,
+      "domain_count": 20,
+      "domain_counts": {
+        "circuit": 1,
+        "docker": 1,
+        "edifact": 1,
+        "fonteng": 1,
+        "foodmenu": 1,
+        "geotrack": 1,
+        "landmarks": 1,
+        "latex": 1,
+        "makefile": 1,
+        "malware": 1,
+        "mathlean": 1,
+        "molecule": 1,
+        "musicsheet": 1,
+        "protein": 1,
+        "python": 1,
+        "quantum": 1,
+        "satellite": 1,
+        "screenplay": 1,
+        "starcatalog": 1,
+        "translation": 1
+      },
+      "task_family_counts": {
+        "bulk_homogeneous": 31,
+        "format_conversion": 19,
+        "generative": 17,
+        "global_restructure": 46,
+        "local_edit": 25
+      }
+    },
+    "val": {
+      "sample_count": 20,
+      "domain_count": 20,
+      "domain_counts": {
+        "crystal": 1,
+        "emails": 1,
+        "filesystem": 1,
+        "fonteng": 1,
+        "foodmenu": 1,
+        "geodata": 1,
+        "geotrack": 1,
+        "hamradio": 1,
+        "json": 1,
+        "landmarks": 1,
+        "libcatalog": 1,
+        "mathlean": 1,
+        "obj3d": 1,
+        "quantum": 1,
+        "robotics": 1,
+        "screenplay": 1,
+        "spreadsheet": 1,
+        "subtitles": 1,
+        "transit": 1,
+        "treebank": 1
+      },
+      "task_family_counts": {
+        "bulk_homogeneous": 12,
+        "format_conversion": 69,
+        "generative": 12,
+        "global_restructure": 34,
+        "local_edit": 13
+      }
+    },
+    "test": {
+      "sample_count": 20,
+      "domain_count": 20,
+      "domain_counts": {
+        "chess": 1,
+        "circuit": 1,
+        "dbschema": 1,
+        "edifact": 1,
+        "genealogy": 1,
+        "graphviz": 1,
+        "infra": 1,
+        "latex": 1,
+        "makefile": 1,
+        "malware": 1,
+        "molecule": 1,
+        "musicsheet": 1,
+        "protein": 1,
+        "python": 1,
+        "recipe": 1,
+        "slides": 1,
+        "starcatalog": 1,
+        "translation": 1,
+        "vector": 1,
+        "weather": 1
+      },
+      "task_family_counts": {
+        "bulk_homogeneous": 19,
+        "format_conversion": 63,
+        "generative": 10,
+        "global_restructure": 36,
+        "local_edit": 9
+      }
+    },
+    "unused_reserve": {
+      "sample_count": 20,
+      "domain_count": 20,
+      "domain_counts": {
+        "docker": 1,
+        "earncall": 1,
+        "filesystem": 1,
+        "fonteng": 1,
+        "geodata": 1,
+        "geotrack": 1,
+        "jobboard": 1,
+        "json": 1,
+        "landmarks": 1,
+        "libcatalog": 1,
+        "mathlean": 1,
+        "obj3d": 1,
+        "quantum": 1,
+        "robotics": 1,
+        "satellite": 1,
+        "screenplay": 1,
+        "spreadsheet": 1,
+        "subtitles": 1,
+        "transit": 1,
+        "treebank": 1
+      },
+      "task_family_counts": {
+        "bulk_homogeneous": 12,
+        "format_conversion": 81,
+        "generative": 12,
+        "global_restructure": 24,
+        "local_edit": 9
+      }
+    }
+  },
+  "features": {
+    "foodmenu6": {
+      "sample_id": "foodmenu6",
+      "sample_type": "foodmenu",
+      "prompt_count": 9,
+      "task_family_counts": {
+        "bulk_homogeneous": 3,
+        "generative": 3,
+        "global_restructure": 1,
+        "local_edit": 2
+      }
+    },
+    "circuit2": {
+      "sample_id": "circuit2",
+      "sample_type": "circuit",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "global_restructure": 1,
+        "local_edit": 3
+      }
+    },
+    "musicsheet2": {
+      "sample_id": "musicsheet2",
+      "sample_type": "musicsheet",
+      "prompt_count": 7,
+      "task_family_counts": {
+        "generative": 1,
+        "global_restructure": 3,
+        "local_edit": 3
+      }
+    },
+    "python7": {
+      "sample_id": "python7",
+      "sample_type": "python",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 1,
+        "generative": 2,
+        "global_restructure": 2,
+        "local_edit": 2
+      }
+    },
+    "mathlean2": {
+      "sample_id": "mathlean2",
+      "sample_type": "mathlean",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "format_conversion": 1,
+        "generative": 1,
+        "global_restructure": 1,
+        "local_edit": 3
+      }
+    },
+    "fonteng3": {
+      "sample_id": "fonteng3",
+      "sample_type": "fonteng",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "generative": 1,
+        "global_restructure": 2,
+        "local_edit": 1
+      }
+    },
+    "screenplay6": {
+      "sample_id": "screenplay6",
+      "sample_type": "screenplay",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 1,
+        "generative": 4,
+        "local_edit": 2
+      }
+    },
+    "docker6": {
+      "sample_id": "docker6",
+      "sample_type": "docker",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "global_restructure": 3,
+        "local_edit": 2
+      }
+    },
+    "protein1": {
+      "sample_id": "protein1",
+      "sample_type": "protein",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 1,
+        "global_restructure": 2,
+        "local_edit": 2
+      }
+    },
+    "edifact6": {
+      "sample_id": "edifact6",
+      "sample_type": "edifact",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 1,
+        "global_restructure": 2,
+        "local_edit": 2
+      }
+    },
+    "starcatalog4": {
+      "sample_id": "starcatalog4",
+      "sample_type": "starcatalog",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 3,
+        "format_conversion": 1,
+        "global_restructure": 2
+      }
+    },
+    "satellite6": {
+      "sample_id": "satellite6",
+      "sample_type": "satellite",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 3,
+        "format_conversion": 1,
+        "global_restructure": 2
+      }
+    },
+    "latex2": {
+      "sample_id": "latex2",
+      "sample_type": "latex",
+      "prompt_count": 9,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "format_conversion": 1,
+        "generative": 1,
+        "global_restructure": 3,
+        "local_edit": 2
+      }
+    },
+    "quantum4": {
+      "sample_id": "quantum4",
+      "sample_type": "quantum",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 1,
+        "generative": 1,
+        "global_restructure": 3
+      }
+    },
+    "molecule2": {
+      "sample_id": "molecule2",
+      "sample_type": "molecule",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 3,
+        "format_conversion": 1,
+        "global_restructure": 2
+      }
+    },
+    "makefile4": {
+      "sample_id": "makefile4",
+      "sample_type": "makefile",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 2,
+        "generative": 2,
+        "global_restructure": 2,
+        "local_edit": 1
+      }
+    },
+    "malware6": {
+      "sample_id": "malware6",
+      "sample_type": "malware",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "format_conversion": 2,
+        "global_restructure": 2
+      }
+    },
+    "landmarks1": {
+      "sample_id": "landmarks1",
+      "sample_type": "landmarks",
+      "prompt_count": 9,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "format_conversion": 2,
+        "generative": 1,
+        "global_restructure": 4
+      }
+    },
+    "translation4": {
+      "sample_id": "translation4",
+      "sample_type": "translation",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 1,
+        "global_restructure": 5
+      }
+    },
+    "geotrack3": {
+      "sample_id": "geotrack3",
+      "sample_type": "geotrack",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 2,
+        "global_restructure": 4
+      }
+    },
+    "geodata4": {
+      "sample_id": "geodata4",
+      "sample_type": "geodata",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 4,
+        "global_restructure": 2
+      }
+    },
+    "screenplay5": {
+      "sample_id": "screenplay5",
+      "sample_type": "screenplay",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 1,
+        "generative": 3,
+        "global_restructure": 1,
+        "local_edit": 3
+      }
+    },
+    "libcatalog5": {
+      "sample_id": "libcatalog5",
+      "sample_type": "libcatalog",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 5,
+        "global_restructure": 1
+      }
+    },
+    "transit1": {
+      "sample_id": "transit1",
+      "sample_type": "transit",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 3,
+        "global_restructure": 3
+      }
+    },
+    "robotics3": {
+      "sample_id": "robotics3",
+      "sample_type": "robotics",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 3,
+        "local_edit": 3
+      }
+    },
+    "subtitles2": {
+      "sample_id": "subtitles2",
+      "sample_type": "subtitles",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 7,
+        "generative": 1
+      }
+    },
+    "json2": {
+      "sample_id": "json2",
+      "sample_type": "json",
+      "prompt_count": 7,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "format_conversion": 2,
+        "generative": 1,
+        "global_restructure": 1,
+        "local_edit": 1
+      }
+    },
+    "emails5": {
+      "sample_id": "emails5",
+      "sample_type": "emails",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 4,
+        "global_restructure": 3,
+        "local_edit": 1
+      }
+    },
+    "fonteng1": {
+      "sample_id": "fonteng1",
+      "sample_type": "fonteng",
+      "prompt_count": 7,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "global_restructure": 5
+      }
+    },
+    "mathlean5": {
+      "sample_id": "mathlean5",
+      "sample_type": "mathlean",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 1,
+        "generative": 3,
+        "global_restructure": 1,
+        "local_edit": 2
+      }
+    },
+    "treebank4": {
+      "sample_id": "treebank4",
+      "sample_type": "treebank",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 3,
+        "generative": 1,
+        "global_restructure": 1
+      }
+    },
+    "spreadsheet6": {
+      "sample_id": "spreadsheet6",
+      "sample_type": "spreadsheet",
+      "prompt_count": 11,
+      "task_family_counts": {
+        "format_conversion": 10,
+        "global_restructure": 1
+      }
+    },
+    "landmarks3": {
+      "sample_id": "landmarks3",
+      "sample_type": "landmarks",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 3,
+        "global_restructure": 4
+      }
+    },
+    "crystal6": {
+      "sample_id": "crystal6",
+      "sample_type": "crystal",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 2,
+        "global_restructure": 3
+      }
+    },
+    "quantum1": {
+      "sample_id": "quantum1",
+      "sample_type": "quantum",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "generative": 1,
+        "global_restructure": 3,
+        "local_edit": 1
+      }
+    },
+    "filesystem3": {
+      "sample_id": "filesystem3",
+      "sample_type": "filesystem",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 5,
+        "global_restructure": 3
+      }
+    },
+    "obj3d5": {
+      "sample_id": "obj3d5",
+      "sample_type": "obj3d",
+      "prompt_count": 5,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 4
+      }
+    },
+    "geotrack6": {
+      "sample_id": "geotrack6",
+      "sample_type": "geotrack",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 2,
+        "generative": 1,
+        "global_restructure": 2
+      }
+    },
+    "hamradio6": {
+      "sample_id": "hamradio6",
+      "sample_type": "hamradio",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 6
+      }
+    },
+    "foodmenu1": {
+      "sample_id": "foodmenu1",
+      "sample_type": "foodmenu",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 4,
+        "generative": 1,
+        "local_edit": 2
+      }
+    },
+    "molecule3": {
+      "sample_id": "molecule3",
+      "sample_type": "molecule",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 3,
+        "global_restructure": 2
+      }
+    },
+    "genealogy6": {
+      "sample_id": "genealogy6",
+      "sample_type": "genealogy",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 6
+      }
+    },
+    "weather1": {
+      "sample_id": "weather1",
+      "sample_type": "weather",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 4,
+        "global_restructure": 1
+      }
+    },
+    "circuit1": {
+      "sample_id": "circuit1",
+      "sample_type": "circuit",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "global_restructure": 4,
+        "local_edit": 1
+      }
+    },
+    "slides1": {
+      "sample_id": "slides1",
+      "sample_type": "slides",
+      "prompt_count": 9,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "generative": 3,
+        "global_restructure": 3,
+        "local_edit": 2
+      }
+    },
+    "protein3": {
+      "sample_id": "protein3",
+      "sample_type": "protein",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 2,
+        "global_restructure": 4
+      }
+    },
+    "recipe1": {
+      "sample_id": "recipe1",
+      "sample_type": "recipe",
+      "prompt_count": 5,
+      "task_family_counts": {
+        "format_conversion": 3,
+        "global_restructure": 1,
+        "local_edit": 1
+      }
+    },
+    "vector5": {
+      "sample_id": "vector5",
+      "sample_type": "vector",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 3,
+        "global_restructure": 2,
+        "local_edit": 1
+      }
+    },
+    "makefile6": {
+      "sample_id": "makefile6",
+      "sample_type": "makefile",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 2,
+        "generative": 3,
+        "global_restructure": 2
+      }
+    },
+    "infra2": {
+      "sample_id": "infra2",
+      "sample_type": "infra",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 5,
+        "local_edit": 1
+      }
+    },
+    "graphviz1": {
+      "sample_id": "graphviz1",
+      "sample_type": "graphviz",
+      "prompt_count": 11,
+      "task_family_counts": {
+        "format_conversion": 11
+      }
+    },
+    "malware3": {
+      "sample_id": "malware3",
+      "sample_type": "malware",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 2,
+        "global_restructure": 3
+      }
+    },
+    "dbschema4": {
+      "sample_id": "dbschema4",
+      "sample_type": "dbschema",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 6,
+        "global_restructure": 2
+      }
+    },
+    "starcatalog5": {
+      "sample_id": "starcatalog5",
+      "sample_type": "starcatalog",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 3,
+        "format_conversion": 1,
+        "global_restructure": 2
+      }
+    },
+    "edifact3": {
+      "sample_id": "edifact3",
+      "sample_type": "edifact",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 3,
+        "global_restructure": 3
+      }
+    },
+    "latex5": {
+      "sample_id": "latex5",
+      "sample_type": "latex",
+      "prompt_count": 10,
+      "task_family_counts": {
+        "bulk_homogeneous": 5,
+        "format_conversion": 3,
+        "global_restructure": 1,
+        "local_edit": 1
+      }
+    },
+    "chess2": {
+      "sample_id": "chess2",
+      "sample_type": "chess",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 5,
+        "local_edit": 1
+      }
+    },
+    "translation2": {
+      "sample_id": "translation2",
+      "sample_type": "translation",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 4,
+        "global_restructure": 1
+      }
+    },
+    "musicsheet1": {
+      "sample_id": "musicsheet1",
+      "sample_type": "musicsheet",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 1,
+        "generative": 1,
+        "global_restructure": 3
+      }
+    },
+    "python6": {
+      "sample_id": "python6",
+      "sample_type": "python",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 2,
+        "generative": 3,
+        "global_restructure": 2,
+        "local_edit": 1
+      }
+    },
+    "satellite4": {
+      "sample_id": "satellite4",
+      "sample_type": "satellite",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 4,
+        "global_restructure": 2
+      }
+    },
+    "earncall1": {
+      "sample_id": "earncall1",
+      "sample_type": "earncall",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 5,
+        "global_restructure": 1
+      }
+    },
+    "jobboard3": {
+      "sample_id": "jobboard3",
+      "sample_type": "jobboard",
+      "prompt_count": 9,
+      "task_family_counts": {
+        "format_conversion": 9
+      }
+    },
+    "docker3": {
+      "sample_id": "docker3",
+      "sample_type": "docker",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 3,
+        "format_conversion": 1,
+        "global_restructure": 2
+      }
+    },
+    "geodata1": {
+      "sample_id": "geodata1",
+      "sample_type": "geodata",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 5
+      }
+    },
+    "screenplay4": {
+      "sample_id": "screenplay4",
+      "sample_type": "screenplay",
+      "prompt_count": 7,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "generative": 2,
+        "global_restructure": 1,
+        "local_edit": 3
+      }
+    },
+    "libcatalog2": {
+      "sample_id": "libcatalog2",
+      "sample_type": "libcatalog",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 4,
+        "generative": 1,
+        "global_restructure": 1
+      }
+    },
+    "transit2": {
+      "sample_id": "transit2",
+      "sample_type": "transit",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 5,
+        "global_restructure": 1
+      }
+    },
+    "robotics1": {
+      "sample_id": "robotics1",
+      "sample_type": "robotics",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 4,
+        "local_edit": 1
+      }
+    },
+    "subtitles6": {
+      "sample_id": "subtitles6",
+      "sample_type": "subtitles",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 6,
+        "generative": 2
+      }
+    },
+    "json4": {
+      "sample_id": "json4",
+      "sample_type": "json",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 5,
+        "generative": 2,
+        "global_restructure": 1
+      }
+    },
+    "fonteng5": {
+      "sample_id": "fonteng5",
+      "sample_type": "fonteng",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 2,
+        "generative": 1,
+        "global_restructure": 3
+      }
+    },
+    "mathlean4": {
+      "sample_id": "mathlean4",
+      "sample_type": "mathlean",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "generative": 3,
+        "global_restructure": 1,
+        "local_edit": 3
+      }
+    },
+    "treebank2": {
+      "sample_id": "treebank2",
+      "sample_type": "treebank",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 5,
+        "global_restructure": 1
+      }
+    },
+    "spreadsheet1": {
+      "sample_id": "spreadsheet1",
+      "sample_type": "spreadsheet",
+      "prompt_count": 10,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 9
+      }
+    },
+    "landmarks2": {
+      "sample_id": "landmarks2",
+      "sample_type": "landmarks",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 3,
+        "global_restructure": 4
+      }
+    },
+    "quantum5": {
+      "sample_id": "quantum5",
+      "sample_type": "quantum",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 2,
+        "global_restructure": 2,
+        "local_edit": 2
+      }
+    },
+    "filesystem2": {
+      "sample_id": "filesystem2",
+      "sample_type": "filesystem",
+      "prompt_count": 8,
+      "task_family_counts": {
+        "format_conversion": 6,
+        "generative": 1,
+        "global_restructure": 1
+      }
+    },
+    "obj3d2": {
+      "sample_id": "obj3d2",
+      "sample_type": "obj3d",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "bulk_homogeneous": 1,
+        "format_conversion": 5
+      }
+    },
+    "geotrack5": {
+      "sample_id": "geotrack5",
+      "sample_type": "geotrack",
+      "prompt_count": 6,
+      "task_family_counts": {
+        "format_conversion": 3,
+        "global_restructure": 3
+      }
+    }
+  }
+}

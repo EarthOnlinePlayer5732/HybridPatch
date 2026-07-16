@@ -1,0 +1,92 @@
+{
+  "canonical_scope_id": "smoke7_complete",
+  "comparisons": [],
+  "experiment_id": "exp_20260709_hybridv4smoke",
+  "methods": {
+    "hybridpatch": {
+      "backward_rows": 70,
+      "commit_outcomes": {
+        "applied": 140
+      },
+      "committed_rows": 140,
+      "critical_failures": {
+        "count": 3,
+        "theta": 0.1,
+        "transitions": 63
+      },
+      "execution_status": {
+        "degraded": 3,
+        "success": 137
+      },
+      "failure_labels": {
+        "content_regression": 3
+      },
+      "latency_ms": {
+        "count": 140,
+        "max": 575416,
+        "mean": 134478.1,
+        "median": 103913.0
+      },
+      "mean_backward_rs": 0.8873801170388516,
+      "preservation_violations": {
+        "max": 0,
+        "recorded_rows": 140,
+        "total": 0,
+        "unknown_rows": 0
+      },
+      "routes": {
+        "bounded_rewrite": 55,
+        "bulk_patch": 23,
+        "local_patch": 62
+      },
+      "rs_at_k": {
+        "1": 0.9759065966114842,
+        "10": 0.8984485360116075,
+        "5": 0.8705613763570169
+      },
+      "tokens": {
+        "input": 1460108,
+        "input_plus_output": 4312772,
+        "output": 2852664,
+        "semantic_call_total": 4312772,
+        "total": 4312772
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": null,
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 70,
+    "canonical_committed_rows": 140,
+    "canonical_samples": 7,
+    "committed_rows": 140,
+    "excluded_samples": [],
+    "planned_rows": 140,
+    "planned_samples": 7
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "HP_V4/exp_20260709_hybridv4smoke",
+    "HP_V4/exp_20260709_hybridv4smoke/analysis/comparison.md",
+    "docs/FINDINGS.md"
+  ],
+  "verification": {
+    "canonical_backward_rows": 70,
+    "exceptions": [],
+    "log": "_attic/logs_root/v6regress_verify_v4smoke.log",
+    "replayed_backward_rows": 70,
+    "source": "HP_V4/VERSION.md",
+    "status": "pass"
+  }
+}

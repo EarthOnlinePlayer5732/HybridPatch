@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "msgid_length_ranked_state",
+    "completion_triage_state",
+    "obsolete_recovered_state",
+    "fuzzy_resolved_state",
+    "split_by_component_state",
+    "dependency_grouped_state",
+    "msgid_length_ranked_state",
+    "split_by_component_state",
+    "obsolete_recovered_state",
+    "fuzzy_resolved_state"
+  ]
+}

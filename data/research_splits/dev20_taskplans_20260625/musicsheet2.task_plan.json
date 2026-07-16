@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "split_strains_state",
+    "transposed_state",
+    "split_config_state",
+    "split_hands_state",
+    "cpx_ds_coda_state",
+    "unfolded_state",
+    "cpx_strain_variables_state",
+    "transposed_state",
+    "cpx_ds_coda_state",
+    "split_hands_state"
+  ]
+}

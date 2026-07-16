@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "seqcryst_extracted",
+    "backbone_sidechain_split",
+    "ss_painted_bfactors",
+    "bfactor_ranked_tsv",
+    "zero_indexed_residues",
+    "loop_framework_split",
+    "seqcryst_extracted",
+    "zero_indexed_residues",
+    "ss_painted_bfactors",
+    "bfactor_ranked_tsv"
+  ]
+}

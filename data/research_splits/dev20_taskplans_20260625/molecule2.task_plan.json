@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "fema_screened_state",
+    "fragrance_pyramid_state",
+    "cas_crossref_state",
+    "atom_ratio_state",
+    "sensory_annotated_state",
+    "volatility_ranked_state",
+    "fema_screened_state",
+    "sensory_annotated_state",
+    "cas_crossref_state",
+    "atom_ratio_state"
+  ]
+}

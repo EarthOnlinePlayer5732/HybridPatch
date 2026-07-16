@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "subcircuits_sorted",
+    "resistors_parameterized",
+    "tech_250nm",
+    "switch_classified",
+    "models_split",
+    "stimulus_binary",
+    "subcircuits_sorted",
+    "models_split",
+    "tech_250nm",
+    "switch_classified"
+  ]
+}

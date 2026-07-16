@@ -1,0 +1,155 @@
+{
+  "canonical_scope_id": "transport_v2_smoke5_complete",
+  "comparisons": [
+    {
+      "cohen_d": 0.4605322337249008,
+      "delta_a_minus_b": 0.1919458588395804,
+      "headline": false,
+      "mean_a": 0.9166495740084134,
+      "mean_b": 0.724703715168833,
+      "method_a": "hybridpatch",
+      "method_b": "fullrewrite",
+      "p": 0.17928352981358672,
+      "paired_backward_rows": 10,
+      "scope_id": "transport_v2_smoke5_complete",
+      "t": 1.456330794495697
+    }
+  ],
+  "experiment_id": "exp_20260711_opencode_transport_v2_smoke5",
+  "methods": {
+    "fullrewrite": {
+      "backward_rows": 10,
+      "commit_outcomes": {
+        "not_applicable": 20
+      },
+      "committed_rows": 20,
+      "critical_failures": {
+        "count": 1,
+        "theta": 0.1,
+        "transitions": 5
+      },
+      "execution_status": {
+        "degraded": 1,
+        "failure": 2,
+        "success": 17
+      },
+      "failure_labels": {
+        "content_regression": 2,
+        "thinking_budget_exhausted": 1
+      },
+      "latency_ms": {
+        "count": 20,
+        "max": 1336287,
+        "mean": 258283.75,
+        "median": 127752.5
+      },
+      "mean_backward_rs": 0.724703715168833,
+      "preservation_violations": {
+        "max": null,
+        "recorded_rows": 0,
+        "total": 0,
+        "unknown_rows": 20
+      },
+      "routes": {
+        "fullrewrite": 20
+      },
+      "rs_at_k": {
+        "1": 0.7845432493657574,
+        "2": 0.6648641809719086
+      },
+      "tokens": {
+        "input": 70844,
+        "input_plus_output": 721214,
+        "output": 650370,
+        "semantic_call_total": 723494,
+        "total": 723494
+      }
+    },
+    "hybridpatch": {
+      "backward_rows": 10,
+      "commit_outcomes": {
+        "applied": 20
+      },
+      "committed_rows": 20,
+      "critical_failures": {
+        "count": 1,
+        "theta": 0.1,
+        "transitions": 5
+      },
+      "execution_status": {
+        "degraded": 2,
+        "success": 18
+      },
+      "failure_labels": {
+        "content_regression": 1,
+        "text_truncated": 1
+      },
+      "latency_ms": {
+        "count": 20,
+        "max": 1244006,
+        "mean": 258045.15,
+        "median": 124133.0
+      },
+      "mean_backward_rs": 0.9166495740084134,
+      "preservation_violations": {
+        "max": 0,
+        "recorded_rows": 20,
+        "total": 0,
+        "unknown_rows": 0
+      },
+      "routes": {
+        "bounded_rewrite": 8,
+        "bulk_patch": 1,
+        "local_patch": 11
+      },
+      "rs_at_k": {
+        "1": 0.9793930477025276,
+        "2": 0.8539061003142993
+      },
+      "tokens": {
+        "input": 229282,
+        "input_plus_output": 1013963,
+        "output": 784681,
+        "semantic_call_total": 1016471,
+        "total": 1016471
+      }
+    }
+  },
+  "metric_definitions": {
+    "critical_failure_definition": "backward RS drop >= theta or collapse to zero",
+    "critical_failure_theta": 0.1,
+    "rs_range": [
+      0.0,
+      1.0
+    ]
+  },
+  "paper_reporting": null,
+  "schema": "hybridpatch.experiment_summary/1",
+  "scope": {
+    "canonical_backward_rows": 20,
+    "canonical_committed_rows": 40,
+    "canonical_samples": 5,
+    "committed_rows": 40,
+    "excluded_samples": [],
+    "planned_rows": 40,
+    "planned_samples": 5
+  },
+  "score_policy": {
+    "committed_method_failure": "stored evaluation score; defined reconstruction error is zero",
+    "infrastructure_missing": "null and excluded from canonical statistics"
+  },
+  "source_files": [
+    "_attic/exp_20260711_opencode_transport_v2_smoke5",
+    "docs/FINDINGS.md",
+    "transport/API_ITERATION_LOG.md",
+    "_attic/exp_20260711_opencode_transport_v2_smoke5/analysis/comparison.md"
+  ],
+  "verification": {
+    "canonical_backward_rows": 20,
+    "exceptions": [],
+    "log": null,
+    "replayed_backward_rows": 20,
+    "source": "docs/FINDINGS.md",
+    "status": "pass"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "forward_state_sequence": [
+    "hardness_classified_state",
+    "point_extended_split_state",
+    "sexagesimal_coords_state",
+    "source_coded_lookup_state",
+    "snr_sorted_state",
+    "band_decomposed_state",
+    "hardness_classified_state",
+    "snr_sorted_state",
+    "sexagesimal_coords_state",
+    "source_coded_lookup_state"
+  ]
+}

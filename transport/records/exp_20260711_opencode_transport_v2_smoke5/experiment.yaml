@@ -1,0 +1,168 @@
+schema: hybridpatch.experiment_record/1
+record_revision: 1
+catalog_sha256: 265867bb5f1b3f03d2845b534a4dbf43eac7b87cb8f1b43d68e2263144bec7e0
+experiment_id: exp_20260711_opencode_transport_v2_smoke5
+record_kind: run
+owner: transport
+title: Forensic transport-v2 E2E smoke that exposed cumulative-snapshot O(n^2) raw-log amplification.
+purpose: Forensic transport-v2 E2E smoke that exposed cumulative-snapshot O(n^2) raw-log amplification.
+lifecycle_status: superseded
+evidence_role: transport
+claim_eligibility: diagnostic_only
+source:
+  experiment_root_ref: _attic/exp_20260711_opencode_transport_v2_smoke5
+  run_metadata_schema: anchorpatch.run_metadata/2
+  raw_artifact_id: exp_20260711_opencode_transport_v2_smoke5-raw-v1
+  source_experiments: []
+code:
+  run_git_commit: null
+  git_tree_state: null
+  provenance_level: fingerprints_only
+  fingerprint_algorithm: sha1-12
+  fingerprint_count: 2
+  fingerprints:
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: c04aaa8a5a35
+    hybrid_schema.py: 93e8b9c78f12
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: 79ef3e766a00
+    hybrid_gate.py: 06299fbd4822
+    model_openai.py: 49cb687900c8
+    run_meta.py: 27db25d03f51
+    requirements.txt: 38ffe361be94
+  - patch_schema.py: ba8a9eb35f06
+    splitters.py: 690b1981879f
+    experiment_runner.py: c04aaa8a5a35
+    hybrid_schema.py: 93e8b9c78f12
+    hybrid_index.py: d66d13a8fb60
+    hybrid_prompt.py: 81668ab72e5d
+    hybrid_executor.py: 79ef3e766a00
+    hybrid_gate.py: 06299fbd4822
+    model_openai.py: 5dbb395474a9
+    run_meta.py: a203da6e35ff
+    requirements.txt: 38ffe361be94
+  version_reference: docs/FINDINGS.md
+execution:
+  working_directory_ref: null
+  command_templates:
+  - python src\experiment_runner.py --sample <samples> --methods fullrewrite --num_round_trips 2 --skip_distractor
+    --model minimax-m3 --max_tokens 131072 --out_dir exp_20260711_opencode_transport_v2_smoke5 --notes
+    transport-v2 smoke, seed=42, no distractor, adaptive, max_tokens=131072, key=<key_label>
+  - python src\experiment_runner.py --sample <samples> --methods hybridpatch --num_round_trips 2 --skip_distractor
+    --model minimax-m3 --max_tokens 131072 --out_dir exp_20260711_opencode_transport_v2_smoke5 --notes
+    transport-v2 smoke, seed=42, no distractor, adaptive, max_tokens=131072, key=<key_label>
+  methods:
+  - hybridpatch
+  - fullrewrite
+  arms:
+    hybridpatch: live_mixed_fingerprint
+    fullrewrite: live_mixed_fingerprint
+  seed: 42
+  round_trips: 2
+  distractor: false
+  comparison_policy: transport forensic evidence only; the paired score is not a method claim
+model:
+  name: minimax-m3
+  provider: opencode_go
+  base_url: https://opencode.ai/zen/go
+  request_url: https://opencode.ai/zen/go/v1/messages
+  transport: anthropic_sdk_v2
+  transport_revision: opencode_anthropic_sdk/2
+  thinking_mode: adaptive
+  max_tokens: 131072
+  temperature: null
+protocol:
+  declared_campaign_revision: hybridpatch/7
+  observed_valid_envelope_revisions:
+  - hybridpatch/7
+  prompt_revision: null
+  prompt_fingerprint: null
+  executor_fingerprint: null
+  runner_fingerprint: null
+data:
+  dataset: DELEGATE-52
+  split: five representative transport-smoke samples
+  planned_sample_ids:
+  - docker6
+  - foodmenu6
+  - mathlean2
+  - protein1
+  - translation4
+  canonical_sample_ids:
+  - docker6
+  - foodmenu6
+  - mathlean2
+  - protein1
+  - translation4
+  excluded_samples: []
+  task_plan_source: task plans stored in the attic archive
+time:
+  started_at_local: '2026-07-11T10:16:16'
+  last_dispatch_started_at_local: '2026-07-11T10:54:07'
+  finished_at: null
+  timezone: null
+canonical_report:
+  scope_id: transport_v2_smoke5_complete
+  record_ref: summary.json
+  machine_record_ref: summary.json
+  human_record_ref: report.md
+  source_report_ref: docs/FINDINGS.md
+  source_report_sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  source_report_embedded: false
+  source_report_embedding_policy: linked_repository_source
+  selection_reason: transport forensic evidence only; the paired score is not a method claim
+analysis_artifacts:
+  human_report_ref: report.md
+  machine_summary_ref: summary.json
+  casebook_ref: casebook.jsonl
+  samples_ref: samples.csv
+  failure_stats_ref: failure_stats.json
+  representative_failures_ref: representative_failures.jsonl
+paper_reporting: null
+source_reports:
+- path: docs/FINDINGS.md
+  role: source_canonical_transport_interpretation
+  sha256: da12fef5c2e5e05d30b6834145b94582ac5af354f98ea5ca880a2b59c5fd1e9c
+  size_bytes: 98469
+- path: transport/API_ITERATION_LOG.md
+  role: transport_history
+  sha256: 21ad4748c4de5534d4cfad02a7fcf3bce7bc4ad08ea1c2a3ab57775fc65807e6
+  size_bytes: 5184
+- path: _attic/exp_20260711_opencode_transport_v2_smoke5/analysis/comparison.md
+  role: diagnostic_score_only
+  sha256: 61b36577a99420f4c24074b495bb6c04426484facc96679220b6827c40c53749
+  size_bytes: 3103
+noncanonical_reports:
+- source_report_ref: transport/API_ITERATION_LOG.md
+  role: transport_history
+  sha256: 21ad4748c4de5534d4cfad02a7fcf3bce7bc4ad08ea1c2a3ab57775fc65807e6
+  size_bytes: 5184
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+- source_report_ref: _attic/exp_20260711_opencode_transport_v2_smoke5/analysis/comparison.md
+  role: diagnostic_score_only
+  sha256: 61b36577a99420f4c24074b495bb6c04426484facc96679220b6827c40c53749
+  size_bytes: 3103
+  reason: Source evidence only; the generated summary.json is the sole canonical machine scope.
+verification:
+  status: pass
+  replayed_backward_rows: 20
+  canonical_backward_rows: 20
+  source: docs/FINDINGS.md
+  log: null
+  exceptions: []
+provenance_gaps:
+- field: code.run_git_commit
+  reason: The historical run metadata did not record a Git commit.
+  impact: Exact commit cannot be asserted; archived per-file fingerprints remain authoritative.
+- field: code.git_tree_state
+  reason: The historical run metadata did not record whether the run tree was clean or dirty.
+  impact: Uncommitted run-time edits cannot be ruled out from Git metadata alone.
+- field: time.finished_at
+  reason: No explicit completion timestamp was recorded.
+  impact: The latest worker start is not treated as an experiment finish time.
+known_exceptions:
+- The two arms do not share one final code fingerprint because retry/logging fixes landed between them.
+- The inflated transport logs are retained for forensic evidence and are not normal second-tier artifacts.
+raw_manifest_ref: raw_manifest.json
