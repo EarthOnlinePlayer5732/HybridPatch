@@ -27,6 +27,7 @@ for item in (str(HP_ROOT), str(HERE)):
         sys.path.insert(0, item)
 
 from hybrid_prompt import (  # noqa: E402
+    _routes_for_profile,
     build_hybrid_prompt,
     build_hybrid_repair_prompt,
     classify_operation_family,
@@ -42,7 +43,7 @@ from utils_context import parse_context_string  # noqa: E402
 from utils_env import load_sample  # noqa: E402
 
 
-REPORT_SCHEMA = "hybridpatch.protocol_burden_v7_v8/1"
+REPORT_SCHEMA = "hybridpatch.protocol_burden_v7_v8/2"
 DEFAULT_ARCHIVE = REPO_ROOT / "HP_V7" / "exp_20260711_hybridv7dev20full"
 DEFAULT_OUTPUT_DIR = HP_ROOT / "analysis"
 EXPECTED = {
@@ -65,6 +66,17 @@ EXPECTED = {
         "explicit_block_id_count": 39,
     },
     "threshold_union_exceeded": 25,
+    "prompt_profile_distribution": {
+        "block_movement": 216,
+        "default": 184,
+    },
+    "path_compatibility": {
+        "chosen_route_available_steps": 399,
+        "chosen_route_unavailable_steps": 1,
+        "compatible_steps": 349,
+        "incompatible_steps": 50,
+        "success_incompatible_steps": 49,
+    },
 }
 LIMITATIONS = [
     "Prompt and envelope character counts are not tokenizer-measured tokens.",
@@ -73,6 +85,7 @@ LIMITATIONS = [
     "Chosen attempts mix primary and repair outputs; the distribution is not a distribution of all model responses.",
     "Routes are highly imbalanced and DSL has only one successful envelope, so its 39-ID ceiling is provisional rather than statistically stable.",
     "Canonical envelope size excludes sidecar FILE BODIES and therefore is not total completion size.",
+    "The path-compatibility audit only checks whether an archived V7 chosen route is listed by the counterfactual V8 prompt profile; it does not establish route equivalence or predict the route a model would choose under V8.",
     "The zero-API replay cannot demonstrate score retention, token reduction, or protocol-failure-rate improvement; those require a controlled API experiment.",
 ]
 
@@ -233,6 +246,139 @@ def _extract_chosen(row):
     return envelope, meta.get("bodies") or {}
 
 
+def _chosen_route_for_path_audit(row):
+    envelope, _meta = extract_hybrid_json(row.get("raw_llm_response") or "")
+    parsed_route = route_of(envelope)
+    telemetry_route = (((row.get("bdpatch") or {}).get("hybrid") or {}).get("route"))
+    if parsed_route != telemetry_route:
+        raise RuntimeError(
+            "chosen route differs between raw envelope and telemetry: "
+            f"{row.get('sample_id')} RT{row.get('round_trip_num')} "
+            f"{row.get('round_trip_direction')}: {parsed_route!r} != {telemetry_route!r}"
+        )
+    return parsed_route
+
+
+def _path_compatibility_summary(step_rows, profile_distribution):
+    available = [row for row in step_rows if row["chosen_route_available"]]
+    unavailable = [row for row in step_rows if not row["chosen_route_available"]]
+    incompatible = [row for row in available if not row["compatible"]]
+    compatible = [row for row in available if row["compatible"]]
+    success_rows = [row for row in available if row["actual_method"] == "hybridpatch"]
+    success_incompatible = [row for row in success_rows if not row["compatible"]]
+
+    by_profile_route = {}
+    for row in incompatible:
+        profile_counts = by_profile_route.setdefault(row["prompt_profile"], {})
+        route = row["chosen_route"]
+        profile_counts[route] = profile_counts.get(route, 0) + 1
+    by_profile_route = {
+        profile: dict(sorted(routes.items()))
+        for profile, routes in sorted(by_profile_route.items())
+    }
+
+    term_stats = {}
+    representative_cases = []
+    representative_terms = set()
+    for row in incompatible:
+        details = row["matched_term_details"] or [{
+            "family": "default", "term": "<none>", "count": 1,
+        }]
+        for detail in details:
+            key = (detail.get("family"), detail.get("term"), detail.get("role"))
+            stats = term_stats.setdefault(key, {
+                "family": detail.get("family"),
+                "term": detail.get("term"),
+                "role": detail.get("role"),
+                "row_hit_count": 0,
+                "occurrence_count": 0,
+            })
+            stats["row_hit_count"] += 1
+            stats["occurrence_count"] += int(detail.get("count") or 0)
+            if key not in representative_terms:
+                representative_terms.add(key)
+                representative_cases.append({
+                    "selected_matched_term": {
+                        "family": detail.get("family"),
+                        "term": detail.get("term"),
+                        "role": detail.get("role"),
+                    },
+                    "sample_id": row["sample_id"],
+                    "round_trip_num": row["round_trip_num"],
+                    "round_trip_direction": row["round_trip_direction"],
+                    "prompt_profile": row["prompt_profile"],
+                    "operation_family": row["operation_family"],
+                    "matched_terms": row["matched_terms"],
+                    "chosen_route": row["chosen_route"],
+                    "allowed_routes": row["allowed_routes"],
+                    "actual_method": row["actual_method"],
+                })
+
+    term_rows = sorted(
+        term_stats.values(),
+        key=lambda item: (
+            -item["row_hit_count"], str(item["family"]), str(item["term"]),
+            str(item.get("role") or ""),
+        ),
+    )
+    representative_cases.sort(key=lambda item: (
+        str(item["selected_matched_term"].get("family")),
+        str(item["selected_matched_term"].get("term")),
+        str(item["selected_matched_term"].get("role") or ""),
+    ))
+
+    total = len(step_rows)
+    available_count = len(available)
+    incompatible_count = len(incompatible)
+    return {
+        "audit_mode": "zero_api_counterfactual_route_availability",
+        "profile_allowed_routes": {
+            profile: list(_routes_for_profile(profile))
+            for profile in sorted(profile_distribution)
+        },
+        "prompt_profile_distribution": dict(sorted(profile_distribution.items())),
+        "total_steps": total,
+        "chosen_route_available_steps": available_count,
+        "chosen_route_unavailable_steps": len(unavailable),
+        "compatible_steps": len(compatible),
+        "incompatible_steps": incompatible_count,
+        "incompatible_percent_of_available": round(
+            100.0 * incompatible_count / available_count, 2) if available_count else None,
+        "incompatible_percent_of_all": round(
+            100.0 * incompatible_count / total, 2) if total else None,
+        "success_subset": {
+            "total_steps": len(success_rows),
+            "compatible_steps": len(success_rows) - len(success_incompatible),
+            "incompatible_steps": len(success_incompatible),
+            "incompatible_percent": round(
+                100.0 * len(success_incompatible) / len(success_rows), 2
+            ) if success_rows else None,
+        },
+        "incompatible_by_route": dict(sorted(collections.Counter(
+            row["chosen_route"] for row in incompatible).items())),
+        "incompatible_by_profile": dict(sorted(collections.Counter(
+            row["prompt_profile"] for row in incompatible).items())),
+        "incompatible_by_profile_route": by_profile_route,
+        "incompatible_by_sample": dict(sorted(collections.Counter(
+            row["sample_id"] for row in incompatible).items())),
+        "incompatible_by_round_trip": {
+            str(key): value for key, value in sorted(collections.Counter(
+                row["round_trip_num"] for row in incompatible).items())
+        },
+        "incompatible_by_direction": dict(sorted(collections.Counter(
+            row["round_trip_direction"] for row in incompatible).items())),
+        "incompatible_by_matched_term": term_rows,
+        "representative_cases": representative_cases,
+        "unavailable_cases": unavailable,
+        "step_results": step_rows,
+        "interpretation": (
+            "Offline availability check only: whether each archived V7 chosen route "
+            "appears in the allowed routes of the counterfactual V8 prompt profile. "
+            "This is not an effectiveness experiment."
+        ),
+    }
+
+
 def _verify_known(report):
     source = report["source"]
     for key in ("total_rows", "success_rows", "kept_rows",
@@ -251,6 +397,19 @@ def _verify_known(report):
             f"known-data threshold union mismatch: {actual_union} != "
             f"{EXPECTED['threshold_union_exceeded']}"
         )
+    path_audit = report["path_compatibility_audit"]
+    if path_audit["prompt_profile_distribution"] != EXPECTED["prompt_profile_distribution"]:
+        raise RuntimeError("known-data prompt profile distribution mismatch")
+    for key, expected in EXPECTED["path_compatibility"].items():
+        if key == "success_incompatible_steps":
+            actual = path_audit["success_subset"]["incompatible_steps"]
+        else:
+            actual = path_audit[key]
+        if actual != expected:
+            raise RuntimeError(
+                f"known-data path compatibility mismatch for {key}: "
+                f"{actual} != {expected}"
+            )
 
 
 def analyze(archive: Path):
@@ -326,6 +485,7 @@ def analyze(archive: Path):
     v8_repair_chars = []
     profile_distribution = collections.Counter()
     family_distribution = collections.Counter()
+    path_step_rows = []
     request_paths = []
     for row in rows:
         primary_path = _request_path(archive, row, 0)
@@ -343,6 +503,30 @@ def analyze(archive: Path):
         v8_primary_chars.append(len(v8_prompt))
         profile_distribution[classification["prompt_profile"]] += 1
         family_distribution[classification["operation_family"]] += 1
+        allowed_routes = list(_routes_for_profile(classification["prompt_profile"]))
+        chosen_route = _chosen_route_for_path_audit(row)
+        chosen_route_available = chosen_route is not None
+        path_step_rows.append({
+            "sample_id": row["sample_id"],
+            "round_trip_num": row["round_trip_num"],
+            "round_trip_direction": row["round_trip_direction"],
+            "source_result": row["_source_result"],
+            "actual_method": (row.get("bdpatch") or {}).get("actual_method"),
+            "prompt_profile": classification["prompt_profile"],
+            "operation_family": classification["operation_family"],
+            "matched_families": list(classification.get("matched_families") or []),
+            "matched_terms": [
+                match.get("term") for match in (classification.get("matches") or [])
+            ],
+            "matched_term_details": [dict(match) for match in (
+                classification.get("matches") or [])],
+            "allowed_routes": allowed_routes,
+            "chosen_route": chosen_route,
+            "chosen_route_available": chosen_route_available,
+            "compatible": (
+                chosen_route in allowed_routes if chosen_route_available else None
+            ),
+        })
 
         repair = (((row.get("bdpatch") or {}).get("hybrid") or {}).get("repair") or {})
         if repair.get("attempted"):
@@ -363,6 +547,9 @@ def analyze(archive: Path):
 
     if len(set(request_paths)) != len(request_paths):
         raise RuntimeError("the same archived request was assigned to multiple semantic calls")
+
+    path_compatibility = _path_compatibility_summary(
+        path_step_rows, profile_distribution)
 
     report = {
         "schema": REPORT_SCHEMA,
@@ -386,6 +573,7 @@ def analyze(archive: Path):
         "quantile_method": "nearest-rank: sorted_values[ceil(p*n)-1]",
         "burden_distributions": burden_distributions,
         "threshold_coverage": threshold_coverage,
+        "path_compatibility_audit": path_compatibility,
         "prompt_comparison": {
             "primary_all_400_paired": _comparison(v7_primary_chars, v8_primary_chars),
             "repair_actual_v7_vs_counterfactual_v8": _comparison(
@@ -405,6 +593,7 @@ def _markdown(report):
     routes = report["success_subset"]["route_distribution"]
     burden = report["burden_distributions"]
     coverage = report["threshold_coverage"]
+    path_audit = report["path_compatibility_audit"]
     primary = report["prompt_comparison"]["primary_all_400_paired"]
     repair = report["prompt_comparison"]["repair_actual_v7_vs_counterfactual_v8"]
     lines = [
@@ -439,6 +628,68 @@ def _markdown(report):
         f"五项阈值的并集会要求 {coverage['union_exceeded']}/{source['success_rows']} "
         f"（{coverage['union_exceeded_percent']:.2f}%）个历史成功形态合并重复操作或改用更合适路径；"
         f"阈值等值放行，只有严格大于才拒绝。",
+        "",
+        "## 零 API 路径兼容审计",
+        "",
+        "本节只检查历史 V7 chosen route 是否出现在同一步反事实 V8 prompt profile 的 allowed routes 中；"
+        "它不判断路径语义等效，不预测模型在 V8 下会选择哪条路径，也不是效果实验。",
+        "",
+        f"- V8 profile 分布：default={path_audit['prompt_profile_distribution'].get('default', 0)}，"
+        f"block_movement={path_audit['prompt_profile_distribution'].get('block_movement', 0)}。",
+        f"- default allowed routes：{', '.join(path_audit['profile_allowed_routes']['default'])}；"
+        f"block_movement allowed routes：{', '.join(path_audit['profile_allowed_routes']['block_movement'])}。",
+        f"- {path_audit['chosen_route_available_steps']}/{path_audit['total_steps']} 步有可解析 chosen route；"
+        f"{path_audit['chosen_route_unavailable_steps']} 步 route unavailable，单列且不进入不兼容分母。",
+        f"- 不兼容：{path_audit['incompatible_steps']}/{path_audit['chosen_route_available_steps']} "
+        f"（{path_audit['incompatible_percent_of_available']:.2f}%）；按全部 400 步为 "
+        f"{path_audit['incompatible_percent_of_all']:.2f}%。",
+        f"- 成功提交子集：{path_audit['success_subset']['incompatible_steps']}/"
+        f"{path_audit['success_subset']['total_steps']} 不兼容"
+        f"（{path_audit['success_subset']['incompatible_percent']:.2f}%）。",
+        f"- 不兼容 route：{json.dumps(path_audit['incompatible_by_route'], ensure_ascii=False, sort_keys=True)}；"
+        f"方向：{json.dumps(path_audit['incompatible_by_direction'], ensure_ascii=False, sort_keys=True)}。",
+        "",
+        "### 按 matched term 的不兼容计数",
+        "",
+        "同一步可命中多个 term，因此下表行数可重叠，不能相加作为不兼容总数。",
+        "",
+        "| family | matched term | role | row hits | occurrences |",
+        "|---|---|---|---:|---:|",
+    ]
+    for item in path_audit["incompatible_by_matched_term"]:
+        lines.append(
+            f"| {item.get('family')} | {item.get('term')} | {item.get('role') or '-'} | "
+            f"{item.get('row_hit_count')} | {item.get('occurrence_count')} |"
+        )
+    lines += [
+        "",
+        "### 代表性不兼容案例",
+        "",
+        "每个 matched term 选取稳定排序后的首个案例；完整 400 步逐步结果保存在 JSON 报告的 "
+        "`path_compatibility_audit.step_results`。",
+        "",
+        "| matched term | sample | RT | direction | profile | V7 chosen route | V8 allowed routes |",
+        "|---|---|---:|---|---|---|---|",
+    ]
+    for case in path_audit["representative_cases"]:
+        selected = case["selected_matched_term"]
+        term = f"{selected.get('family')}:{selected.get('term')}"
+        if selected.get("role"):
+            term += f" ({selected['role']})"
+        lines.append(
+            f"| {term} | {case['sample_id']} | {case['round_trip_num']} | "
+            f"{case['round_trip_direction']} | {case['prompt_profile']} | "
+            f"{case['chosen_route']} | {', '.join(case['allowed_routes'])} |"
+        )
+    if path_audit["unavailable_cases"]:
+        unavailable = path_audit["unavailable_cases"][0]
+        lines += [
+            "",
+            f"Route unavailable 案例：{unavailable['sample_id']} RT{unavailable['round_trip_num']} "
+            f"{unavailable['round_trip_direction']}，profile={unavailable['prompt_profile']}，"
+            f"actual_method={unavailable['actual_method']}。",
+        ]
+    lines += [
         "",
         "## V7/V8 提示字符数",
         "",
@@ -492,10 +743,13 @@ def main(argv=None):
     json_path, md_path = write_report(report, output_dir)
     primary = report["prompt_comparison"]["primary_all_400_paired"]
     repair = report["prompt_comparison"]["repair_actual_v7_vs_counterfactual_v8"]
+    path_audit = report["path_compatibility_audit"]
     print(
         "RESULT: PASS zero_api "
         f"rows={report['source']['total_rows']} success={report['source']['success_rows']} "
         f"union_exceeded={report['threshold_coverage']['union_exceeded']} "
+        f"path_incompatible={path_audit['incompatible_steps']}/"
+        f"{path_audit['chosen_route_available_steps']} "
         f"primary_v7_mean={primary['v7_chars']['mean']} "
         f"primary_v8_mean={primary['v8_chars']['mean']} "
         f"repair_v7_mean={repair['v7_chars']['mean']} "

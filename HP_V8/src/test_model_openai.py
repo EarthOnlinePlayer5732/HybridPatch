@@ -714,8 +714,13 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertNotIn("READONLY_CONTENT", compact)
         self.assertNotIn("UNRELATED_EDITABLE_CONTENT", compact)
         self.assertNotIn("RAW_SENTINEL_DO_NOT_REPEAT", compact)
-        self.assertNotIn("bulk_patch:", compact)
+        self.assertIn("bulk_patch:", compact)
+        self.assertIn("bounded_rewrite:", compact)
         self.assertNotIn("dsl_rules:", compact)
+        self.assertIn(
+            '- bulk_patch -> edit_footprint="many_repeated_edits"', compact)
+        self.assertIn(
+            '- bounded_rewrite -> edit_footprint="whole_file_change"', compact)
         self.assertEqual(compact.count("Protocol burden fix:"), 1)
 
     def test_v8_burden_primary_cannot_outrank_partial_repair(self):

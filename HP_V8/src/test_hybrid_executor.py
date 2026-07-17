@@ -889,6 +889,21 @@ def test_v8_bulk_requires_nonempty_scope():
         assert_true(log.ops_accepted == 0 and log.ops_rejected == 0, log.to_dict())
 
 
+def test_v8_bulk_rejects_unknown_scope_before_execution():
+    ctx = {"out.txt": "alpha alpha\n"}
+    envelope = env("bulk_patch", {"ops": [{
+        "op": "replace_all", "old_text": "alpha", "new_text": "A",
+        "scope": ["out.txt", "missing.txt"],
+    }]}, protocol=PROTOCOL_V8)
+    out, log = apply_hybrid(ctx, envelope, ["out.txt"])
+    assert_true(out == {} and log.error == "schema_error", log.to_dict())
+    assert_true(log.ops_accepted == 0 and log.ops_rejected == 0, log.to_dict())
+    assert_true(any(
+        error == "action.ops[0].scope contains non-editable file: missing.txt"
+        for error in log.hybrid["schema_errors"]
+    ), log.to_dict())
+
+
 def _assert_burden_rejected(ctx, envelope, metric, bodies=None):
     burden = measure_protocol_burden(envelope, bodies=bodies)
     assert_true(burden[metric] > PROTOCOL_BURDEN_LIMITS[metric], burden)
@@ -969,6 +984,22 @@ def test_v7_legacy_missing_ranges_and_over_budget_still_execute():
     } for _ in range(PROTOCOL_BURDEN_LIMITS["local_op_count"] + 1)]}, protocol=PROTOCOL_V7)
     errors, _warnings = validate_hybrid_envelope(huge)
     assert_true("protocol_burden_exceeded" not in errors, errors)
+
+
+def test_v1_v7_bulk_unknown_scope_replay_is_unchanged():
+    ctx = {"out.txt": "alpha alpha\n"}
+    for protocol in (
+        PROTOCOL_V1, PROTOCOL_V2, PROTOCOL_V3, PROTOCOL_V4,
+        PROTOCOL_V5, PROTOCOL_V6, PROTOCOL_V7,
+    ):
+        envelope = env("bulk_patch", {"ops": [{
+            "op": "replace_all", "old_text": "alpha", "new_text": "A",
+            "scope": ["out.txt", "missing.txt"],
+        }]}, protocol=protocol)
+        out, log = apply_hybrid(ctx, envelope, ["out.txt"])
+        assert_true(out == {"out.txt": "A A\n"}, (protocol, out, log.to_dict()))
+        assert_true(log.error is None and log.ops_accepted == 1,
+                    (protocol, log.to_dict()))
 
 
 def test_v8_inherits_v7_execution_gate_and_partial_semantics():
@@ -1141,7 +1172,7 @@ def test_v8_repair_prompt_is_relevant_and_compact():
     previous = env("local_patch", {"ops": [{
         "op": "replace", "file": "a.txt", "old_text": "old", "new_text": "new",
     }]}, protocol=PROTOCOL_V8)
-    errors = ["protocol_burden_exceeded", "protocol_burden_exceeded:anchor_bytes:4081>4080"]
+    errors = ["op[0] replace rejected: not_found"]
     prompt = build_hybrid_repair_prompt(
         errors, previous_envelope=previous,
         editable_context={"a.txt": "old\n", "unrelated.txt": "SECRET_UNRELATED\n"},
@@ -1150,13 +1181,152 @@ def test_v8_repair_prompt_is_relevant_and_compact():
     canonical = __import__("json").dumps(
         previous, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     for required in (
-        "Update the requested token.", errors[1], "local_patch", "a.txt",
+        "Update the requested token.", errors[0], "local_patch", "a.txt",
         "reference.txt", canonical,
     ):
         assert_true(required in prompt, required)
-    for forbidden in ("SECRET_UNRELATED", "bulk_patch:", "dsl_rules:", "ORIGINAL RAW"):
+    for forbidden in (
+        "SECRET_UNRELATED", "bulk_patch:", "dsl_rules:",
+        "bounded_rewrite:", "ORIGINAL RAW", "Protocol burden fix:",
+    ):
         assert_true(forbidden not in prompt, forbidden)
+
+
+def test_v8_invalid_json_default_repair_restores_profile_routes_and_sources():
+    classification = classify_operation_family("Replace the requested token.")
+    prompt = build_hybrid_repair_prompt(
+        ["no valid HybridPatch JSON envelope could be extracted from the response"],
+        previous_envelope=None,
+        editable_context={"a.txt": "SOURCE_A\n", "b.txt": "SOURCE_B\n"},
+        edit_instruction="Move this section after the introduction.",
+        target_filenames=["new.txt"], readonly_filenames=["reference.txt"],
+        prompt_classification=classification, current_route=None)
+    for required in (
+        "local_patch:", "bulk_patch:", "bounded_rewrite:",
+        "few_precise_edits", "many_repeated_edits", "whole_file_change",
+        "SOURCE_A", "SOURCE_B", "[CANONICAL PREVIOUS ENVELOPE]\nnull",
+        "Repair prompt profile: default",
+    ):
+        assert_true(required in prompt, required)
+    assert_true("dsl_rules:" not in prompt, prompt)
+
+
+def test_v8_invalid_json_block_repair_restores_profile_routes_and_sources():
+    classification = classify_operation_family(
+        "Move this section after the introduction.")
+    prompt = build_hybrid_repair_prompt(
+        ["no valid HybridPatch JSON envelope could be extracted from the response"],
+        previous_envelope=None,
+        editable_context={"a.txt": "SOURCE_A\n", "b.txt": "SOURCE_B\n"},
+        edit_instruction="Repair the response.", target_filenames=["new.txt"],
+        readonly_filenames=["reference.txt"],
+        prompt_classification=classification, current_route=None)
+    for required in (
+        "dsl_rules:", "bounded_rewrite:", "block_movement", "whole_file_change",
+        "SOURCE_A", "SOURCE_B", "[BLOCK INDEX]",
+        "Repair prompt profile: block_movement",
+    ):
+        assert_true(required in prompt, required)
+    for forbidden in ("local_patch:", "bulk_patch:"):
+        assert_true(forbidden not in prompt, forbidden)
+
+
+def test_v8_local_burden_repair_allows_more_compressed_routes():
+    previous = env("local_patch", {"ops": [{
+        "op": "replace", "file": "a.txt", "old_text": "old", "new_text": "new",
+    }]}, protocol=PROTOCOL_V8)
+    prompt = build_hybrid_repair_prompt(
+        ["protocol_burden_exceeded", "protocol_burden_exceeded:anchor_bytes:4081>4080"],
+        previous_envelope=previous,
+        editable_context={"a.txt": "old\n", "unrelated.txt": "SECRET_UNRELATED\n"},
+        edit_instruction="Update the requested token.", target_filenames=["a.txt"],
+        readonly_filenames=["reference.txt"],
+        prompt_classification=classify_operation_family("Update the token."),
+        current_route="local_patch")
+    for route, footprint in (
+        ("local_patch", "few_precise_edits"),
+        ("bulk_patch", "many_repeated_edits"),
+        ("bounded_rewrite", "whole_file_change"),
+    ):
+        assert_true(f'- {route} -> edit_footprint="{footprint}"' in prompt, route)
+    assert_true("dsl_rules:" not in prompt, prompt)
+    assert_true("SECRET_UNRELATED" not in prompt, prompt)
     assert_true(prompt.count("Protocol burden fix:") == 1, prompt)
+
+
+def test_v8_dsl_burden_repair_allows_bounded_rewrite():
+    source = "one\n\ntwo\n"
+    block = split_struct2(source.encode("utf-8"))[0]
+    previous = env("dsl_rules", {"rules": [{
+        "rule": "copy_blocks", "output": "out.txt",
+        "block_ids": [block_id_for("src.txt", block.block_id)],
+    }]}, protocol=PROTOCOL_V8)
+    prompt = build_hybrid_repair_prompt(
+        ["protocol_burden_exceeded:explicit_block_id_count:40>39"],
+        previous_envelope=previous, editable_context={"src.txt": source},
+        edit_instruction="Move the section after the header.",
+        target_filenames=["out.txt"], readonly_filenames=[],
+        prompt_classification=classify_operation_family(
+            "Move the section after the header."), current_route="dsl_rules")
+    for route, footprint in (
+        ("dsl_rules", "block_movement"),
+        ("bounded_rewrite", "whole_file_change"),
+    ):
+        assert_true(f'- {route} -> edit_footprint="{footprint}"' in prompt, route)
+    for forbidden in ("local_patch:", "bulk_patch:"):
+        assert_true(forbidden not in prompt, forbidden)
+    assert_true("[BLOCK INDEX]" in prompt, prompt)
+
+
+def test_v8_bulk_and_bounded_burden_repair_route_matrix():
+    classification = classify_operation_family("Replace all requested tokens.")
+    bulk = env("bulk_patch", {"ops": [{
+        "op": "replace_all", "old_text": "old", "new_text": "new",
+        "scope": ["a.txt"],
+    }]}, protocol=PROTOCOL_V8)
+    bulk_prompt = build_hybrid_repair_prompt(
+        ["protocol_burden_exceeded:bulk_op_count:31>30"],
+        previous_envelope=bulk, editable_context={"a.txt": "old\n"},
+        edit_instruction="Replace all requested tokens.", target_filenames=["a.txt"],
+        readonly_filenames=[], prompt_classification=classification,
+        current_route="bulk_patch")
+    for required in ("bulk_patch:", "bounded_rewrite:"):
+        assert_true(required in bulk_prompt, required)
+    for forbidden in ("local_patch:", "dsl_rules:"):
+        assert_true(forbidden not in bulk_prompt, forbidden)
+
+    bounded = env("bounded_rewrite", {"files": [{
+        "file": "a.txt", "content": "new\n",
+    }]}, protocol=PROTOCOL_V8)
+    bounded_prompt = build_hybrid_repair_prompt(
+        ["protocol_burden_exceeded:envelope_bytes:2899>2898"],
+        previous_envelope=bounded, editable_context={"a.txt": "old\n"},
+        edit_instruction="Rewrite a.txt.", target_filenames=["a.txt"],
+        readonly_filenames=[], prompt_classification=classification,
+        current_route="bounded_rewrite")
+    assert_true("bounded_rewrite:" in bounded_prompt, bounded_prompt)
+    for forbidden in ("local_patch:", "bulk_patch:", "dsl_rules:"):
+        assert_true(forbidden not in bounded_prompt, forbidden)
+
+
+def test_v8_bounded_rewrite_repair_restores_all_editable_sources():
+    previous = env("bounded_rewrite", {"files": [{
+        "file": "new.txt", "content": "generated\n",
+    }]}, protocol=PROTOCOL_V8)
+    prompt = build_hybrid_repair_prompt(
+        ["validation: missing_target:new.txt"], previous_envelope=previous,
+        editable_context={"source_a.txt": "SOURCE_A\n", "source_b.txt": "SOURCE_B\n"},
+        edit_instruction="Generate new.txt from the sources.",
+        target_filenames=["new.txt"], readonly_filenames=["reference.txt"],
+        prompt_classification=classify_operation_family("Generate the output."),
+        current_route="bounded_rewrite")
+    for required in (
+        "bounded_rewrite:", "whole_file_change", "SOURCE_A", "SOURCE_B",
+        "reference.txt",
+    ):
+        assert_true(required in prompt, required)
+    for forbidden in ("local_patch:", "bulk_patch:", "dsl_rules:", "READONLY_BODY"):
+        assert_true(forbidden not in prompt, forbidden)
 
 
 def main():
@@ -1215,9 +1385,11 @@ def main():
         test_v8_local_requires_known_file,
         test_v8_local_file_cannot_be_overridden_by_legacy_selectors,
         test_v8_bulk_requires_nonempty_scope,
+        test_v8_bulk_rejects_unknown_scope_before_execution,
         test_v8_each_protocol_burden_limit_rejected_before_execution,
         test_v8_burden_limit_equality_is_allowed,
         test_v7_legacy_missing_ranges_and_over_budget_still_execute,
+        test_v1_v7_bulk_unknown_scope_replay_is_unchanged,
         test_v8_inherits_v7_execution_gate_and_partial_semantics,
         test_v8_v7_snapshot_body_ref_c2_and_partial_parity,
         test_v8_all_routes_preserve_untouched_blocks,
@@ -1225,6 +1397,12 @@ def main():
         test_v8_block_prompt_uses_only_coarse_index,
         test_v8_movement_classifier_requires_structure_or_position_cue,
         test_v8_repair_prompt_is_relevant_and_compact,
+        test_v8_invalid_json_default_repair_restores_profile_routes_and_sources,
+        test_v8_invalid_json_block_repair_restores_profile_routes_and_sources,
+        test_v8_local_burden_repair_allows_more_compressed_routes,
+        test_v8_dsl_burden_repair_allows_bounded_rewrite,
+        test_v8_bulk_and_bounded_burden_repair_route_matrix,
+        test_v8_bounded_rewrite_repair_restores_all_editable_sources,
     ]
     for test in tests:
         test()

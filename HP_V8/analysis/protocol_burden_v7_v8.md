@@ -23,12 +23,69 @@
 
 五项阈值的并集会要求 25/394 （6.35%）个历史成功形态合并重复操作或改用更合适路径；阈值等值放行，只有严格大于才拒绝。
 
+## 零 API 路径兼容审计
+
+本节只检查历史 V7 chosen route 是否出现在同一步反事实 V8 prompt profile 的 allowed routes 中；它不判断路径语义等效，不预测模型在 V8 下会选择哪条路径，也不是效果实验。
+
+- V8 profile 分布：default=184，block_movement=216。
+- default allowed routes：local_patch, bulk_patch, bounded_rewrite；block_movement allowed routes：dsl_rules, bounded_rewrite。
+- 399/400 步有可解析 chosen route；1 步 route unavailable，单列且不进入不兼容分母。
+- 不兼容：50/399 （12.53%）；按全部 400 步为 12.50%。
+- 成功提交子集：49/394 不兼容（12.44%）。
+- 不兼容 route：{"bulk_patch": 8, "dsl_rules": 1, "local_patch": 41}；方向：{"backward": 26, "forward": 24}。
+
+### 按 matched term 的不兼容计数
+
+同一步可命中多个 term，因此下表行数可重叠，不能相加作为不兼容总数。
+
+| family | matched term | role | row hits | occurrences |
+|---|---|---|---:|---:|
+| sort | sort | - | 14 | 15 |
+| group | group | - | 11 | 19 |
+| split | separate | - | 11 | 11 |
+| merge | merge | - | 8 | 9 |
+| sort | reorder | - | 7 | 8 |
+| block_movement | move | movement_verb | 5 | 5 |
+| split | split | - | 5 | 5 |
+| block_movement | section | structure_or_position_cue | 4 | 6 |
+| merge | consolidate | - | 3 | 3 |
+| block_movement | after | structure_or_position_cue | 2 | 2 |
+| block_movement | block | structure_or_position_cue | 2 | 2 |
+| block_movement | end | structure_or_position_cue | 2 | 2 |
+| block_movement | before | structure_or_position_cue | 1 | 1 |
+| default | <none> | - | 1 | 1 |
+| group | classify | - | 1 | 1 |
+
+### 代表性不兼容案例
+
+每个 matched term 选取稳定排序后的首个案例；完整 400 步逐步结果保存在 JSON 报告的 `path_compatibility_audit.step_results`。
+
+| matched term | sample | RT | direction | profile | V7 chosen route | V8 allowed routes |
+|---|---|---:|---|---|---|---|
+| block_movement:after (structure_or_position_cue) | musicsheet2 | 5 | forward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| block_movement:before (structure_or_position_cue) | mathlean2 | 2 | backward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| block_movement:block (structure_or_position_cue) | musicsheet2 | 5 | forward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| block_movement:end (structure_or_position_cue) | musicsheet2 | 5 | forward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| block_movement:move (movement_verb) | mathlean2 | 2 | backward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| block_movement:section (structure_or_position_cue) | musicsheet2 | 5 | forward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| default:<none> | makefile4 | 2 | forward | default | dsl_rules | local_patch, bulk_patch, bounded_rewrite |
+| group:classify | starcatalog4 | 7 | forward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| group:group | circuit2 | 4 | backward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| merge:consolidate | docker6 | 1 | backward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| merge:merge | docker6 | 3 | forward | block_movement | bulk_patch | dsl_rules, bounded_rewrite |
+| sort:reorder | circuit2 | 1 | backward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| sort:sort | docker6 | 1 | forward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| split:separate | docker6 | 3 | backward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+| split:split | docker6 | 1 | forward | block_movement | local_patch | dsl_rules, bounded_rewrite |
+
+Route unavailable 案例：satellite6 RT9 backward，profile=default，actual_method=hybridpatch_protocol_failure_kept_context。
+
 ## V7/V8 提示字符数
 
 | 比较 | n | V7 mean | V7 p50 | V7 p95 | V8 mean | V8 p50 | V8 p95 | 总变化 | 相对变化 |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | primary 全量配对 | 400 | 27459.715 | 23122 | 45873 | 20079.9 | 15917 | 41005 | -2951926 | -26.875% |
-| actual V7 repair vs counterfactual V8 repair | 36 | 20009.222 | 19513 | 29540 | 13119.139 | 13958 | 20817 | -248043 | -34.435% |
+| actual V7 repair vs counterfactual V8 repair | 36 | 20009.222 | 19513 | 29540 | 15939.111 | 15100 | 30144 | -146524 | -20.341% |
 
 V7 长度来自归档中的实际相对 `*.request.json`；V8 primary 使用同一 400 步的任务、editable、readonly 和 target 上下文离线重建。repair 比较只覆盖 V7 实际发生 repair 的步骤。
 
@@ -40,4 +97,5 @@ V7 长度来自归档中的实际相对 `*.request.json`；V8 primary 使用同�
 - Chosen attempts mix primary and repair outputs; the distribution is not a distribution of all model responses.
 - Routes are highly imbalanced and DSL has only one successful envelope, so its 39-ID ceiling is provisional rather than statistically stable.
 - Canonical envelope size excludes sidecar FILE BODIES and therefore is not total completion size.
+- The path-compatibility audit only checks whether an archived V7 chosen route is listed by the counterfactual V8 prompt profile; it does not establish route equivalence or predict the route a model would choose under V8.
 - The zero-API replay cannot demonstrate score retention, token reduction, or protocol-failure-rate improvement; those require a controlled API experiment.

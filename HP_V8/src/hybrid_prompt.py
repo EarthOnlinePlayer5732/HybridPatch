@@ -185,6 +185,15 @@ _ROUTE_FOOTPRINT = {
     ROUTE_BOUNDED_REWRITE: "whole_file_change",
 }
 
+_BURDEN_REPAIR_ROUTES = {
+    ROUTE_LOCAL_PATCH: (
+        ROUTE_LOCAL_PATCH, ROUTE_BULK_PATCH, ROUTE_BOUNDED_REWRITE,
+    ),
+    ROUTE_BULK_PATCH: (ROUTE_BULK_PATCH, ROUTE_BOUNDED_REWRITE),
+    ROUTE_DSL_RULES: (ROUTE_DSL_RULES, ROUTE_BOUNDED_REWRITE),
+    ROUTE_BOUNDED_REWRITE: (ROUTE_BOUNDED_REWRITE,),
+}
+
 
 def _action_schema_lines(route):
     if route == ROUTE_LOCAL_PATCH:
@@ -364,8 +373,11 @@ def _declared_relevant_files(envelope):
     return names
 
 
-def _relevant_editable_context(envelope, errors, editable_context, target_filenames):
+def _relevant_editable_context(envelope, errors, editable_context, target_filenames,
+                               current_route=None):
     editable_context = editable_context or {}
+    if not envelope or current_route == ROUTE_BOUNDED_REWRITE:
+        return {name: editable_context[name] for name in sorted(editable_context)}
     names = _declared_relevant_files(envelope)
     for target in target_filenames or []:
         if not isinstance(target, str):
@@ -384,6 +396,49 @@ def _canonical_envelope(envelope):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
+def _repair_routes(errors, previous_envelope, current_route,
+                   prompt_classification, edit_instruction):
+    """Choose the compact set of routes exposed to the single repair call."""
+    classification = prompt_classification or classify_operation_family(edit_instruction)
+    profile = classification.get("prompt_profile")
+    try:
+        profile_routes = _routes_for_profile(profile)
+    except ValueError:
+        classification = classify_operation_family(edit_instruction)
+        profile_routes = _routes_for_profile(classification["prompt_profile"])
+
+    action = previous_envelope.get("action") if isinstance(previous_envelope, dict) else None
+    parsed_route = action.get("route") if isinstance(action, dict) else None
+    route = parsed_route if parsed_route in _ROUTE_FOOTPRINT else current_route
+    if route not in _ROUTE_FOOTPRINT:
+        route = None
+
+    burden_exceeded = any(
+        "protocol_burden_exceeded" in str(error) for error in (errors or [])
+    )
+    if route is None:
+        routes = profile_routes
+    elif burden_exceeded:
+        routes = _BURDEN_REPAIR_ROUTES[route]
+    else:
+        routes = (route,)
+    return routes, route, classification
+
+
+def _repair_route_format_lines(routes):
+    lines = [
+        f'{{"protocol":"{PROTOCOL}","plan":{{"task_family":"...",'
+        '"edit_footprint":"<matching value below>"},"action":{...}}}',
+        "Select exactly one allowed route. Its edit_footprint MUST use the matching value below.",
+    ]
+    for route in routes:
+        lines.append(
+            f'- {route} -> edit_footprint="{_ROUTE_FOOTPRINT[route]}"'
+        )
+        lines.extend(_action_schema_lines(route))
+    return lines
+
+
 def build_hybrid_repair_prompt(errors, *, previous_envelope=None,
                                editable_context=None, edit_instruction=None,
                                target_filenames=None, readonly_filenames=None,
@@ -395,16 +450,13 @@ def build_hybrid_repair_prompt(errors, *, previous_envelope=None,
     """
     err_list = [str(error) for error in (errors or [])]
     err_lines = "\n".join(f"- {error}" for error in err_list)
-    action = previous_envelope.get("action") if isinstance(previous_envelope, dict) else None
-    parsed_route = action.get("route") if isinstance(action, dict) else None
-    route = current_route if current_route in {
-        ROUTE_LOCAL_PATCH, ROUTE_BULK_PATCH, ROUTE_DSL_RULES, ROUTE_BOUNDED_REWRITE,
-    } else parsed_route
-    if route not in {ROUTE_LOCAL_PATCH, ROUTE_BULK_PATCH,
-                     ROUTE_DSL_RULES, ROUTE_BOUNDED_REWRITE}:
-        route = ROUTE_BOUNDED_REWRITE
+    routes, route, classification = _repair_routes(
+        err_list, previous_envelope, current_route,
+        prompt_classification, edit_instruction,
+    )
     relevant = _relevant_editable_context(
-        previous_envelope, err_list, editable_context, target_filenames)
+        previous_envelope, err_list, editable_context, target_filenames,
+        current_route=route)
     targets_json = json.dumps(list(target_filenames or []), ensure_ascii=False,
                               separators=(",", ":"))
     readonly_json = json.dumps(list(readonly_filenames or []), ensure_ascii=False,
@@ -418,11 +470,10 @@ def build_hybrid_repair_prompt(errors, *, previous_envelope=None,
         "[ERRORS]",
         err_lines or "- unknown error",
         "",
-        "[CURRENT ROUTE FORMAT]",
-        f'{{"protocol":"{PROTOCOL}","plan":{{"task_family":"...","edit_footprint":"{_ROUTE_FOOTPRINT[route]}"}},"action":{{...}}}}',
+        "[CURRENT ROUTE FORMAT]" if len(routes) == 1 else "[ALLOWED ROUTE FORMATS]",
     ]
-    sections += _action_schema_lines(route)
-    body_lines = _body_transport_lines((route,))
+    sections += _repair_route_format_lines(routes)
+    body_lines = _body_transport_lines(routes)
     if body_lines:
         sections += [""] + body_lines
     sections += [
@@ -435,9 +486,16 @@ def build_hybrid_repair_prompt(errors, *, previous_envelope=None,
         "",
         "[RELEVANT EDITABLE FILES]",
         stringify_context(relevant) if relevant else "null",
+    ]
+    if ROUTE_DSL_RULES in routes and relevant:
+        index = build_hybrid_index(relevant, include_files=False)
+        sections += ["", "[BLOCK INDEX]", format_block_table(index)]
+    sections += [
         "",
         "[CANONICAL PREVIOUS ENVELOPE]",
         _canonical_envelope(previous_envelope),
+        "",
+        f"Repair prompt profile: {classification.get('prompt_profile')}",
     ]
     if any("protocol_burden_exceeded" in error for error in err_list):
         sections += [

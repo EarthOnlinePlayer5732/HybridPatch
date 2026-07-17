@@ -280,10 +280,11 @@ def _check_bulk(action, errors):
                 errors.append(f"{tag}.{key} must be a non-negative integer")
 
 
-def _check_bulk_v8(action, errors):
+def _check_bulk_v8(action, errors, editable_filenames=None):
     ops = action.get("ops")
     if not isinstance(ops, list):
         return
+    known = set(editable_filenames) if editable_filenames is not None else None
     for i, op in enumerate(ops):
         if not isinstance(op, dict):
             continue
@@ -294,6 +295,13 @@ def _check_bulk_v8(action, errors):
                 f"action.ops[{i}].scope must be a non-empty list of non-empty strings "
                 "for hybridpatch/8 bulk_patch"
             )
+            continue
+        if known is not None:
+            for filename in scope:
+                if filename not in known:
+                    errors.append(
+                        f"action.ops[{i}].scope contains non-editable file: {filename}"
+                    )
 
 
 def _check_dsl(action, errors):
@@ -487,7 +495,7 @@ def validate_hybrid_envelope(envelope, bodies=None, editable_filenames=None):
     elif route == ROUTE_BULK_PATCH:
         _check_bulk(action, errors)
         if protocol == PROTOCOL_V8:
-            _check_bulk_v8(action, errors)
+            _check_bulk_v8(action, errors, editable_filenames=editable_filenames)
     elif route == ROUTE_DSL_RULES:
         _check_dsl(action, errors)
     elif route == ROUTE_BOUNDED_REWRITE:
