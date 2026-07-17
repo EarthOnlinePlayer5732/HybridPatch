@@ -43,7 +43,7 @@ from utils_context import parse_context_string  # noqa: E402
 from utils_env import load_sample  # noqa: E402
 
 
-REPORT_SCHEMA = "hybridpatch.protocol_burden_v7_v8/2"
+REPORT_SCHEMA = "hybridpatch.protocol_burden_v7_v8/3"
 DEFAULT_ARCHIVE = REPO_ROOT / "HP_V7" / "exp_20260711_hybridv7dev20full"
 DEFAULT_OUTPUT_DIR = HP_ROOT / "analysis"
 EXPECTED = {
@@ -73,9 +73,9 @@ EXPECTED = {
     "path_compatibility": {
         "chosen_route_available_steps": 399,
         "chosen_route_unavailable_steps": 1,
-        "compatible_steps": 349,
-        "incompatible_steps": 50,
-        "success_incompatible_steps": 49,
+        "compatible_steps": 398,
+        "incompatible_steps": 1,
+        "success_incompatible_steps": 1,
     },
 }
 LIMITATIONS = [
@@ -85,6 +85,7 @@ LIMITATIONS = [
     "Chosen attempts mix primary and repair outputs; the distribution is not a distribution of all model responses.",
     "Routes are highly imbalanced and DSL has only one successful envelope, so its 39-ID ceiling is provisional rather than statistically stable.",
     "Canonical envelope size excludes sidecar FILE BODIES and therefore is not total completion size.",
+    "The empirical P95 burden thresholds are soft analysis and telemetry markers only; crossing them does not reject, truncate, repair, or reroute an envelope.",
     "The path-compatibility audit only checks whether an archived V7 chosen route is listed by the counterfactual V8 prompt profile; it does not establish route equivalence or predict the route a model would choose under V8.",
     "The zero-API replay cannot demonstrate score retention, token reduction, or protocol-failure-rate improvement; those require a controlled API experiment.",
 ]
@@ -463,7 +464,11 @@ def analyze(archive: Path):
     ]
     threshold_coverage = {
         "limits": dict(PROTOCOL_BURDEN_LIMITS),
-        "comparison": "value <= limit passes; value > limit is rejected",
+        "policy": "soft_analysis_and_telemetry_only",
+        "comparison": (
+            "value > empirical threshold is recorded as an overage; "
+            "it has no schema, execution, repair, truncation, or routing effect"
+        ),
         "per_metric_exceeded": per_metric_exceeded,
         "union_exceeded": len(union_exceeded_rows),
         "union_covered": len(measurements) - len(union_exceeded_rows),
@@ -610,9 +615,9 @@ def _markdown(report):
         f"- route：bounded_rewrite={routes.get('bounded_rewrite', 0)}，local_patch={routes.get('local_patch', 0)}，bulk_patch={routes.get('bulk_patch', 0)}，dsl_rules={routes.get('dsl_rules', 0)}。",
         "- 分位数：nearest-rank，`sorted_values[ceil(p*n)-1]`。",
         "",
-        "## V7 成功信封分布与冻结阈值",
+        "## V7 成功信封分布与经验软阈值",
         "",
-        "| 指标 | n | p50 | p90 | p95 | p99 | max | V8 上限 | 超限行数 |",
+        "| 指标 | n | p50 | p90 | p95 | p99 | max | V8 经验阈值 | 超阈值行数 |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for metric in ("local_op_count", "bulk_op_count", "anchor_bytes",
@@ -625,9 +630,9 @@ def _markdown(report):
         )
     lines += [
         "",
-        f"五项阈值的并集会要求 {coverage['union_exceeded']}/{source['success_rows']} "
-        f"（{coverage['union_exceeded_percent']:.2f}%）个历史成功形态合并重复操作或改用更合适路径；"
-        f"阈值等值放行，只有严格大于才拒绝。",
+        f"五项经验阈值的并集标记了 {coverage['union_exceeded']}/{source['success_rows']} "
+        f"（{coverage['union_exceeded_percent']:.2f}%）个历史成功信封。阈值现在只用于离线分析和 "
+        "telemetry；超阈值信封仍完整执行，不触发 schema 拒绝、repair、截断或强制换路。",
         "",
         "## 零 API 路径兼容审计",
         "",

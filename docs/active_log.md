@@ -455,3 +455,19 @@
 - aggregate: FR+Official RS@1/5/10=0.735/0.550/0.508, CF@10=162/2097; original frozen FR remains 0.925/0.682/0.558, CF=167/2097
 - V7 val40 sensitivity: strict38 HP 0.825 vs FR+Official 0.564, Δ+0.262 (p=2.54e-28, d=0.62); retained as mixed-source/post-hoc sensitivity, not a replacement for the same-transport canonical Δ+0.008
 - artifacts: `Baseline/build_fr_plus_official.py`, `Baseline/FR+Official/{README.md,source_manifest.csv,anomaly_by_sample.csv,summary.json,val40_comparison.md}`; FINDINGS §232
+
+## 2026-07-17 - Before Experiment: HP_V8 soft-budget paid smoke2
+
+- experiment: `exp_20260717_hybridv8_softbudget_smoke2`; owner `HP_V8`; level `付费 smoke`; claim role `diagnostic_only`
+- plan: `docs/experiment_plans/exp_20260717_hybridv8_softbudget_smoke2.md`
+- scope: `treebank4,obj3d2` × 2RT × `hybridpatch,fullrewrite`; MiniMax-M3; transport `opencode_anthropic_sdk/3`; seed42; distractor-on; same per-sample task plan
+- gate: run only after independent plan review, full zero-API regression/runtime-evaluator preflight, 11-Key tiny probe and a clean committed tree; 10-sample campaign remains blocked until smoke integrity, preservation and API-ledger checks pass
+- stop: preservation violation, Git identity drift, systematic runner/evaluator/transport error, duplicate/partial RT, unmappable API log or budget breach; no paid call made at entry time
+
+## 2026-07-17 - Before Experiment: HP_V8 soft-budget paired10 diagnostic
+
+- experiment: `exp_20260717_hybridv8_softbudget_paired10`; owner `HP_V8`; level `支持/诊断实验`; claim role `diagnostic_only`
+- plan: `docs/experiment_plans/exp_20260717_hybridv8_softbudget_paired10.md`
+- scope: user-fixed 10 exposed samples × 10RT × `hybridpatch,fullrewrite`; MiniMax-M3; transport `opencode_anthropic_sdk/3`; seed42; distractor-on; same per-sample task plan
+- interpretation boundary: hand-selected and historically exposed samples; report RS@1/5/10 and label the user-requested 20-edit-step endpoint as RT10 backward, never as an unseen-set estimate
+- launch gate: exact same clean commit as successful smoke; no code/config/transport/evaluator/scoring change between phases; no paid call made at entry time

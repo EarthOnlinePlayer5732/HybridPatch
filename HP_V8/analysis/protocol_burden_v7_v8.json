@@ -75,6 +75,7 @@
     "Chosen attempts mix primary and repair outputs; the distribution is not a distribution of all model responses.",
     "Routes are highly imbalanced and DSL has only one successful envelope, so its 39-ID ceiling is provisional rather than statistically stable.",
     "Canonical envelope size excludes sidecar FILE BODIES and therefore is not total completion size.",
+    "The empirical P95 burden thresholds are soft analysis and telemetry markers only; crossing them does not reject, truncate, repair, or reroute an envelope.",
     "The path-compatibility audit only checks whether an archived V7 chosen route is listed by the counterfactual V8 prompt profile; it does not establish route equivalence or predict the route a model would choose under V8.",
     "The zero-API replay cannot demonstrate score retention, token reduction, or protocol-failure-rate improvement; those require a controlled API experiment."
   ],
@@ -82,171 +83,44 @@
     "audit_mode": "zero_api_counterfactual_route_availability",
     "chosen_route_available_steps": 399,
     "chosen_route_unavailable_steps": 1,
-    "compatible_steps": 349,
+    "compatible_steps": 398,
     "incompatible_by_direction": {
-      "backward": 26,
-      "forward": 24
+      "forward": 1
     },
     "incompatible_by_matched_term": [
-      {
-        "family": "sort",
-        "occurrence_count": 15,
-        "role": null,
-        "row_hit_count": 14,
-        "term": "sort"
-      },
-      {
-        "family": "group",
-        "occurrence_count": 19,
-        "role": null,
-        "row_hit_count": 11,
-        "term": "group"
-      },
-      {
-        "family": "split",
-        "occurrence_count": 11,
-        "role": null,
-        "row_hit_count": 11,
-        "term": "separate"
-      },
-      {
-        "family": "merge",
-        "occurrence_count": 9,
-        "role": null,
-        "row_hit_count": 8,
-        "term": "merge"
-      },
-      {
-        "family": "sort",
-        "occurrence_count": 8,
-        "role": null,
-        "row_hit_count": 7,
-        "term": "reorder"
-      },
-      {
-        "family": "block_movement",
-        "occurrence_count": 5,
-        "role": "movement_verb",
-        "row_hit_count": 5,
-        "term": "move"
-      },
-      {
-        "family": "split",
-        "occurrence_count": 5,
-        "role": null,
-        "row_hit_count": 5,
-        "term": "split"
-      },
-      {
-        "family": "block_movement",
-        "occurrence_count": 6,
-        "role": "structure_or_position_cue",
-        "row_hit_count": 4,
-        "term": "section"
-      },
-      {
-        "family": "merge",
-        "occurrence_count": 3,
-        "role": null,
-        "row_hit_count": 3,
-        "term": "consolidate"
-      },
-      {
-        "family": "block_movement",
-        "occurrence_count": 2,
-        "role": "structure_or_position_cue",
-        "row_hit_count": 2,
-        "term": "after"
-      },
-      {
-        "family": "block_movement",
-        "occurrence_count": 2,
-        "role": "structure_or_position_cue",
-        "row_hit_count": 2,
-        "term": "block"
-      },
-      {
-        "family": "block_movement",
-        "occurrence_count": 2,
-        "role": "structure_or_position_cue",
-        "row_hit_count": 2,
-        "term": "end"
-      },
-      {
-        "family": "block_movement",
-        "occurrence_count": 1,
-        "role": "structure_or_position_cue",
-        "row_hit_count": 1,
-        "term": "before"
-      },
       {
         "family": "default",
         "occurrence_count": 1,
         "role": null,
         "row_hit_count": 1,
         "term": "<none>"
-      },
-      {
-        "family": "group",
-        "occurrence_count": 1,
-        "role": null,
-        "row_hit_count": 1,
-        "term": "classify"
       }
     ],
     "incompatible_by_profile": {
-      "block_movement": 49,
       "default": 1
     },
     "incompatible_by_profile_route": {
-      "block_movement": {
-        "bulk_patch": 8,
-        "local_patch": 41
-      },
       "default": {
         "dsl_rules": 1
       }
     },
     "incompatible_by_round_trip": {
-      "1": 4,
-      "10": 3,
-      "2": 9,
-      "3": 6,
-      "4": 4,
-      "5": 6,
-      "6": 2,
-      "7": 4,
-      "8": 4,
-      "9": 8
+      "2": 1
     },
     "incompatible_by_route": {
-      "bulk_patch": 8,
-      "dsl_rules": 1,
-      "local_patch": 41
+      "dsl_rules": 1
     },
     "incompatible_by_sample": {
-      "circuit2": 3,
-      "docker6": 10,
-      "fonteng3": 9,
-      "foodmenu6": 1,
-      "geotrack3": 1,
-      "makefile4": 2,
-      "malware6": 4,
-      "mathlean2": 5,
-      "musicsheet2": 2,
-      "protein1": 2,
-      "python7": 2,
-      "quantum4": 1,
-      "satellite6": 3,
-      "screenplay6": 2,
-      "starcatalog4": 3
+      "makefile4": 1
     },
-    "incompatible_percent_of_all": 12.5,
-    "incompatible_percent_of_available": 12.53,
-    "incompatible_steps": 50,
+    "incompatible_percent_of_all": 0.25,
+    "incompatible_percent_of_available": 0.25,
+    "incompatible_steps": 1,
     "interpretation": "Offline availability check only: whether each archived V7 chosen route appears in the allowed routes of the counterfactual V8 prompt profile. This is not an effectiveness experiment.",
     "profile_allowed_routes": {
       "block_movement": [
+        "local_patch",
+        "bulk_patch",
         "dsl_rules",
         "bounded_rewrite"
       ],
@@ -261,150 +135,6 @@
       "default": 184
     },
     "representative_cases": [
-      {
-        "actual_method": "hybridpatch_protocol_failure_kept_context",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "move",
-          "block",
-          "section",
-          "after",
-          "end"
-        ],
-        "operation_family": "block_movement",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "forward",
-        "round_trip_num": 5,
-        "sample_id": "musicsheet2",
-        "selected_matched_term": {
-          "family": "block_movement",
-          "role": "structure_or_position_cue",
-          "term": "after"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "move",
-          "before"
-        ],
-        "operation_family": "block_movement",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "backward",
-        "round_trip_num": 2,
-        "sample_id": "mathlean2",
-        "selected_matched_term": {
-          "family": "block_movement",
-          "role": "structure_or_position_cue",
-          "term": "before"
-        }
-      },
-      {
-        "actual_method": "hybridpatch_protocol_failure_kept_context",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "move",
-          "block",
-          "section",
-          "after",
-          "end"
-        ],
-        "operation_family": "block_movement",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "forward",
-        "round_trip_num": 5,
-        "sample_id": "musicsheet2",
-        "selected_matched_term": {
-          "family": "block_movement",
-          "role": "structure_or_position_cue",
-          "term": "block"
-        }
-      },
-      {
-        "actual_method": "hybridpatch_protocol_failure_kept_context",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "move",
-          "block",
-          "section",
-          "after",
-          "end"
-        ],
-        "operation_family": "block_movement",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "forward",
-        "round_trip_num": 5,
-        "sample_id": "musicsheet2",
-        "selected_matched_term": {
-          "family": "block_movement",
-          "role": "structure_or_position_cue",
-          "term": "end"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "move",
-          "before"
-        ],
-        "operation_family": "block_movement",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "backward",
-        "round_trip_num": 2,
-        "sample_id": "mathlean2",
-        "selected_matched_term": {
-          "family": "block_movement",
-          "role": "movement_verb",
-          "term": "move"
-        }
-      },
-      {
-        "actual_method": "hybridpatch_protocol_failure_kept_context",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "move",
-          "block",
-          "section",
-          "after",
-          "end"
-        ],
-        "operation_family": "block_movement",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "forward",
-        "round_trip_num": 5,
-        "sample_id": "musicsheet2",
-        "selected_matched_term": {
-          "family": "block_movement",
-          "role": "structure_or_position_cue",
-          "term": "section"
-        }
-      },
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
@@ -424,187 +154,14 @@
           "role": null,
           "term": "<none>"
         }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "sort",
-          "classify"
-        ],
-        "operation_family": "sort",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "forward",
-        "round_trip_num": 7,
-        "sample_id": "starcatalog4",
-        "selected_matched_term": {
-          "family": "group",
-          "role": null,
-          "term": "classify"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "group"
-        ],
-        "operation_family": "group",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "backward",
-        "round_trip_num": 4,
-        "sample_id": "circuit2",
-        "selected_matched_term": {
-          "family": "group",
-          "role": null,
-          "term": "group"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "consolidate",
-          "group"
-        ],
-        "operation_family": "merge",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "backward",
-        "round_trip_num": 1,
-        "sample_id": "docker6",
-        "selected_matched_term": {
-          "family": "merge",
-          "role": null,
-          "term": "consolidate"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "bulk_patch",
-        "matched_terms": [
-          "merge"
-        ],
-        "operation_family": "merge",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "forward",
-        "round_trip_num": 3,
-        "sample_id": "docker6",
-        "selected_matched_term": {
-          "family": "merge",
-          "role": null,
-          "term": "merge"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "reorder"
-        ],
-        "operation_family": "sort",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "backward",
-        "round_trip_num": 1,
-        "sample_id": "circuit2",
-        "selected_matched_term": {
-          "family": "sort",
-          "role": null,
-          "term": "reorder"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "split",
-          "sort",
-          "group"
-        ],
-        "operation_family": "split",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "forward",
-        "round_trip_num": 1,
-        "sample_id": "docker6",
-        "selected_matched_term": {
-          "family": "sort",
-          "role": null,
-          "term": "sort"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "split",
-          "separate"
-        ],
-        "operation_family": "split",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "backward",
-        "round_trip_num": 3,
-        "sample_id": "docker6",
-        "selected_matched_term": {
-          "family": "split",
-          "role": null,
-          "term": "separate"
-        }
-      },
-      {
-        "actual_method": "hybridpatch",
-        "allowed_routes": [
-          "dsl_rules",
-          "bounded_rewrite"
-        ],
-        "chosen_route": "local_patch",
-        "matched_terms": [
-          "split",
-          "sort",
-          "group"
-        ],
-        "operation_family": "split",
-        "prompt_profile": "block_movement",
-        "round_trip_direction": "forward",
-        "round_trip_num": 1,
-        "sample_id": "docker6",
-        "selected_matched_term": {
-          "family": "split",
-          "role": null,
-          "term": "split"
-        }
       }
     ],
     "step_results": [
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -634,12 +191,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -743,6 +302,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -772,12 +333,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "group"
         ],
@@ -801,6 +364,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -890,6 +455,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -919,6 +486,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -948,6 +517,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -1037,6 +608,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -1066,12 +639,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "group"
         ],
@@ -1095,12 +670,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split",
           "sort",
@@ -1138,12 +715,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge",
           "group"
@@ -1174,12 +753,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort",
           "group"
@@ -1230,12 +811,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "bulk_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge"
         ],
@@ -1259,12 +842,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split"
         ],
@@ -1374,12 +959,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort",
           "group"
@@ -1430,12 +1017,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split",
           "sort",
@@ -1473,12 +1062,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge",
           "group"
@@ -1549,12 +1140,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "bulk_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge"
         ],
@@ -1578,12 +1171,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split"
         ],
@@ -1693,6 +1288,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -1735,6 +1332,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -1771,6 +1370,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -1807,6 +1408,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -1876,6 +1479,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -1911,6 +1516,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2020,6 +1627,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2055,6 +1664,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2084,6 +1695,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2120,6 +1733,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2229,12 +1844,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split",
           "group"
@@ -2271,12 +1888,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge"
         ],
@@ -2300,12 +1919,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -2329,12 +1950,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -2398,12 +2021,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -2427,12 +2052,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -2456,6 +2083,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2485,6 +2114,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2554,6 +2185,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2583,12 +2216,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -2612,12 +2247,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -2641,12 +2278,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -2770,6 +2409,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2839,6 +2480,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2888,6 +2531,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -2953,6 +2598,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3109,6 +2756,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3138,12 +2787,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "bulk_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge"
         ],
@@ -3287,6 +2938,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3322,6 +2975,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3357,6 +3012,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3386,6 +3043,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3462,6 +3121,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3498,12 +3159,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split",
           "sort"
@@ -3614,6 +3277,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3649,6 +3314,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3684,6 +3351,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3713,6 +3382,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3789,6 +3460,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3818,6 +3491,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3847,6 +3522,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3876,6 +3553,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3925,6 +3604,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -3994,6 +3675,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4029,6 +3712,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4065,6 +3750,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4094,6 +3781,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4130,6 +3819,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4159,6 +3850,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4195,6 +3888,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4224,6 +3919,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4253,6 +3950,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4282,6 +3981,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4311,6 +4012,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4340,6 +4043,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4369,6 +4074,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4398,6 +4105,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4467,6 +4176,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4496,6 +4207,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4565,6 +4278,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4622,6 +4337,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4679,6 +4396,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4728,6 +4447,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -4899,12 +4620,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge"
         ],
@@ -4968,6 +4691,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5137,6 +4862,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5166,6 +4893,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5249,6 +4978,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5298,6 +5029,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5327,6 +5060,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5356,6 +5091,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5385,6 +5122,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5414,12 +5153,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split"
         ],
@@ -5443,12 +5184,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "bulk_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split"
         ],
@@ -5512,6 +5255,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5561,6 +5306,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5590,6 +5337,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5619,6 +5368,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5648,6 +5399,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5677,6 +5430,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5706,6 +5461,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5755,6 +5512,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -5784,12 +5543,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split"
         ],
@@ -5813,12 +5574,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "bulk_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split"
         ],
@@ -5922,12 +5685,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -5951,12 +5716,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "block_movement"
         ],
@@ -6028,12 +5795,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "group"
         ],
@@ -6097,12 +5866,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split"
         ],
@@ -6166,6 +5937,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6201,6 +5974,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6310,12 +6085,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "group"
         ],
@@ -6359,6 +6136,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6394,6 +6173,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6423,6 +6204,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6452,6 +6235,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6481,6 +6266,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6530,6 +6317,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6565,6 +6354,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6594,6 +6385,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6623,6 +6416,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6652,6 +6447,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6688,6 +6485,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6717,6 +6516,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6752,6 +6553,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6781,6 +6584,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6810,6 +6615,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6839,6 +6646,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6888,6 +6697,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6923,6 +6734,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6952,6 +6765,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -6987,6 +6802,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7096,6 +6913,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7125,6 +6944,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7161,12 +6982,14 @@
       {
         "actual_method": "hybridpatch_protocol_failure_kept_context",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "block_movement"
         ],
@@ -7359,12 +7182,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "block_movement"
         ],
@@ -7437,6 +7262,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7466,6 +7293,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7522,12 +7351,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge"
         ],
@@ -7551,6 +7382,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7580,6 +7413,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7649,6 +7484,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7691,6 +7528,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7820,12 +7659,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "merge"
         ],
@@ -7929,6 +7770,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -7971,6 +7814,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8160,6 +8005,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8189,6 +8036,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8218,6 +8067,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8307,12 +8158,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split",
           "merge"
@@ -8343,12 +8196,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "split",
           "merge"
@@ -8539,6 +8394,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8588,12 +8445,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -8637,6 +8496,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8673,6 +8534,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8782,6 +8645,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8818,6 +8683,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8847,6 +8714,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8896,6 +8765,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8945,6 +8816,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -8974,6 +8847,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9003,6 +8878,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9039,6 +8916,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9075,6 +8954,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9124,6 +9005,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9160,12 +9043,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "bulk_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -9189,6 +9074,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9218,12 +9105,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "bulk_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -9247,6 +9136,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9276,6 +9167,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9305,6 +9198,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9334,6 +9229,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9363,6 +9260,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9392,12 +9291,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "bulk_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -9421,6 +9322,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9470,6 +9373,8 @@
       {
         "actual_method": "hybridpatch_protocol_failure_kept_context",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9506,6 +9411,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9575,12 +9482,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "block_movement"
         ],
@@ -9612,12 +9521,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "block_movement"
         ],
@@ -9649,6 +9560,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9678,6 +9591,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -9993,6 +9908,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10029,6 +9946,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10058,6 +9977,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10094,6 +10015,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10176,6 +10099,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10205,6 +10130,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10234,12 +10161,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -10263,6 +10192,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10292,6 +10223,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10321,6 +10254,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10350,12 +10285,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort",
           "group"
@@ -10386,6 +10323,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10415,6 +10354,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10444,6 +10385,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10513,12 +10456,14 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
         "chosen_route": "local_patch",
         "chosen_route_available": true,
-        "compatible": false,
+        "compatible": true,
         "matched_families": [
           "sort"
         ],
@@ -10542,6 +10487,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10571,6 +10518,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10607,6 +10556,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10636,6 +10587,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10679,6 +10632,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10708,6 +10663,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10737,6 +10694,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10766,6 +10725,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10809,6 +10770,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10838,6 +10801,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10880,6 +10845,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10923,6 +10890,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10965,6 +10934,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -10994,6 +10965,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -11030,6 +11003,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -11059,6 +11034,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -11101,6 +11078,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -11144,6 +11123,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -11173,6 +11154,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -11202,6 +11185,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -11245,6 +11230,8 @@
       {
         "actual_method": "hybridpatch",
         "allowed_routes": [
+          "local_patch",
+          "bulk_patch",
           "dsl_rules",
           "bounded_rewrite"
         ],
@@ -11273,9 +11260,9 @@
       }
     ],
     "success_subset": {
-      "compatible_steps": 345,
-      "incompatible_percent": 12.44,
-      "incompatible_steps": 49,
+      "compatible_steps": 393,
+      "incompatible_percent": 0.25,
+      "incompatible_steps": 1,
       "total_steps": 394
     },
     "total_steps": 400,
@@ -11308,20 +11295,20 @@
       "equal_count": 0,
       "n": 400,
       "paired_delta_chars": {
-        "max": -2808,
-        "mean": -7379.815,
+        "max": -1730,
+        "mean": -6797.695,
         "min": -41618,
         "n": 400,
-        "p50": -2933,
-        "p75": -2819,
-        "p90": -2815,
-        "p95": -2814,
-        "p99": -2808
+        "p50": -1855,
+        "p75": -1741,
+        "p90": -1737,
+        "p95": -1736,
+        "p99": -1730
       },
-      "relative_total_change_percent": -26.875,
-      "total_delta_chars": -2951926,
+      "relative_total_change_percent": -24.755,
+      "total_delta_chars": -2719078,
       "total_v7_chars": 10983886,
-      "total_v8_chars": 8031960,
+      "total_v8_chars": 8264808,
       "v7_chars": {
         "max": 89394,
         "mean": 27459.715,
@@ -11334,15 +11321,15 @@
         "p99": 65293
       },
       "v8_chars": {
-        "max": 86197,
-        "mean": 20079.9,
+        "max": 87275,
+        "mean": 20662.02,
         "min": 5790,
         "n": 400,
-        "p50": 15917,
-        "p75": 27045,
-        "p90": 36493,
-        "p95": 41005,
-        "p99": 60855
+        "p50": 16353,
+        "p75": 28123,
+        "p90": 37571,
+        "p95": 42083,
+        "p99": 61933
       },
       "v8_shorter_count": 400
     },
@@ -11350,20 +11337,20 @@
       "equal_count": 0,
       "n": 36,
       "paired_delta_chars": {
-        "max": 22586,
-        "mean": -4070.111,
+        "max": 23536,
+        "mean": -3964.556,
         "min": -13537,
         "n": 36,
         "p50": -4777,
         "p75": -2736,
         "p90": -1623,
-        "p95": 13447,
-        "p99": 22586
+        "p95": 14397,
+        "p99": 23536
       },
-      "relative_total_change_percent": -20.341,
-      "total_delta_chars": -146524,
+      "relative_total_change_percent": -19.814,
+      "total_delta_chars": -142724,
       "total_v7_chars": 720332,
-      "total_v8_chars": 573808,
+      "total_v8_chars": 577608,
       "v7_chars": {
         "max": 34745,
         "mean": 20009.222,
@@ -11376,15 +11363,15 @@
         "p99": 34745
       },
       "v8_chars": {
-        "max": 50977,
-        "mean": 15939.111,
+        "max": 51927,
+        "mean": 16044.667,
         "min": 2196,
         "n": 36,
         "p50": 15100,
-        "p75": 16602,
+        "p75": 16727,
         "p90": 20808,
         "p95": 30144,
-        "p99": 50977
+        "p99": 51927
       },
       "v8_shorter_count": 33
     },
@@ -11402,7 +11389,7 @@
     }
   },
   "quantile_method": "nearest-rank: sorted_values[ceil(p*n)-1]",
-  "schema": "hybridpatch.protocol_burden_v7_v8/2",
+  "schema": "hybridpatch.protocol_burden_v7_v8/3",
   "source": {
     "archive": "HP_V7/exp_20260711_hybridv7dev20full",
     "kept_rows": 6,
@@ -11425,7 +11412,7 @@
     }
   },
   "threshold_coverage": {
-    "comparison": "value <= limit passes; value > limit is rejected",
+    "comparison": "value > empirical threshold is recorded as an overage; it has no schema, execution, repair, truncation, or routing effect",
     "exceeded_rows": [
       {
         "anchor_bytes": 862,
@@ -11767,6 +11754,7 @@
       "explicit_block_id_count": 0,
       "local_op_count": 4
     },
+    "policy": "soft_analysis_and_telemetry_only",
     "union_coverage_percent": 93.65,
     "union_covered": 369,
     "union_exceeded": 25,

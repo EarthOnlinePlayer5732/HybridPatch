@@ -62,7 +62,8 @@ ROUTES = {
 # Eligibility hard-gates on this rev (hybrid_gate.partial_acceptance_eligible)
 # so v6-and-older archives replay byte-identically.
 # v8 keeps the v7 executor, preservation and partial-acceptance semantics, but
-# reduces the model-facing plan and hard-bounds explicit protocol burden.
+# reduces the model-facing plan and records empirical protocol-burden thresholds
+# as soft analysis/telemetry only.
 # apply_hybrid branches on the envelope's own protocol string, so old archives
 # replay under their original semantics and new runs under v8 automatically.
 PROTOCOL_V1 = "hybridpatch/1"
@@ -304,12 +305,12 @@ def _check_bulk_v8(action, errors, editable_filenames=None):
                     )
 
 
-def _check_dsl(action, errors):
+def _check_dsl(action, errors, enforce_legacy_limits=True):
     rules = action.get("rules")
     if not isinstance(rules, list):
         errors.append("action.rules must be a list for dsl_rules")
         return
-    if len(rules) > DSL_MAX_RULES:
+    if enforce_legacy_limits and len(rules) > DSL_MAX_RULES:
         errors.append(f"dsl rule count exceeds limit {DSL_MAX_RULES}")
     explicit_ids = 0
     expanded_actions = 0
@@ -353,9 +354,9 @@ def _check_dsl(action, errors):
             else:
                 explicit_ids += len(discard)
                 expanded_actions += len(discard)
-    if explicit_ids > DSL_MAX_EXPLICIT_IDS:
+    if enforce_legacy_limits and explicit_ids > DSL_MAX_EXPLICIT_IDS:
         errors.append(f"dsl explicit id count exceeds limit {DSL_MAX_EXPLICIT_IDS}")
-    if expanded_actions > DSL_MAX_EXPANDED_ACTIONS:
+    if enforce_legacy_limits and expanded_actions > DSL_MAX_EXPANDED_ACTIONS:
         errors.append(f"dsl expanded action count exceeds limit {DSL_MAX_EXPANDED_ACTIONS}")
 
 
@@ -464,6 +465,17 @@ def measure_protocol_burden(envelope, bodies=None):
     }
 
 
+def protocol_burden_overages(measurements):
+    """Return V8 empirical-threshold crossings as soft telemetry details."""
+    measurements = measurements or {}
+    return {
+        key: {"actual": measurements.get(key), "threshold": threshold}
+        for key, threshold in PROTOCOL_BURDEN_LIMITS.items()
+        if isinstance(measurements.get(key), (int, float))
+        and measurements[key] > threshold
+    }
+
+
 def validate_hybrid_envelope(envelope, bodies=None, editable_filenames=None):
     """Return (errors, warnings). Errors are repair-triggering schema failures."""
     errors, warnings = [], []
@@ -497,21 +509,11 @@ def validate_hybrid_envelope(envelope, bodies=None, editable_filenames=None):
         if protocol == PROTOCOL_V8:
             _check_bulk_v8(action, errors, editable_filenames=editable_filenames)
     elif route == ROUTE_DSL_RULES:
-        _check_dsl(action, errors)
+        _check_dsl(
+            action, errors,
+            enforce_legacy_limits=(protocol != PROTOCOL_V8),
+        )
     elif route == ROUTE_BOUNDED_REWRITE:
         _check_bounded_rewrite(action, errors)
 
-    if protocol == PROTOCOL_V8:
-        burden = measure_protocol_burden(envelope, bodies=bodies)
-        exceeded = [
-            (key, burden[key], limit)
-            for key, limit in PROTOCOL_BURDEN_LIMITS.items()
-            if burden[key] > limit
-        ]
-        if exceeded:
-            errors.append("protocol_burden_exceeded")
-            errors.extend(
-                f"protocol_burden_exceeded:{key}:{actual}>{limit}"
-                for key, actual, limit in exceeded
-            )
     return errors, warnings

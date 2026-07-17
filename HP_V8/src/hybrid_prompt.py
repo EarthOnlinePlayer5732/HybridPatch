@@ -22,9 +22,6 @@ from hybrid_schema import (
     ROUTE_BULK_PATCH,
     ROUTE_DSL_RULES,
     ROUTE_BOUNDED_REWRITE,
-    DSL_MAX_RULES,
-    DSL_MAX_EXPLICIT_IDS,
-    DSL_MAX_EXPANDED_ACTIONS,
 )
 from utils_context import stringify_context, format_file_names_for_prompt
 
@@ -174,7 +171,12 @@ def _routes_for_profile(profile):
     if profile == PROMPT_PROFILE_DEFAULT:
         return (ROUTE_LOCAL_PATCH, ROUTE_BULK_PATCH, ROUTE_BOUNDED_REWRITE)
     if profile == PROMPT_PROFILE_BLOCK_MOVEMENT:
-        return (ROUTE_DSL_RULES, ROUTE_BOUNDED_REWRITE)
+        return (
+            ROUTE_LOCAL_PATCH,
+            ROUTE_BULK_PATCH,
+            ROUTE_DSL_RULES,
+            ROUTE_BOUNDED_REWRITE,
+        )
     raise ValueError(f"unknown HybridPatch prompt profile: {profile!r}")
 
 
@@ -184,16 +186,6 @@ _ROUTE_FOOTPRINT = {
     ROUTE_DSL_RULES: "block_movement",
     ROUTE_BOUNDED_REWRITE: "whole_file_change",
 }
-
-_BURDEN_REPAIR_ROUTES = {
-    ROUTE_LOCAL_PATCH: (
-        ROUTE_LOCAL_PATCH, ROUTE_BULK_PATCH, ROUTE_BOUNDED_REWRITE,
-    ),
-    ROUTE_BULK_PATCH: (ROUTE_BULK_PATCH, ROUTE_BOUNDED_REWRITE),
-    ROUTE_DSL_RULES: (ROUTE_DSL_RULES, ROUTE_BOUNDED_REWRITE),
-    ROUTE_BOUNDED_REWRITE: (ROUTE_BOUNDED_REWRITE,),
-}
-
 
 def _action_schema_lines(route):
     if route == ROUTE_LOCAL_PATCH:
@@ -209,7 +201,7 @@ def _action_schema_lines(route):
     if route == ROUTE_DSL_RULES:
         return [
             'dsl_rules: {"route":"dsl_rules","rules":[{"rule":"copy_blocks","output":"...","block_ids":["file:0"]}, {"rule":"distribute_blocks","assignments":[{"block_id":"file:0","file":"out.txt"}],"discard_block_ids":[]}]}',
-            f'Use only coarse ids from BLOCK INDEX for pure block copy/movement. Limits: rules<={DSL_MAX_RULES}, explicit_ids<={DSL_MAX_EXPLICIT_IDS}, expanded_actions<={DSL_MAX_EXPANDED_ACTIONS}.',
+            'Use only coarse ids from BLOCK INDEX for pure block copy/movement. Protocol-burden thresholds are telemetry only and never execution limits.',
         ]
     if route == ROUTE_BOUNDED_REWRITE:
         return [
@@ -298,8 +290,10 @@ def build_hybrid_prompt(editable_context, edit_instruction, target_filenames,
         ]
     else:
         sections += [
+            "- Use local_patch for a few precise edits and bulk_patch for repeated literal edits; classification never disables either path.",
             "- Use dsl_rules only for pure coarse-block movement without content transformation.",
             "- Use bounded_rewrite explicitly when content must be transformed or generated; it is always available and never a silent fallback.",
+            "- Do not search outside each operation's declared file or scope.",
         ]
     sections += [
         "- Never output read-only context files.",
@@ -374,9 +368,10 @@ def _declared_relevant_files(envelope):
 
 
 def _relevant_editable_context(envelope, errors, editable_context, target_filenames,
-                               current_route=None):
+                               current_route=None, allowed_routes=None):
     editable_context = editable_context or {}
-    if not envelope or current_route == ROUTE_BOUNDED_REWRITE:
+    if (not envelope or current_route == ROUTE_BOUNDED_REWRITE
+            or ROUTE_BOUNDED_REWRITE in (allowed_routes or ())):
         return {name: editable_context[name] for name in sorted(editable_context)}
     names = _declared_relevant_files(envelope)
     for target in target_filenames or []:
@@ -396,7 +391,7 @@ def _canonical_envelope(envelope):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _repair_routes(errors, previous_envelope, current_route,
+def _repair_routes(previous_envelope, current_route,
                    prompt_classification, edit_instruction):
     """Choose the compact set of routes exposed to the single repair call."""
     classification = prompt_classification or classify_operation_family(edit_instruction)
@@ -413,13 +408,8 @@ def _repair_routes(errors, previous_envelope, current_route,
     if route not in _ROUTE_FOOTPRINT:
         route = None
 
-    burden_exceeded = any(
-        "protocol_burden_exceeded" in str(error) for error in (errors or [])
-    )
     if route is None:
         routes = profile_routes
-    elif burden_exceeded:
-        routes = _BURDEN_REPAIR_ROUTES[route]
     else:
         routes = (route,)
     return routes, route, classification
@@ -451,12 +441,12 @@ def build_hybrid_repair_prompt(errors, *, previous_envelope=None,
     err_list = [str(error) for error in (errors or [])]
     err_lines = "\n".join(f"- {error}" for error in err_list)
     routes, route, classification = _repair_routes(
-        err_list, previous_envelope, current_route,
+        previous_envelope, current_route,
         prompt_classification, edit_instruction,
     )
     relevant = _relevant_editable_context(
         previous_envelope, err_list, editable_context, target_filenames,
-        current_route=route)
+        current_route=route, allowed_routes=routes)
     targets_json = json.dumps(list(target_filenames or []), ensure_ascii=False,
                               separators=(",", ":"))
     readonly_json = json.dumps(list(readonly_filenames or []), ensure_ascii=False,
@@ -497,11 +487,6 @@ def build_hybrid_repair_prompt(errors, *, previous_envelope=None,
         "",
         f"Repair prompt profile: {classification.get('prompt_profile')}",
     ]
-    if any("protocol_burden_exceeded" in error for error in err_list):
-        sections += [
-            "",
-            "Protocol burden fix: merge repeated operations or explicitly choose a more suitable route; never rely on truncation or silent fallback.",
-        ]
     sections += [
         "",
         "Correct only the listed errors without changing the task semantics.",

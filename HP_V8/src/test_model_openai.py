@@ -8,6 +8,9 @@ import unittest
 from datetime import datetime
 from unittest import mock
 
+import portalocker
+import hashlib
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 ARCHIVED_FIXTURE = os.path.join(
@@ -19,8 +22,11 @@ for path in (ROOT, HERE):
 
 import experiment_runner
 import model_openai
+import paired_campaign_dispatch as paired_dispatch
 import probe_fr_keys
 import run_meta
+import utils_relay_plan
+import portalocker
 
 
 def _events(include_delta=True, include_stop=True, content=None):
@@ -502,6 +508,1165 @@ class OpenCodeTransportTests(unittest.TestCase):
 
 
 class IntegrationContractTests(unittest.TestCase):
+    def test_paired_dispatch_counterbalances_and_checks_campaign_integrity(self):
+        orders = [paired_dispatch.method_order(index) for index in range(10)]
+        self.assertEqual(
+            sum(order[0] == "hybridpatch" for order in orders), 5)
+        self.assertEqual(
+            sum(order[0] == "fullrewrite" for order in orders), 5)
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["state_a"])
+            plan_sha = paired_dispatch._sha256(plan_path)
+            manifest = {
+                "schema": paired_dispatch.SCHEMA,
+                "run_git_commit": "1" * 40,
+                "config": {
+                    "samples": ["sample"],
+                    "method_set": ["fullrewrite", "hybridpatch"],
+                    "num_round_trips": 1,
+                },
+                "task_plans": {
+                    "sample": {
+                        "path": "sample.task_plan.json",
+                        "sha256": plan_sha,
+                        "forward_state_sequence": ["state_a"],
+                    },
+                },
+            }
+            api_rows = []
+            for method in manifest["config"]["method_set"]:
+                os.makedirs(os.path.join(out_dir, method), exist_ok=True)
+                result_rows = []
+                for direction in ("forward", "backward"):
+                    call_kind = (
+                        "hybridpatch_primary"
+                        if method == "hybridpatch"
+                        else "fullrewrite_primary"
+                    )
+                    semantic_call_id = (
+                        f"{method}/sample/rt01/{direction}/{call_kind}"
+                    )
+                    api_rows.append({
+                        "sample": "sample", "method": method,
+                        "rt_index": 1, "direction": direction,
+                        "call_kind": call_kind,
+                        "semantic_call_id": semantic_call_id,
+                        "request_id": f"original-{method}-{direction}",
+                        "provider_called": True,
+                        "worker_launch_id": "worker-a",
+                        "worker_pid": 101,
+                        "response_replayed": False,
+                        "replayed_from_call_id": None,
+                        "transport_revision": "opencode_anthropic_sdk/3",
+                        "max_response_slots": 2,
+                        "response_slots_used": 1,
+                        "max_transient_failures": 3,
+                        "transient_failure_count": 0,
+                    })
+                    result_rows.append({
+                        "sample_id": "sample", "method": method,
+                        "round_trip_num": 1,
+                        "round_trip_direction": direction,
+                        "evaluation": (
+                            {"score": 1.0}
+                            if direction == "backward" else {}
+                        ),
+                        "bdpatch": (
+                            {
+                                "preservation_violations": 0,
+                                "exec_log": {
+                                    "preservation_violations": 0,
+                                },
+                            }
+                            if method == "hybridpatch" else {}
+                        ),
+                    })
+                with open(
+                    os.path.join(out_dir, method, "sample.jsonl"),
+                    "w", encoding="utf-8",
+                ) as handle:
+                    for row in result_rows:
+                        handle.write(json.dumps(row) + "\n")
+                run_meta.write_json_atomic(
+                    os.path.join(out_dir, method, "sample.ckpt.json"),
+                    {"completed_round_trips": 1},
+                )
+            with open(
+                os.path.join(out_dir, "api_calls.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                for row in api_rows:
+                    handle.write(json.dumps(row) + "\n")
+            with open(
+                os.path.join(out_dir, "run_metadata.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                handle.write(json.dumps({
+                    "invocation_id": "invocation-a",
+                    "worker_launch_id": "worker-a",
+                    "worker_pid": 101,
+                    "samples": ["sample"], "status": "finished",
+                    "finished_at": "2026-07-17T00:00:00+08:00",
+                    "task_plans": {
+                        "sample": {
+                            "sha256": plan_sha,
+                            "round_trips": 1,
+                        },
+                    },
+                }) + "\n")
+            dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+            for dispatch_row in (
+                {
+                    "event": "launch", "worker_launch_id": "worker-a",
+                    "sample": "sample", "pid": 101,
+                },
+                {
+                    "event": "worker_authorized",
+                    "worker_launch_id": "worker-a", "sample": "sample",
+                    "worker_pid": 101,
+                    "invocation_id": "invocation-a",
+                    "task_plan_sha256": plan_sha,
+                },
+                {
+                    "event": "worker_exit", "worker_launch_id": "worker-a",
+                    "sample": "sample", "pid": 101, "returncode": 0,
+                    "created_at": "2026-07-17T00:00:00+08:00",
+                },
+            ):
+                run_meta.append_jsonl_locked(dispatch_path, dispatch_row)
+
+            with mock.patch.object(
+                paired_dispatch, "_git_identity", return_value=("1" * 40, "clean")
+            ):
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertEqual(inspection["errors"], [])
+                self.assertEqual(inspection["preservation_violations"], 0)
+
+                hybrid_result_path = os.path.join(
+                    out_dir, "hybridpatch", "sample.jsonl"
+                )
+                with open(hybrid_result_path, encoding="utf-8") as handle:
+                    hybrid_result_rows = [
+                        json.loads(line) for line in handle if line.strip()
+                    ]
+
+                def write_hybrid_rows():
+                    with open(
+                        hybrid_result_path, "w", encoding="utf-8"
+                    ) as result_handle:
+                        for result_row in hybrid_result_rows:
+                            result_handle.write(json.dumps(result_row) + "\n")
+
+                hybrid_result_rows[0]["sample_id"] = "wrong"
+                write_hybrid_rows()
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "committed row identity mismatch" in error
+                    for error in inspection["errors"]
+                ))
+                hybrid_result_rows[0]["sample_id"] = "sample"
+                hybrid_result_rows[0]["method"] = "fullrewrite"
+                write_hybrid_rows()
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "committed row identity mismatch" in error
+                    for error in inspection["errors"]
+                ))
+                hybrid_result_rows[0]["method"] = "hybridpatch"
+
+                backward_row = next(
+                    row for row in hybrid_result_rows
+                    if row["round_trip_direction"] == "backward"
+                )
+                backward_row["evaluation"] = {}
+                write_hybrid_rows()
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "unscoreable exact backward RT1" in error
+                    for error in inspection["errors"]
+                ))
+                backward_row["evaluation"] = {"error": "context_mismatch"}
+                write_hybrid_rows()
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertEqual(inspection["errors"], [])
+                backward_row["evaluation"] = {"score": 1.0}
+
+                original_bdpatch = dict(hybrid_result_rows[0]["bdpatch"])
+                original_bdpatch["exec_log"] = dict(
+                    original_bdpatch["exec_log"])
+                for invalid in (True, "0", 0.5, -1):
+                    hybrid_result_rows[0]["bdpatch"][
+                        "preservation_violations"] = invalid
+                    write_hybrid_rows()
+                    inspection = paired_dispatch.inspect_campaign(
+                        out_dir, manifest)
+                    self.assertTrue(any(
+                        "invalid/missing preservation telemetry" in error
+                        for error in inspection["errors"]
+                    ))
+                hybrid_result_rows[0]["bdpatch"] = dict(original_bdpatch)
+                hybrid_result_rows[0]["bdpatch"]["exec_log"] = dict(
+                    original_bdpatch["exec_log"])
+                for invalid_nested in (False, 0.0):
+                    hybrid_result_rows[0]["bdpatch"]["exec_log"][
+                        "preservation_violations"
+                    ] = invalid_nested
+                    write_hybrid_rows()
+                    inspection = paired_dispatch.inspect_campaign(
+                        out_dir, manifest)
+                    self.assertTrue(any(
+                        "invalid/missing preservation telemetry" in error
+                        for error in inspection["errors"]
+                    ))
+                hybrid_result_rows[0]["bdpatch"]["exec_log"][
+                    "preservation_violations"
+                ] = 0
+                hybrid_result_rows[0]["bdpatch"]["exec_log"][
+                    "preservation_violations"] = 1
+                write_hybrid_rows()
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "invalid/missing preservation telemetry" in error
+                    for error in inspection["errors"]
+                ))
+                hybrid_result_rows[0]["bdpatch"] = {
+                    "actual_method": (
+                        "hybridpatch_protocol_failure_kept_context"
+                    ),
+                    "preservation_violations": None,
+                    "exec_log": None,
+                    "hybrid": {
+                        "failed_step_kept_context": True,
+                        "effective_modification": False,
+                    },
+                }
+                write_hybrid_rows()
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertEqual(inspection["errors"], [])
+                self.assertEqual(inspection["preservation_not_applicable"], 1)
+                hybrid_result_rows[0]["bdpatch"] = original_bdpatch
+
+                hybrid_result_rows[0]["bdpatch"]["preservation_violations"] = 1
+                hybrid_result_rows[0]["bdpatch"]["exec_log"][
+                    "preservation_violations"] = 1
+                write_hybrid_rows()
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest)
+                self.assertEqual(inspection["preservation_violations"], 1)
+                self.assertIn(
+                    "preservation_violations=1", inspection["errors"]
+                )
+                hybrid_result_rows[0]["bdpatch"]["preservation_violations"] = 0
+                hybrid_result_rows[0]["bdpatch"]["exec_log"][
+                    "preservation_violations"] = 0
+                write_hybrid_rows()
+
+                original = api_rows[0]
+                digest = hashlib.sha256(
+                    original["semantic_call_id"].encode("utf-8")
+                ).hexdigest()[:24]
+                journal_dir = os.path.join(out_dir, "api_journal")
+                os.makedirs(journal_dir, exist_ok=True)
+                run_meta.write_json_atomic(
+                    os.path.join(journal_dir, f"{digest}.response.json"),
+                    {
+                        "schema": "anchorpatch.api_response_journal/3",
+                        "semantic_call_id": original["semantic_call_id"],
+                        "call_id": original["request_id"],
+                        "result": {},
+                    },
+                )
+                replay = dict(original)
+                replay.update({
+                    "request_id": "replay-request",
+                    "provider_called": False,
+                    "response_replayed": True,
+                    "replayed_from_call_id": original["request_id"],
+                })
+                with open(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    "a", encoding="utf-8",
+                ) as handle:
+                    handle.write(json.dumps(replay) + "\n")
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertEqual(inspection["errors"], [])
+
+                with open(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    "a", encoding="utf-8",
+                ) as handle:
+                    handle.write(json.dumps(original) + "\n")
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "duplicate provider POST" in error
+                    for error in inspection["errors"]
+                ))
+
+                api_rows[0]["sample"] = "unknown"
+                with open(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    "w", encoding="utf-8",
+                ) as handle:
+                    for row in api_rows:
+                        handle.write(json.dumps(row) + "\n")
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "unmappable API ledger" in error
+                    for error in inspection["errors"]
+                ))
+
+                api_rows[0]["sample"] = "sample"
+                api_rows[0]["rt_index"] = True
+                with open(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    "w", encoding="utf-8",
+                ) as handle:
+                    for row in api_rows:
+                        handle.write(json.dumps(row) + "\n")
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "unmappable API ledger" in error
+                    for error in inspection["errors"]
+                ))
+                api_rows[0]["rt_index"] = 1
+
+                api_rows[0]["response_slots_used"] = True
+                with open(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    "w", encoding="utf-8",
+                ) as handle:
+                    for row in api_rows:
+                        handle.write(json.dumps(row) + "\n")
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "response-slot overrun" in error
+                    for error in inspection["errors"]
+                ))
+                api_rows[0]["response_slots_used"] = 1
+
+                api_rows[0]["transient_failure_count"] = False
+                with open(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    "w", encoding="utf-8",
+                ) as handle:
+                    for row in api_rows:
+                        handle.write(json.dumps(row) + "\n")
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "transient budget overrun" in error
+                    for error in inspection["errors"]
+                ))
+                api_rows[0]["transient_failure_count"] = 0
+
+                hybrid_result_rows[0]["round_trip_num"] = True
+                write_hybrid_rows()
+                with open(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    "w", encoding="utf-8",
+                ) as handle:
+                    for row in api_rows:
+                        handle.write(json.dumps(row) + "\n")
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "invalid committed row key" in error
+                    for error in inspection["errors"]
+                ))
+                hybrid_result_rows[0]["round_trip_num"] = 1
+                write_hybrid_rows()
+
+                checkpoint_path = os.path.join(
+                    out_dir, "hybridpatch", "sample.ckpt.json"
+                )
+                for invalid_completed in (True, "1", 1.0):
+                    run_meta.write_json_atomic(
+                        checkpoint_path,
+                        {"completed_round_trips": invalid_completed},
+                    )
+                    inspection = paired_dispatch.inspect_campaign(
+                        out_dir, manifest, require_complete=True)
+                    self.assertTrue(any(
+                        "invalid checkpoint completed_round_trips" in error
+                        for error in inspection["errors"]
+                    ))
+                run_meta.write_json_atomic(
+                    checkpoint_path, {"completed_round_trips": 1}
+                )
+
+                hybrid_primary = next(
+                    row for row in api_rows
+                    if row["method"] == "hybridpatch"
+                    and row["call_kind"] == "hybridpatch_primary"
+                )
+                hybrid_primary["call_kind"] = "hybridpatch_repair"
+                hybrid_primary["semantic_call_id"] = (
+                    hybrid_primary["semantic_call_id"].replace(
+                        "hybridpatch_primary", "hybridpatch_repair"
+                    )
+                )
+                with open(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    "w", encoding="utf-8",
+                ) as handle:
+                    for row in api_rows:
+                        handle.write(json.dumps(row) + "\n")
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "requires exactly one primary semantic call" in error
+                    for error in inspection["errors"]
+                ))
+
+    def test_paired_dispatch_uses_exclusive_out_dir_lease(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
+            with open(lease_path, "a+", encoding="utf-8") as lease:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                try:
+                    with self.assertRaises(RuntimeError):
+                        paired_dispatch.launch(mock.Mock(out_dir=out_dir))
+                finally:
+                    portalocker.unlock(lease)
+
+    def test_paired_dispatch_resume_allows_only_audited_key_rotation(self):
+        prior = {
+            "schema": paired_dispatch.SCHEMA,
+            "experiment_id": "exp_test",
+            "run_git_commit": "1" * 40,
+            "git_tree_state": "clean",
+            "code_fingerprint": {"x": "y"},
+            "config": {"samples": ["sample"]},
+            "assignments": [{
+                "sample": "sample", "key_label": "KEY_01",
+                "methods": ["hybridpatch", "fullrewrite"],
+                "console_log": "dispatch_logs/sample__KEY_01.console.log",
+            }],
+            "task_plans": {"sample": {"sha256": "a" * 64}},
+        }
+        rotated = json.loads(json.dumps(prior))
+        rotated["assignments"][0]["key_label"] = "KEY_11"
+        rotated["assignments"][0]["console_log"] = (
+            "dispatch_logs/sample__KEY_11.console.log"
+        )
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = os.path.join(out_dir, "dispatch_manifest.json")
+            run_meta.write_json_atomic(path, prior)
+            with self.assertRaises(RuntimeError):
+                paired_dispatch.write_or_verify_manifest(
+                    out_dir, rotated, resume=False)
+            found_path, found_manifest = (
+                paired_dispatch.write_or_verify_manifest(
+                    out_dir, rotated, resume=True)
+            )
+            self.assertEqual(found_path, path)
+            self.assertEqual(found_manifest, prior)
+
+    def test_dispatch_worker_lease_and_stale_metadata_closure(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            lease_path = paired_dispatch._worker_lease_path(out_dir, "sample")
+            os.makedirs(os.path.dirname(lease_path), exist_ok=True)
+            with open(lease_path, "a+", encoding="utf-8") as lease:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                try:
+                    with self.assertRaises(RuntimeError):
+                        paired_dispatch._assert_worker_leases_free(
+                            out_dir, ["sample"])
+                finally:
+                    portalocker.unlock(lease)
+            paired_dispatch._assert_worker_leases_free(out_dir, ["sample"])
+
+            metadata_path = os.path.join(out_dir, "run_metadata.jsonl")
+            run_meta._write_jsonl_atomic(metadata_path, [
+                {
+                    "invocation_id": "invocation-a",
+                    "worker_launch_id": "worker-a",
+                    "worker_pid": 101,
+                    "samples": ["sample"],
+                    "status": "running",
+                    "invocation_finished_at": None,
+                    "finished_at": None,
+                },
+                {
+                    "invocation_id": "invocation-b",
+                    "worker_launch_id": "worker-b",
+                    "worker_pid": 202,
+                    "samples": ["other"],
+                    "status": "running",
+                    "invocation_finished_at": None,
+                    "finished_at": None,
+                },
+            ])
+            dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+            for worker, sample, pid in (
+                ("worker-a", "sample", 101),
+                ("worker-b", "other", 202),
+            ):
+                run_meta.append_jsonl_locked(dispatch_path, {
+                    "event": "launch_intent",
+                    "worker_launch_id": worker,
+                    "sample": sample,
+                })
+                run_meta.append_jsonl_locked(dispatch_path, {
+                    "event": "launch",
+                    "worker_launch_id": worker,
+                    "sample": sample,
+                    "pid": pid,
+                })
+            audited = paired_dispatch._audit_running_invocation_provenance(
+                out_dir)
+            self.assertEqual(
+                {item["worker_launch_id"] for item in audited},
+                {"worker-a", "worker-b"},
+            )
+            self.assertTrue(all(item["launch_recorded"] for item in audited))
+
+            closed = run_meta.interrupt_running_invocations(
+                out_dir,
+                status="interrupted_by_dispatcher",
+                worker_launch_ids={"worker-a"},
+            )
+            self.assertEqual(
+                [item["invocation_id"] for item in closed],
+                ["invocation-a"],
+            )
+            snapshot = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertEqual(snapshot[0]["status"], "interrupted_by_dispatcher")
+            self.assertEqual(snapshot[1]["status"], "running")
+            self.assertTrue(all(row["finished_at"] is None for row in snapshot))
+
+            run_meta.interrupt_running_invocations(
+                out_dir,
+                status="interrupted_before_audited_resume",
+            )
+            snapshot = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertTrue(all(row["status"] != "running" for row in snapshot))
+            self.assertTrue(all(row["finished_at"] for row in snapshot))
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            running = {
+                "sample": {
+                    "worker_launch_id": "worker-a",
+                    "key_label": "KEY_01",
+                    "log": mock.Mock(),
+                    "process": mock.Mock(pid=101),
+                },
+            }
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            with self.assertRaisesRegex(RuntimeError, "exited with 7"):
+                paired_dispatch._record_worker_exit(
+                    running, "sample", running["sample"], 7, dispatch_log
+                )
+            self.assertIn("sample", running)
+            exit_rows = run_meta._read_jsonl_records_with_retry(dispatch_log)
+            self.assertEqual(exit_rows[-1]["returncode"], 7)
+            self.assertEqual(exit_rows[-1]["worker_launch_id"], "worker-a")
+            self.assertEqual(exit_rows[-1]["pid"], 101)
+            running["sample"]["process"].poll.return_value = 7
+            running["sample"]["process"].wait.return_value = 7
+            run_meta._write_jsonl_atomic(
+                os.path.join(out_dir, "run_metadata.jsonl"),
+                [{
+                    "invocation_id": "invocation-a",
+                    "worker_launch_id": "worker-a",
+                    "worker_pid": 101,
+                    "samples": ["sample"],
+                    "status": "running",
+                    "invocation_finished_at": None,
+                    "finished_at": None,
+                }],
+            )
+            reconciled = paired_dispatch._stop_and_reconcile_workers(
+                out_dir, running)
+            self.assertEqual(
+                reconciled["closed_invocations"][0]["invocation_id"],
+                "invocation-a",
+            )
+            snapshot = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertEqual(
+                snapshot[0]["status"], "interrupted_by_dispatcher"
+            )
+            self.assertIsNotNone(snapshot[0]["finished_at"])
+
+    def test_dispatch_reconciles_metadata_even_if_termination_reports_error(self):
+        running = {
+            "sample": {
+                "worker_launch_id": "worker-a",
+                "key_label": "KEY_01",
+                "log": mock.Mock(),
+                "process": mock.Mock(pid=101),
+            },
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            with self.assertRaisesRegex(RuntimeError, "exited with 7"):
+                paired_dispatch._record_worker_exit(
+                    running, "sample", running["sample"], 7, dispatch_log
+                )
+            self.assertIn("sample", running)
+            exit_rows = run_meta._read_jsonl_records_with_retry(dispatch_log)
+            self.assertEqual(exit_rows[-1]["returncode"], 7)
+            self.assertEqual(exit_rows[-1]["worker_launch_id"], "worker-a")
+            self.assertEqual(exit_rows[-1]["pid"], 101)
+
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_terminate_workers",
+                    side_effect=RuntimeError("terminate failed"),
+                ), \
+                mock.patch.object(
+                    paired_dispatch, "_assert_worker_leases_free"
+                ) as leases_free, \
+                mock.patch.object(
+                    paired_dispatch, "interrupt_running_invocations",
+                    return_value=[{"invocation_id": "invocation-a"}],
+                ) as interrupt:
+            result = paired_dispatch._stop_and_reconcile_workers(
+                out_dir, running)
+        self.assertEqual(result["termination_error"], "terminate failed")
+        self.assertIsNone(result["lease_error"])
+        self.assertEqual(
+            result["closed_invocations"],
+            [{"invocation_id": "invocation-a"}],
+        )
+        leases_free.assert_called_once_with(out_dir, running)
+        interrupt.assert_called_once_with(
+            out_dir,
+            status="interrupted_by_dispatcher",
+            worker_launch_ids={"worker-a"},
+        )
+
+    def test_audited_resume_cas_rejects_toctou_and_malformed_identity(self):
+        def running(invocation, worker, pid, sample):
+            return {
+                "invocation_id": invocation,
+                "worker_launch_id": worker,
+                "worker_pid": pid,
+                "samples": [sample],
+                "status": "running",
+                "invocation_finished_at": None,
+                "finished_at": None,
+            }
+
+        audited_a = [{
+            "invocation_id": "invocation-a",
+            "worker_launch_id": "worker-a",
+            "worker_pid": 101,
+            "sample": "sample-a",
+        }]
+        with tempfile.TemporaryDirectory() as out_dir:
+            metadata_path = os.path.join(out_dir, "run_metadata.jsonl")
+            rows = [
+                running("invocation-a", "worker-a", 101, "sample-a"),
+                running("invocation-b", "worker-b", 202, "sample-b"),
+            ]
+            run_meta._write_jsonl_atomic(metadata_path, rows)
+            with self.assertRaisesRegex(RuntimeError, "set changed"):
+                run_meta.interrupt_audited_running_invocations(
+                    out_dir, status="interrupted", audited=audited_a)
+            snapshot = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertTrue(all(row["status"] == "running" for row in snapshot))
+
+            duplicate = [
+                running("invocation-a", "worker-a", 101, "sample-a"),
+                running("invocation-a", "worker-c", 303, "sample-c"),
+            ]
+            run_meta._write_jsonl_atomic(metadata_path, duplicate)
+            with self.assertRaisesRegex(RuntimeError, "identities are invalid"):
+                run_meta.interrupt_audited_running_invocations(
+                    out_dir, status="interrupted", audited=audited_a)
+            snapshot = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertTrue(all(row["status"] == "running" for row in snapshot))
+
+            run_meta._write_jsonl_atomic(metadata_path, [rows[0]])
+            closed = run_meta.interrupt_audited_running_invocations(
+                out_dir, status="interrupted", audited=audited_a)
+            self.assertEqual(closed[0]["invocation_id"], "invocation-a")
+            with self.assertRaisesRegex(RuntimeError, "non-running"):
+                run_meta.finish_run_metadata(
+                    out_dir, "invocation-a", status="finished")
+
+        with self.assertRaisesRegex(RuntimeError, "identities are invalid"):
+            run_meta.interrupt_audited_running_invocations(
+                tempfile.gettempdir(), status="interrupted",
+                audited=[dict(audited_a[0], invocation_id="")],
+            )
+
+    def test_campaign_stop_latch_is_first_writer_wins_and_blocks_work(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            first = run_meta.record_campaign_stop_condition(
+                out_dir, "preservation_violation",
+                sample="sample", result_committed=False,
+            )
+            second = run_meta.record_campaign_stop_condition(
+                out_dir, "git_identity_drift", sample="other")
+            self.assertEqual(second, first)
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir), [first])
+            with self.assertRaises(ValueError):
+                run_meta.record_campaign_stop_condition(
+                    out_dir, "x", schema="override")
+
+            provider_calls = []
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "offline-test-model",
+                lambda *_args, **_kwargs: provider_calls.append(1),
+            )
+            recorder.set_step(1, "forward", "target")
+            for call_kind in ("hybridpatch_primary", "hybridpatch_repair"):
+                with self.assertRaises(run_meta.CampaignStoppedError):
+                    recorder.generate(
+                        [], model="offline-test-model",
+                        call_kind=call_kind,
+                    )
+            self.assertEqual(provider_calls, [])
+
+            kwargs = {
+                "command": "python test", "samples": ["sample"],
+                "methods": ["hybridpatch", "fullrewrite"],
+                "num_round_trips": 1, "seed": 42,
+                "model": "offline-test-model", "distractor": True,
+                "max_tokens": 16, "printing": False,
+            }
+            with mock.patch.object(
+                    run_meta, "_git_identity",
+                    return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint", return_value={"x": "y"}):
+                with self.assertRaises(run_meta.CampaignStoppedError):
+                    run_meta.append_run_metadata(out_dir, **kwargs)
+            self.assertEqual(
+                run_meta.read_run_metadata_snapshot(out_dir), [])
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            with open(
+                os.path.join(out_dir, "campaign_stop.json"),
+                "w", encoding="utf-8",
+            ) as handle:
+                handle.write("{broken")
+            with self.assertRaisesRegex(RuntimeError, "invalid campaign stop"):
+                run_meta.read_campaign_stop_conditions(out_dir)
+            with self.assertRaisesRegex(RuntimeError, "invalid campaign stop"):
+                run_meta.record_campaign_stop_condition(out_dir, "new")
+
+    def test_dispatch_worker_barrier_closes_lease_metadata_pid_and_plan(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["target"])
+            plan_sha = paired_dispatch._sha256(plan_path)
+            task_plans = {
+                "sample": {
+                    "path": "sample.task_plan.json",
+                    "sha256": plan_sha,
+                    "forward_state_sequence": ["target"],
+                },
+            }
+            worker_id = "worker-a"
+            ready_path, ack_path = paired_dispatch._worker_barrier_paths(
+                out_dir, worker_id)
+            invocation_id = "invocation-a"
+            run_meta._write_jsonl_atomic(
+                os.path.join(out_dir, "run_metadata.jsonl"),
+                [{
+                    "invocation_id": invocation_id,
+                    "status": "running",
+                    "worker_launch_id": worker_id,
+                    "worker_pid": 101,
+                    "samples": ["sample"],
+                    "task_plans": {
+                        "sample": {
+                            "sha256": plan_sha,
+                            "round_trips": 1,
+                        },
+                    },
+                }],
+            )
+            run_meta.write_json_atomic(ready_path, {
+                "schema": "anchorpatch.worker_ready/1",
+                "worker_launch_id": worker_id,
+                "worker_pid": 101,
+                "invocation_id": invocation_id,
+                "sample": "sample",
+                "task_plan_path": os.path.abspath(plan_path),
+                "task_plan_sha256": plan_sha,
+            })
+            process = mock.Mock(pid=101)
+            process.poll.return_value = None
+            running = {
+                "sample": {
+                    "process": process,
+                    "worker_launch_id": worker_id,
+                    "ready_path": ready_path,
+                    "ack_path": ack_path,
+                },
+            }
+            lease_path = paired_dispatch._worker_lease_path(
+                out_dir, "sample")
+            os.makedirs(os.path.dirname(lease_path), exist_ok=True)
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            with open(lease_path, "a+", encoding="utf-8") as lease:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                try:
+                    paired_dispatch._authorize_workers(
+                        out_dir, running, task_plans, dispatch_log, 1.0)
+                finally:
+                    portalocker.unlock(lease)
+            with open(ack_path, encoding="utf-8") as handle:
+                ack = json.load(handle)
+            self.assertEqual(ack["invocation_id"], invocation_id)
+            self.assertEqual(ack["worker_pid"], 101)
+            events = run_meta._read_jsonl_records_with_retry(dispatch_log)
+            self.assertEqual(events[-1]["event"], "worker_authorized")
+            os.remove(ack_path)
+            with open(lease_path, "a+", encoding="utf-8") as lease, \
+                    mock.patch.object(
+                        paired_dispatch, "append_jsonl_locked",
+                        side_effect=OSError("fsync failed")):
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                try:
+                    with self.assertRaisesRegex(OSError, "fsync failed"):
+                        paired_dispatch._authorize_workers(
+                            out_dir, running, task_plans,
+                            dispatch_log, 1.0)
+                finally:
+                    portalocker.unlock(lease)
+            self.assertFalse(os.path.exists(ack_path))
+
+    def test_dispatch_cohort_authorization_is_durable_before_any_ack(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            task_plans = {}
+            running = {}
+            metadata = []
+            ack_paths = []
+            for index, sample in enumerate(("sample-a", "sample-b"), 1):
+                plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+                utils_relay_plan.save_relay_task_plan(plan_path, ["target"])
+                plan_sha = paired_dispatch._sha256(plan_path)
+                task_plans[sample] = {
+                    "path": os.path.basename(plan_path),
+                    "sha256": plan_sha,
+                    "forward_state_sequence": ["target"],
+                }
+                worker_id = f"worker-{index}"
+                invocation_id = f"invocation-{index}"
+                pid = 100 + index
+                ready_path, ack_path = paired_dispatch._worker_barrier_paths(
+                    out_dir, worker_id)
+                run_meta.write_json_atomic(ready_path, {
+                    "schema": "anchorpatch.worker_ready/1",
+                    "worker_launch_id": worker_id,
+                    "worker_pid": pid,
+                    "invocation_id": invocation_id,
+                    "sample": sample,
+                    "task_plan_path": os.path.abspath(plan_path),
+                    "task_plan_sha256": plan_sha,
+                })
+                process = mock.Mock(pid=pid)
+                process.poll.return_value = None
+                running[sample] = {
+                    "process": process,
+                    "worker_launch_id": worker_id,
+                    "ready_path": ready_path,
+                    "ack_path": ack_path,
+                }
+                ack_paths.append(ack_path)
+                metadata.append({
+                    "invocation_id": invocation_id,
+                    "status": "running",
+                    "worker_launch_id": worker_id,
+                    "worker_pid": pid,
+                    "samples": [sample],
+                    "task_plans": {
+                        sample: {
+                            "sha256": plan_sha,
+                            "round_trips": 1,
+                        },
+                    },
+                })
+            run_meta._write_jsonl_atomic(
+                os.path.join(out_dir, "run_metadata.jsonl"), metadata)
+
+            leases = []
+            try:
+                for sample in running:
+                    lease_path = paired_dispatch._worker_lease_path(
+                        out_dir, sample)
+                    os.makedirs(os.path.dirname(lease_path), exist_ok=True)
+                    lease = open(lease_path, "a+", encoding="utf-8")
+                    portalocker.lock(
+                        lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                    leases.append(lease)
+                with mock.patch.object(
+                        paired_dispatch, "append_jsonl_locked",
+                        side_effect=[None, OSError("second fsync failed")]
+                ) as append:
+                    with self.assertRaisesRegex(
+                            OSError, "second fsync failed"):
+                        paired_dispatch._authorize_workers(
+                            out_dir, running, task_plans,
+                            os.path.join(out_dir, "dispatch_log.jsonl"),
+                            1.0,
+                        )
+                    self.assertEqual(append.call_count, 2)
+            finally:
+                for lease in leases:
+                    portalocker.unlock(lease)
+                    lease.close()
+            self.assertTrue(all(
+                not os.path.exists(path) for path in ack_paths
+            ))
+
+    def test_runner_waits_for_exact_dispatch_authorization_before_api(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["target"])
+            plan_sha = paired_dispatch._sha256(plan_path)
+            invocation_id = "invocation-a"
+            worker_id = "worker-a"
+            active_path = paired_dispatch._active_worker_set_path(out_dir)
+            run_meta.write_json_atomic(active_path, {
+                "schema": "anchorpatch.active_worker_set/1",
+                "run_git_commit": "1" * 40,
+                "workers": {worker_id: {"sample": "sample"}},
+            })
+            ready_path, ack_path = paired_dispatch._worker_barrier_paths(
+                out_dir, worker_id)
+            run_meta._write_jsonl_atomic(
+                os.path.join(out_dir, "run_metadata.jsonl"),
+                [{
+                    "invocation_id": invocation_id,
+                    "status": "running",
+                    "worker_launch_id": worker_id,
+                    "worker_pid": os.getpid(),
+                    "samples": ["sample"],
+                    "task_plans": {},
+                }],
+            )
+            run_meta.write_json_atomic(ack_path, {
+                "schema": "anchorpatch.worker_start/1",
+                "worker_launch_id": worker_id,
+                "worker_pid": os.getpid(),
+                "invocation_id": invocation_id,
+                "sample": "sample",
+                "task_plan_sha256": plan_sha,
+            })
+            environment = {
+                "ANCHORPATCH_WORKER_LAUNCH_ID": worker_id,
+                "ANCHORPATCH_WORKER_READY_PATH": ready_path,
+                "ANCHORPATCH_WORKER_ACK_PATH": ack_path,
+                "ANCHORPATCH_ACTIVE_WORKER_SET_PATH": active_path,
+                "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256": plan_sha,
+                "ANCHORPATCH_START_BARRIER_TIMEOUT": "1",
+            }
+            with mock.patch.dict(os.environ, environment, clear=False):
+                ready = experiment_runner._dispatch_worker_start_barrier(
+                    out_dir, ["sample"], 1, invocation_id)
+            self.assertEqual(ready["task_plan_sha256"], plan_sha)
+            with open(ready_path, encoding="utf-8") as handle:
+                saved_ready = json.load(handle)
+            self.assertEqual(saved_ready["worker_pid"], os.getpid())
+            snapshot = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertEqual(
+                snapshot[0]["task_plans"]["sample"]["sha256"], plan_sha)
+
+    def test_standalone_runner_cannot_race_paired_dispatcher_lock(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            argv = [
+                "experiment_runner.py", "--out_dir", out_dir,
+            ]
+            lock_path = os.path.join(out_dir, ".paired_dispatch.lock")
+            with open(lock_path, "a+", encoding="utf-8") as lease, \
+                    mock.patch.object(sys, "argv", argv), \
+                    mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(experiment_runner, "main") as main:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                try:
+                    with self.assertRaisesRegex(
+                            RuntimeError, "dispatcher already owns"):
+                        experiment_runner._run_cli_with_worker_lease()
+                finally:
+                    portalocker.unlock(lease)
+                main.assert_not_called()
+            with mock.patch.object(sys, "argv", argv), \
+                    mock.patch.dict(os.environ, {}, clear=True), \
+                    mock.patch.object(
+                        experiment_runner, "main", return_value=17) as main:
+                self.assertEqual(
+                    experiment_runner._run_cli_with_worker_lease(), 17)
+                main.assert_called_once_with()
+
+    def test_smoke_cost_gate_enforces_complete_usage_and_fifty_usd_limit(self):
+        commit = "1" * 40
+
+        def make_smoke(smoke_dir, total_usd):
+            manifest = {
+                "schema": paired_dispatch.SCHEMA,
+                "run_git_commit": commit,
+                "git_tree_state": "clean",
+                "code_fingerprint": {"x": "y"},
+                "config": {
+                    "campaign_role": "smoke",
+                    "samples": paired_dispatch.SMOKE_SAMPLES,
+                    "method_set": ["fullrewrite", "hybridpatch"],
+                    "num_round_trips": 2,
+                    "seed": 42,
+                    "model": "minimax-m3",
+                    "max_tokens": 131072,
+                    "distractor": True,
+                    "opencode_transport": "anthropic_sdk_v2",
+                    "minimax_transport": "opencode",
+                    "transport_revision": "opencode_anthropic_sdk/3",
+                    "stop_on_preservation_violation": True,
+                },
+                "task_plans": {},
+            }
+            run_meta.write_json_atomic(
+                os.path.join(smoke_dir, "dispatch_manifest.json"), manifest)
+            per_row = total_usd / paired_dispatch.SMOKE_GRID_STEPS
+            for sample in paired_dispatch.SMOKE_SAMPLES:
+                for method in ("fullrewrite", "hybridpatch"):
+                    method_dir = os.path.join(smoke_dir, method)
+                    os.makedirs(method_dir, exist_ok=True)
+                    with open(
+                        os.path.join(method_dir, f"{sample}.jsonl"),
+                        "w", encoding="utf-8",
+                    ) as handle:
+                        for rt in (1, 2):
+                            for direction in ("forward", "backward"):
+                                handle.write(json.dumps({
+                                    "sample_id": sample,
+                                    "method": method,
+                                    "round_trip_num": rt,
+                                    "round_trip_direction": direction,
+                                    "total_usd": per_row,
+                                }) + "\n")
+
+        with tempfile.TemporaryDirectory() as smoke_dir, \
+                tempfile.TemporaryDirectory() as main_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=(commit, "clean")), \
+                mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"x": "y"}), \
+                mock.patch.object(
+                    paired_dispatch, "inspect_campaign",
+                    return_value={
+                        "errors": [], "preservation_violations": 0,
+                    }):
+            make_smoke(smoke_dir, 2.0)
+            gate = paired_dispatch.evaluate_smoke_cost_gate(
+                smoke_dir, main_dir)
+            self.assertEqual(gate["decision"], "GO")
+            self.assertEqual(gate["projected_main_usd"], 50.0)
+            with open(
+                os.path.join(main_dir, "smoke_cost_gate.json"),
+                encoding="utf-8",
+            ) as handle:
+                report = json.load(handle)
+            self.assertEqual(report["usage_rows"], 16)
+            missing_path = os.path.join(
+                smoke_dir, "hybridpatch", "treebank4.jsonl")
+            with open(missing_path, encoding="utf-8") as handle:
+                missing_rows = [json.loads(line) for line in handle]
+            missing_rows[0].pop("total_usd")
+            with open(missing_path, "w", encoding="utf-8") as handle:
+                for row in missing_rows:
+                    handle.write(json.dumps(row) + "\n")
+            with tempfile.TemporaryDirectory() as missing_main:
+                with self.assertRaisesRegex(RuntimeError, "NO_GO"):
+                    paired_dispatch.evaluate_smoke_cost_gate(
+                        smoke_dir, missing_main)
+                with open(
+                    os.path.join(missing_main, "smoke_cost_gate.json"),
+                    encoding="utf-8",
+                ) as handle:
+                    missing_report = json.load(handle)
+                self.assertIn(
+                    "smoke_usage_incomplete",
+                    missing_report["failure_codes"],
+                )
+
+        with tempfile.TemporaryDirectory() as smoke_dir, \
+                tempfile.TemporaryDirectory() as main_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=(commit, "clean")), \
+                mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"x": "y"}), \
+                mock.patch.object(
+                    paired_dispatch, "inspect_campaign",
+                    return_value={
+                        "errors": [], "preservation_violations": 0,
+                    }):
+            make_smoke(smoke_dir, 2.01)
+            with self.assertRaisesRegex(RuntimeError, "NO_GO"):
+                paired_dispatch.evaluate_smoke_cost_gate(
+                    smoke_dir, main_dir)
+            with open(
+                os.path.join(main_dir, "smoke_cost_gate.json"),
+                encoding="utf-8",
+            ) as handle:
+                report = json.load(handle)
+            self.assertIn(
+                "projected_cost_limit_exceeded", report["failure_codes"])
+
+        args = mock.Mock(
+            campaign_role="main", smoke_dir="missing",
+            samples=paired_dispatch.MAIN_SAMPLES,
+            num_round_trips=10, seed=42,
+        )
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_require_formal_opencode_transport"), \
+                mock.patch.object(
+                    paired_dispatch, "evaluate_smoke_cost_gate",
+                    side_effect=RuntimeError("gate stopped")), \
+                mock.patch.object(paired_dispatch, "read_keys") as read_keys, \
+                mock.patch.object(
+                    paired_dispatch.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(RuntimeError, "gate stopped"):
+                paired_dispatch._launch_under_lease(args, out_dir)
+            read_keys.assert_not_called()
+            popen.assert_not_called()
+
+        for role, samples, round_trips, smoke_dir in (
+            ("smoke", paired_dispatch.SMOKE_SAMPLES, 2, None),
+            ("main", paired_dispatch.MAIN_SAMPLES, 10, "smoke"),
+        ):
+            with self.subTest(role=role), tempfile.TemporaryDirectory() as out_dir:
+                bad_seed_args = mock.Mock(
+                    campaign_role=role,
+                    smoke_dir=smoke_dir,
+                    samples=samples,
+                    num_round_trips=round_trips,
+                    seed=99,
+                )
+                with mock.patch.object(
+                        paired_dispatch,
+                        "_require_formal_opencode_transport") as transport, \
+                        mock.patch.object(
+                            paired_dispatch, "evaluate_smoke_cost_gate"
+                        ) as gate, \
+                        mock.patch.object(
+                            paired_dispatch, "read_keys") as read_keys, \
+                        mock.patch.object(
+                            paired_dispatch.subprocess, "Popen") as popen:
+                    with self.assertRaisesRegex(RuntimeError, "seed=42"):
+                        paired_dispatch._launch_under_lease(
+                            bad_seed_args, out_dir)
+                    transport.assert_not_called()
+                    gate.assert_not_called()
+                    read_keys.assert_not_called()
+                    popen.assert_not_called()
+
     def test_runner_call_kinds_are_all_adaptive(self):
         calls = []
 
@@ -549,9 +1714,148 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertIn("thinking_mode='adaptive'", probe_fr_keys._PROBE_SOURCE)
         self.assertIn("call_kind='key_probe'", probe_fr_keys._PROBE_SOURCE)
 
+    def test_run_relay_preservation_gate_stops_before_next_api_or_commit(self):
+        class DummyDomain:
+            samples_folder = None
+
+        class DummyExecLog:
+            def to_dict(self):
+                return {"ops_accepted": 1, "ops_total": 1}
+
+        states = {
+            "initial": {
+                "context": ["a.txt"],
+                "solution_folder": "solution",
+                "prompts": [{"target_state": "target", "prompt": "forward"}],
+            },
+            "target": {
+                "context": ["a.txt"],
+                "solution_folder": "solution",
+                "prompts": [{"target_state": "initial", "prompt": "backward"}],
+            },
+        }
+        sample = {"start_state": "initial", "sample_type": "dummy"}
+        edit_result = (
+            "raw", {"a.txt": "new"}, {}, DummyExecLog(), "hybridpatch",
+            {"a.txt": "old"}, {},
+        )
+        with tempfile.TemporaryDirectory() as forward_dir, \
+                tempfile.TemporaryDirectory() as backward_dir, \
+                mock.patch.object(
+                    experiment_runner, "_require_formal_opencode_transport"
+                ), \
+                mock.patch.object(
+                    experiment_runner, "load_sample",
+                    return_value=(sample, forward_dir, states),
+                ), \
+                mock.patch.object(
+                    experiment_runner, "get_domain", return_value=DummyDomain()
+                ), \
+                mock.patch.object(
+                    experiment_runner, "load_distractor_context",
+                    return_value={},
+                ), \
+                mock.patch.object(
+                    experiment_runner, "build_context_from_folder",
+                    return_value={"a.txt": "old"},
+                ), \
+                mock.patch.object(
+                    experiment_runner, "build_relay_task_plan",
+                    return_value=["target"],
+                ), \
+                mock.patch.object(
+                    experiment_runner, "register_task_plan",
+                    return_value={"sha256": "a" * 64, "round_trips": 1},
+                ), \
+                mock.patch.object(
+                    experiment_runner, "shuffle_context",
+                    side_effect=lambda value: value,
+                ), \
+                mock.patch.object(
+                    experiment_runner, "merge_distractor",
+                    side_effect=lambda value, _distractor: value,
+                ), \
+                mock.patch.object(
+                    experiment_runner, "_evaluate",
+                    return_value={"score": 1.0},
+                ), \
+                mock.patch.object(
+                    experiment_runner, "is_context_complete",
+                    return_value=True,
+                ), \
+                mock.patch.object(
+                    experiment_runner, "dump_step_docs"
+                ), \
+                mock.patch.object(
+                    experiment_runner, "generate_response_id",
+                    side_effect=["rid-fwd", "rid-fwd-2", "rid-bwd"],
+                ), \
+                mock.patch.object(
+                    experiment_runner, "_edit_step",
+                    return_value=edit_result,
+                ) as edit_step, \
+                mock.patch.object(
+                    experiment_runner, "append_relay_rows_and_checkpoint"
+                ) as commit, \
+                mock.patch.object(experiment_runner, "_row") as make_row:
+            make_row.side_effect = [
+                {"bdpatch": {"preservation_violations": 1}},
+            ]
+            with self.assertRaisesRegex(RuntimeError, "/forward"):
+                experiment_runner.run_relay(
+                    "hybridpatch", "sample", num_round_trips=1,
+                    include_distractor=True, out_dir=forward_dir,
+                    model="offline-test-model", max_tokens=16,
+                    generate_fn=mock.Mock(), printing=False,
+                    stop_on_preservation_violation=True,
+                )
+            self.assertEqual(edit_step.call_count, 1)
+            commit.assert_not_called()
+            forward_stop = run_meta.read_campaign_stop_conditions(
+                forward_dir)[0]
+            self.assertEqual(
+                forward_stop["condition"], "preservation_violation")
+            self.assertEqual(forward_stop["direction"], "forward")
+            self.assertFalse(forward_stop["result_committed"])
+
+            edit_step.reset_mock()
+            commit.reset_mock()
+            make_row.side_effect = [
+                {
+                    "bdpatch": {"preservation_violations": 0},
+                    "evaluation": {"score": 1.0},
+                },
+                {"bdpatch": {"preservation_violations": 1}},
+            ]
+            with self.assertRaisesRegex(RuntimeError, "/backward"):
+                experiment_runner.run_relay(
+                    "hybridpatch", "sample", num_round_trips=1,
+                    include_distractor=True, out_dir=backward_dir,
+                    model="offline-test-model", max_tokens=16,
+                    generate_fn=mock.Mock(), printing=False,
+                    stop_on_preservation_violation=True,
+                )
+            self.assertEqual(edit_step.call_count, 2)
+            commit.assert_not_called()
+            backward_stop = run_meta.read_campaign_stop_conditions(
+                backward_dir)[0]
+            self.assertEqual(backward_stop["direction"], "backward")
+            self.assertFalse(backward_stop["result_committed"])
+
     def test_formal_runner_rejects_legacy_transport(self):
         with mock.patch.dict(
-            os.environ, {"OPENCODE_TRANSPORT": "urllib_v1"}, clear=False
+            os.environ, {
+                "OPENCODE_TRANSPORT": "urllib_v1",
+                "MINIMAX_TRANSPORT": "opencode",
+            }, clear=False
+        ):
+            with self.assertRaises(RuntimeError):
+                experiment_runner._require_formal_opencode_transport("minimax-m3")
+        with mock.patch.dict(
+            os.environ, {
+                "OPENCODE_TRANSPORT": "anthropic_sdk_v2",
+                "MINIMAX_TRANSPORT": "official_nonstream",
+            }, clear=False
         ):
             with self.assertRaises(RuntimeError):
                 experiment_runner._require_formal_opencode_transport("minimax-m3")
@@ -632,7 +1936,7 @@ class IntegrationContractTests(unittest.TestCase):
             )
         self.assertEqual(calls, ["hybridpatch_primary", "hybridpatch_repair"])
 
-    def test_v8_burden_repair_prompt_and_telemetry(self):
+    def test_v8_soft_burden_executes_without_repair_and_records_telemetry(self):
         def envelope(ops):
             return {
                 "protocol": "hybridpatch/8",
@@ -643,35 +1947,30 @@ class IntegrationContractTests(unittest.TestCase):
                 "action": {"route": "local_patch", "ops": ops},
             }
 
+        tokens = [f"item_{i:02d}_token" for i in range(32)]
         primary_ops = [
-            {"op": "replace", "file": "a.txt", "old_text": "old", "new_text": "new"}
-            for _ in range(32)
+            {"op": "replace", "file": "a.txt", "old_text": token,
+             "new_text": token.upper()}
+            for token in tokens
         ]
         primary = (
-            "RAW_SENTINEL_DO_NOT_REPEAT\n```json\n"
+            "```json\n"
             + json.dumps(envelope(primary_ops), ensure_ascii=False)
             + "\n```"
         )
-        repaired = "```json\n" + json.dumps(envelope([{
-            "op": "replace", "file": "a.txt", "old_text": "old", "new_text": "new",
-        }]), ensure_ascii=False) + "\n```"
-        responses = [primary, repaired]
         calls = []
-        repair_prompt = []
 
-        def fake_generate(messages, *_args, **kwargs):
+        def fake_generate(_messages, *_args, **kwargs):
             calls.append(kwargs.get("call_kind"))
-            if kwargs.get("call_kind") == "hybridpatch_repair":
-                repair_prompt.append(messages[0]["content"])
             return {
-                "message": responses.pop(0),
+                "message": primary,
                 "completion_tokens": 1,
                 "response_classification": "normal",
                 "finish_reason": "end_turn",
             }
 
         current = {
-            "a.txt": "old\n",
+            "a.txt": " ".join(tokens) + "\n",
             "unrelated.txt": "UNRELATED_EDITABLE_CONTENT\n",
             "reference.txt": "READONLY_CONTENT\n",
         }
@@ -682,71 +1981,58 @@ class IntegrationContractTests(unittest.TestCase):
             "Replace old with new in a.txt.", 16, fake_generate,
             step_direction="backward",
         )
-        self.assertEqual(calls, ["hybridpatch_primary", "hybridpatch_repair"])
-        self.assertEqual(generated, {"a.txt": "new\n"})
+        self.assertEqual(calls, ["hybridpatch_primary"])
+        self.assertEqual(generated, {"a.txt": " ".join(
+            token.upper() for token in tokens) + "\n"})
         self.assertEqual(tag, "hybridpatch")
         self.assertEqual(log.preservation_violations, 0)
-        self.assertEqual(raw, repaired)
+        self.assertEqual(raw, primary)
+        self.assertEqual(log.ops_accepted, 32)
+        self.assertIsNone(log.error)
         self.assertTrue(info["protocol_burden_exceeded"])
-        self.assertEqual(info["local_op_count"], 1)
+        self.assertEqual(info["local_op_count"], 32)
         self.assertEqual(info["bulk_op_count"], 0)
-        self.assertEqual(info["explicit_op_count"], 1)
-        self.assertEqual(info["anchor_bytes"], 3)
+        self.assertEqual(info["explicit_op_count"], 32)
+        self.assertGreater(info["anchor_bytes"], 0)
+        self.assertGreater(info["envelope_bytes"], 0)
         self.assertEqual(info["explicit_block_id_count"], 0)
         self.assertEqual(info["touched_file_count"], 1)
-        expected_ratio = len("new\n".encode("utf-8")) / sum(
-            len(value.encode("utf-8")) for value in input_real.values()
-        )
-        self.assertAlmostEqual(info["input_output_size_ratio"], expected_ratio)
         self.assertEqual(info["prompt_profile"], "default")
         self.assertEqual(info["prompt_classifier"], "operation_family_lexical/1")
         self.assertGreater(info["prompt_chars"], 0)
-        self.assertGreater(info["repair_prompt_chars"], 0)
-        self.assertEqual(info["call_budget"], {"primary_calls": 1, "repair_calls": 1})
-        self.assertTrue(info["repair"]["attempted"])
-        self.assertTrue(info["repair"]["used"])
+        self.assertEqual(info["repair_prompt_chars"], 0)
+        self.assertEqual(info["call_budget"], {"primary_calls": 1, "repair_calls": 0})
+        self.assertFalse(info["repair"]["attempted"])
+        self.assertEqual(info["schema_error_count"], 0)
+        self.assertIsNone(info["failure_reason"])
+        self.assertEqual(
+            info["protocol_burden_overages"]["local_op_count"],
+            {"actual": 32, "threshold": 31},
+        )
+        self.assertEqual(
+            info["protocol_burden_attempt_overages"]["primary"],
+            info["protocol_burden_overages"],
+        )
 
-        self.assertEqual(len(repair_prompt), 1)
-        compact = repair_prompt[0]
-        self.assertIn("protocol_burden_exceeded", compact)
-        self.assertIn("a.txt", compact)
-        self.assertIn("reference.txt", compact)
-        self.assertNotIn("READONLY_CONTENT", compact)
-        self.assertNotIn("UNRELATED_EDITABLE_CONTENT", compact)
-        self.assertNotIn("RAW_SENTINEL_DO_NOT_REPEAT", compact)
-        self.assertIn("bulk_patch:", compact)
-        self.assertIn("bounded_rewrite:", compact)
-        self.assertNotIn("dsl_rules:", compact)
-        self.assertIn(
-            '- bulk_patch -> edit_footprint="many_repeated_edits"', compact)
-        self.assertIn(
-            '- bounded_rewrite -> edit_footprint="whole_file_change"', compact)
-        self.assertEqual(compact.count("Protocol burden fix:"), 1)
+    def test_v8_below_burden_threshold_records_false(self):
+        envelope = {
+            "protocol": "hybridpatch/8",
+            "plan": {
+                "task_family": "precise replacement",
+                "edit_footprint": "few_precise_edits",
+            },
+            "action": {"route": "local_patch", "ops": [{
+                "op": "replace", "file": "a.txt", "old_text": "old",
+                "new_text": "new",
+            }]},
+        }
+        primary = "```json\n" + json.dumps(envelope) + "\n```"
+        calls = []
 
-    def test_v8_burden_primary_cannot_outrank_partial_repair(self):
-        def envelope(ops):
+        def fake_generate(*_args, **kwargs):
+            calls.append(kwargs.get("call_kind"))
             return {
-                "protocol": "hybridpatch/8",
-                "plan": {
-                    "task_family": "precise replacement",
-                    "edit_footprint": "few_precise_edits",
-                },
-                "action": {"route": "local_patch", "ops": ops},
-            }
-
-        primary = "```json\n" + json.dumps(envelope([
-            {"op": "replace", "file": "a.txt", "old_text": "old", "new_text": "new"}
-            for _ in range(32)
-        ])) + "\n```"
-        repair = "```json\n" + json.dumps(envelope([
-            {"op": "replace", "file": "a.txt", "old_text": "old", "new_text": "new"},
-            {"op": "replace", "file": "a.txt", "old_text": "missing", "new_text": "x"},
-        ])) + "\n```"
-        responses = [primary, repair]
-
-        def fake_generate(*_args, **_kwargs):
-            return {
-                "message": responses.pop(0),
+                "message": primary,
                 "completion_tokens": 1,
                 "response_classification": "normal",
                 "finish_reason": "end_turn",
@@ -758,20 +2044,25 @@ class IntegrationContractTests(unittest.TestCase):
             "Replace old with new in a.txt.", 16, fake_generate,
             step_direction="backward",
         )
-        self.assertEqual(raw, repair)
+        self.assertEqual(calls, ["hybridpatch_primary"])
+        self.assertEqual(raw, primary)
         self.assertEqual(generated, {"a.txt": "new\n"})
         self.assertEqual(tag, "hybridpatch")
-        self.assertTrue(info["repair"]["used"])
-        self.assertTrue(info["partial_acceptance"])
+        self.assertFalse(info["protocol_burden_exceeded"])
+        self.assertEqual(info["protocol_burden_overages"], {})
+        self.assertEqual(
+            info["protocol_burden_attempt_overages"], {"primary": {}},
+        )
+        self.assertFalse(info["repair"]["attempted"])
         self.assertEqual(log.ops_accepted, 1)
-        self.assertEqual(log.ops_rejected, 1)
+        self.assertEqual(log.ops_rejected, 0)
         self.assertEqual(log.preservation_violations, 0)
 
     def test_run_metadata_v3_shares_campaign_times_and_rejects_identity_mix(self):
         kwargs = {
             "command": "python test",
             "samples": ["sample"],
-            "methods": ["hybridpatch"],
+            "methods": ["hybridpatch", "fullrewrite"],
             "num_round_trips": 1,
             "seed": 42,
             "model": "offline-test-model",
@@ -785,7 +2076,8 @@ class IntegrationContractTests(unittest.TestCase):
                 mock.patch.object(run_meta, "_git_identity", return_value=(commit, "clean")), \
                 mock.patch.object(run_meta, "code_fingerprint", return_value=fingerprint):
             first = run_meta.append_run_metadata(out_dir, **kwargs)
-            second = run_meta.append_run_metadata(out_dir, **kwargs)
+            reordered = dict(kwargs, methods=["fullrewrite", "hybridpatch"])
+            second = run_meta.append_run_metadata(out_dir, **reordered)
             self.assertEqual(first["schema"], "anchorpatch.run_metadata/3")
             self.assertEqual(first["run_git_commit"], commit)
             self.assertEqual(first["git_tree_state"], "clean")
@@ -812,6 +2104,55 @@ class IntegrationContractTests(unittest.TestCase):
                     run_meta, "_git_identity", return_value=(commit, "dirty")):
                 with self.assertRaises(RuntimeError):
                     run_meta.append_run_metadata(out_dir, **kwargs)
+            with self.assertRaises(RuntimeError):
+                run_meta.append_run_metadata(out_dir, **dict(kwargs, seed=43))
+
+    def test_run_metadata_locks_task_plan_hash_before_api(self):
+        kwargs = {
+            "command": "python test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 2,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": True,
+            "max_tokens": 16,
+            "printing": False,
+            "context_shuffle_seeded": True,
+            "context_shuffle_seed_version": "global_random_seed_v1",
+            "stop_on_preservation_violation": True,
+        }
+        commit = "1" * 40
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(run_meta, "_git_identity", return_value=(commit, "clean")), \
+                mock.patch.object(run_meta, "code_fingerprint", return_value={"x": "y"}):
+            run_meta.append_run_metadata(out_dir, **kwargs)
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["state_a", "state_b"])
+            with mock.patch.dict(
+                os.environ,
+                {"ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256": "0" * 64},
+                clear=False,
+            ):
+                with self.assertRaises(RuntimeError):
+                    run_meta.register_task_plan(
+                        out_dir, "sample", plan_path, num_round_trips=2)
+            records = run_meta._read_run_metadata_strict(
+                os.path.join(out_dir, "run_metadata.jsonl"))
+            self.assertEqual(records[0]["task_plans"], {})
+
+            entry = run_meta.register_task_plan(
+                out_dir, "sample", plan_path, num_round_trips=2)
+            self.assertEqual(len(entry["sha256"]), 64)
+            records = run_meta._read_run_metadata_strict(
+                os.path.join(out_dir, "run_metadata.jsonl"))
+            self.assertEqual(records[0]["task_plans"]["sample"], entry)
+            self.assertFalse(any(".tmp-" in name for name in os.listdir(out_dir)))
+
+            utils_relay_plan.save_relay_task_plan(plan_path, ["state_b", "state_a"])
+            with self.assertRaises(RuntimeError):
+                run_meta.register_task_plan(
+                    out_dir, "sample", plan_path, num_round_trips=2)
 
     def test_response_journal_replays_without_second_provider_post(self):
         calls = []

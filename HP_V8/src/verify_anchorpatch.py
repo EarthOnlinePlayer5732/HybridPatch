@@ -30,7 +30,7 @@ from domains import get_domain
 from hybrid_prompt import extract_hybrid_json
 from hybrid_executor import apply_hybrid as execute_hybrid
 from hybrid_gate import validate_hybrid_output, partial_acceptance_eligible
-from hybrid_schema import validate_hybrid_envelope
+from hybrid_schema import PROTOCOL_V8, validate_hybrid_envelope
 
 SAMPLES_ROOT = os.path.join(_ROOT, "data", "samples_delegate52")
 TOL = 1e-6
@@ -47,6 +47,16 @@ def _score(ev):
 def _hybrid_replay_key(attempt):
     log = attempt.get("log")
     rate = round(log.op_accept_rate, 4) if log is not None else 0.0
+    envelope = attempt.get("envelope")
+    # Mirror experiment_runner._hybrid_key exactly.  A V8 schema refusal has
+    # no executable operations, and the legacy 0/0 == 1.0 convention must not
+    # make it outrank a repair with an executable partial application.  Keep
+    # this adjustment V8-only so archived V1-V7 replay ordering is unchanged.
+    if (isinstance(envelope, dict) and envelope.get("protocol") == PROTOCOL_V8
+            and log is not None
+            and log.error == "schema_error"
+            and log.ops_total == 0):
+        rate = -1.0
     return (
         int(not attempt.get("invalid_json") and bool(attempt.get("envelope"))),
         int(bool(attempt.get("gate_ok")) and bool(attempt.get("gen"))),

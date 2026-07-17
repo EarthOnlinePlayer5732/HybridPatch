@@ -3,8 +3,9 @@ Analysis — HybridPatch vs FullRewrite.
 
 Headline metric is RS@k (user's choice), reported with the full rigor the BD-Patch
 retrospective demands:
-  - paired SAME-task comparison (same seed plan -> backward task at round-trip k is
-    identical for both methods), paired t-test + Cohen's d, per-domain breakdown;
+  - canonical sample-level final endpoint: exactly one backward RS@K pair per sample,
+    with the two arm means, paired delta, sample SD of deltas, and win/loss/tie counts;
+  - sample-by-round-trip pairs are retained only as descriptive trajectory points;
   - failures (context_mismatch) counted as RS=0, NOT dropped;
   - ECR-conditioned RS (only round trips whose forward actually changed the doc);
   - preservation telemetry (op accept rate, preservation_violations, byte survival),
@@ -20,6 +21,7 @@ import sys
 import csv
 import json
 import argparse
+import math
 import statistics
 from collections import Counter, defaultdict
 
@@ -39,13 +41,50 @@ def load_rows(folder):
     for fn in os.listdir(folder):
         if not fn.endswith(".jsonl"):
             continue
-        for line in open(os.path.join(folder, fn), encoding="utf-8"):
-            line = line.strip()
-            if line:
+        with open(os.path.join(folder, fn), encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    try:
+                        rows.append(json.loads(line))
+                    except Exception:
+                        pass
+    return rows
+
+
+def load_formal_rows(folder, expected_method, expected_samples):
+    """Strictly bind every formal result row to its arm and filename sample."""
+    rows = []
+    if not os.path.isdir(folder):
+        return rows
+    expected_samples = set(expected_samples)
+    for filename in sorted(os.listdir(folder)):
+        if not filename.endswith(".jsonl"):
+            continue
+        path_sample = filename[:-6]
+        if path_sample not in expected_samples:
+            raise RuntimeError(
+                f"unexpected formal result file: {expected_method}/{filename}"
+            )
+        path = os.path.join(folder, filename)
+        with open(path, encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    continue
                 try:
-                    rows.append(json.loads(line))
-                except Exception:
-                    pass
+                    row = json.loads(line)
+                except ValueError as exc:
+                    raise RuntimeError(
+                        f"invalid formal JSONL row: {path}:{line_number}"
+                    ) from exc
+                if (not isinstance(row, dict)
+                        or row.get("sample_id") != path_sample
+                        or row.get("method") != expected_method):
+                    raise RuntimeError(
+                        f"formal result identity mismatch: "
+                        f"{path}:{line_number}"
+                    )
+                rows.append(row)
     return rows
 
 
@@ -61,6 +100,25 @@ def score_of(row):
     if "error" in ev:
         return 0.0
     return None
+
+
+def strict_formal_score(row):
+    """Return a score only under the dispatcher's formal endpoint contract."""
+    evaluation = row.get("evaluation")
+    if not isinstance(evaluation, dict):
+        raise RuntimeError("formal endpoint evaluation is missing")
+    score = evaluation.get("score")
+    if score is not None:
+        if (not isinstance(score, (int, float)) or isinstance(score, bool)
+                or not math.isfinite(float(score))):
+            raise RuntimeError("formal endpoint score is not finite numeric")
+        return float(score)
+    error = evaluation.get("error")
+    if not isinstance(error, str) or not error:
+        raise RuntimeError(
+            "formal endpoint requires finite score or non-empty error"
+        )
+    return 0.0
 
 
 def backward(rows):
@@ -97,6 +155,11 @@ def paired(ap_rows, fr_rows, ecr_only=False):
 
 
 def paired_stats(a, f):
+    """Legacy helper kept for import compatibility; not used in the formal report.
+
+    When called on sample-by-round-trip values its t/p fields are noncanonical because
+    repeated round trips from one sample are not independent analysis units.
+    """
     if len(a) < 2:
         return {"n": len(a), "mean_ap": _m(a), "mean_fr": _m(f), "delta": None,
                 "t": None, "p": None, "cohend": None}
@@ -113,6 +176,89 @@ def paired_stats(a, f):
     cohend = (md / sd_s) if sd_s > 0 else 0.0
     return {"n": len(a), "mean_ap": statistics.mean(a), "mean_fr": statistics.mean(f),
             "delta": md, "t": t, "p": p, "cohend": cohend}
+
+
+def paired_descriptive_stats(a, f):
+    """Describe paired trajectory points without treating them as independent units."""
+    if not a:
+        return {"n": 0, "mean_ap": float("nan"), "mean_fr": float("nan"), "delta": None}
+    deltas = [x - y for x, y in zip(a, f)]
+    return {
+        "n": len(deltas),
+        "mean_ap": statistics.mean(a),
+        "mean_fr": statistics.mean(f),
+        "delta": statistics.mean(deltas),
+    }
+
+
+def sample_level_final_endpoint(method_a_rows, method_b_rows, K=10,
+                                tie_tolerance=1e-12,
+                                expected_samples=None):
+    """Estimate the paired final endpoint using one exact backward RS@K per sample.
+
+    An earlier round trip is never substituted for a missing RS@K.  Reconstruction
+    errors retain the repository-wide score_of policy and therefore contribute 0.0;
+    rows with neither a score nor an error are incomplete and do not form a pair.
+    """
+    def index(rows):
+        scores = {}
+        seen = set()
+        for row in rows:
+            sample_id = row.get("sample_id")
+            if sample_id is not None:
+                seen.add(sample_id)
+            if (row.get("round_trip_direction") != "backward"
+                    or row.get("round_trip_num") != K
+                    or sample_id is None):
+                continue
+            if sample_id in scores:
+                raise ValueError(
+                    f"duplicate backward RT{K} endpoint for sample {sample_id!r}"
+                )
+            scores[sample_id] = score_of(row)
+        return scores, seen
+
+    a_index, a_seen = index(method_a_rows)
+    b_index, b_seen = index(method_b_rows)
+    all_samples = sorted(
+        a_seen | b_seen | set(expected_samples or [])
+    )
+    matched = sorted(
+        sample_id for sample_id in set(a_index) & set(b_index)
+        if a_index[sample_id] is not None and b_index[sample_id] is not None
+    )
+    pairs = [
+        {
+            "sample_id": sample_id,
+            "method_a": a_index[sample_id],
+            "method_b": b_index[sample_id],
+            "delta_a_minus_b": a_index[sample_id] - b_index[sample_id],
+        }
+        for sample_id in matched
+    ]
+    deltas = [pair["delta_a_minus_b"] for pair in pairs]
+    positive = sum(delta > tie_tolerance for delta in deltas)
+    negative = sum(delta < -tie_tolerance for delta in deltas)
+    ties = len(deltas) - positive - negative
+    return {
+        "round_trip": K,
+        "unit": "sample",
+        "n": len(pairs),
+        "mean_method_a": statistics.mean(pair["method_a"] for pair in pairs) if pairs else None,
+        "mean_method_b": statistics.mean(pair["method_b"] for pair in pairs) if pairs else None,
+        "paired_delta_a_minus_b": statistics.mean(deltas) if deltas else None,
+        "sample_delta_sd": statistics.stdev(deltas) if len(deltas) >= 2 else None,
+        "positive": positive,
+        "negative": negative,
+        "ties": ties,
+        "pairs": pairs,
+        "missing_method_a": sorted(
+            sample_id for sample_id in all_samples if a_index.get(sample_id) is None
+        ),
+        "missing_method_b": sorted(
+            sample_id for sample_id in all_samples if b_index.get(sample_id) is None
+        ),
+    }
 
 
 def _m(xs):
@@ -169,10 +315,67 @@ def fixed_point_chains(rows):
     return n_noop, n_fwd
 
 
+def usage_metrics(rows):
+    """Aggregate current provider usage fields with legacy prompt/completion fallback."""
+    totals = {
+        "steps": len(rows),
+        "input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "total_usd": 0.0,
+        "usd_steps": 0,
+        "native_usage_steps": 0,
+        "legacy_usage_steps": 0,
+    }
+    for row in rows:
+        native_input = row.get("input_tokens")
+        legacy_input = row.get("prompt_tokens")
+        native_output = row.get("output_tokens")
+        legacy_output = row.get("completion_tokens")
+        has_native = isinstance(native_input, (int, float))
+        input_tokens = native_input if has_native else (
+            legacy_input if isinstance(legacy_input, (int, float)) else 0
+        )
+        output_tokens = native_output if isinstance(native_output, (int, float)) else (
+            legacy_output if isinstance(legacy_output, (int, float)) else 0
+        )
+        cache_read = row.get("cache_read_input_tokens")
+        cache_creation = row.get("cache_creation_input_tokens")
+        cache_read = cache_read if isinstance(cache_read, (int, float)) else 0
+        cache_creation = cache_creation if isinstance(cache_creation, (int, float)) else 0
+        reported_total = row.get("total_tokens")
+        total_tokens = reported_total if isinstance(reported_total, (int, float)) else (
+            input_tokens + cache_read + cache_creation + output_tokens
+        )
+
+        totals["input_tokens"] += input_tokens
+        totals["cache_read_input_tokens"] += cache_read
+        totals["cache_creation_input_tokens"] += cache_creation
+        totals["output_tokens"] += output_tokens
+        totals["total_tokens"] += total_tokens
+        if has_native:
+            totals["native_usage_steps"] += 1
+        elif isinstance(legacy_input, (int, float)):
+            totals["legacy_usage_steps"] += 1
+        usd = row.get("total_usd")
+        if isinstance(usd, (int, float)):
+            totals["total_usd"] += usd
+            totals["usd_steps"] += 1
+    totals["usd_complete"] = totals["usd_steps"] == totals["steps"]
+    return totals
+
+
 def tokens(rows):
-    p = sum((r.get("prompt_tokens") or 0) for r in rows)
-    c = sum((r.get("completion_tokens") or 0) for r in rows)
-    return p, c, p + c
+    """Legacy tuple view: prompt-equivalent, output, and provider total tokens."""
+    usage = usage_metrics(rows)
+    prompt_equivalent = (
+        usage["input_tokens"]
+        + usage["cache_read_input_tokens"]
+        + usage["cache_creation_input_tokens"]
+    )
+    return prompt_equivalent, usage["output_tokens"], usage["total_tokens"]
 
 
 def critical_failures(rows, theta=0.10):
@@ -222,8 +425,11 @@ def hybrid_metrics(rows):
     n = 0
     routes = Counter()
     families = Counter()
+    prompt_profiles = Counter()
+    burden_overage_metrics = Counter()
     bounded = 0
     kept = 0
+    burden_exceeded = 0
     partial_accepted = 0
     gate_fail = 0
     invalid = 0
@@ -245,8 +451,18 @@ def hybrid_metrics(rows):
         n += 1
         routes[hy.get("route") or bd.get("actual_method") or "unknown"] += 1
         families[hy.get("task_family") or "unknown"] += 1
+        prompt_profiles[hy.get("prompt_profile") or "unknown"] += 1
         bounded += bool(hy.get("bounded_rewrite"))
         kept += bool(hy.get("failed_step_kept_context"))
+        burden_exceeded += bool(hy.get("protocol_burden_exceeded"))
+        attempt_overages = hy.get("protocol_burden_attempt_overages") or {}
+        if attempt_overages:
+            for overages in attempt_overages.values():
+                burden_overage_metrics.update((overages or {}).keys())
+        else:
+            burden_overage_metrics.update(
+                (hy.get("protocol_burden_overages") or {}).keys()
+            )
         partial_accepted += bool(hy.get("partial_acceptance"))
         gate_fail += bool(hy.get("validation_gate_errors"))
         invalid += bool(hy.get("invalid_json"))
@@ -271,10 +487,16 @@ def hybrid_metrics(rows):
         "steps": n,
         "routes": dict(routes),
         "task_families": dict(families),
+        "prompt_profiles": dict(prompt_profiles),
         "bounded_rewrite_steps": bounded,
         "bounded_rewrite_share": bounded / n,
         "failed_step_kept_context": kept,
         "kept_context_rate": kept / n,
+        "protocol_failure_steps": kept,
+        "protocol_failure_rate": kept / n,
+        "soft_burden_exceeded_steps": burden_exceeded,
+        "soft_burden_exceeded_rate": burden_exceeded / n,
+        "soft_burden_overage_metrics": dict(burden_overage_metrics),
         "partial_acceptance_steps": partial_accepted,
         "partial_acceptance_rate": partial_accepted / n,
         "validation_gate_failed_steps": gate_fail,
@@ -328,6 +550,9 @@ def _emit_hybrid_telemetry(L, hm):
     L.append("- route share: " + ", ".join(
         f"`{k}`={v}/{hm['steps']} ({100*v/hm['steps']:.1f}%)"
         for k, v in sorted(hm["routes"].items())))
+    L.append("- prompt profiles: " + ", ".join(
+        f"`{k}`={v}/{hm['steps']} ({100*v/hm['steps']:.1f}%)"
+        for k, v in sorted(hm["prompt_profiles"].items())))
     L.append(f"- bounded rewrite share: {hm['bounded_rewrite_steps']}/{hm['steps']} "
              f"({100*hm['bounded_rewrite_share']:.1f}%)")
     L.append(f"- copied/generated bytes: {hm['copied_source_bytes']}/{hm['generated_bytes']} "
@@ -335,6 +560,23 @@ def _emit_hybrid_telemetry(L, hm):
              f"| mean generated byte ratio={hm['generated_byte_ratio_mean']:.3f}")
     L.append(f"- repair: attempted={hm['repair_attempted']} used={hm['repair_used']} "
              f"success={hm['repair_success']} rate={100*hm['repair_rate']:.1f}%")
+    L.append(
+        f"- protocol failures (final kept-context steps): "
+        f"{hm['protocol_failure_steps']}/{hm['steps']} "
+        f"({100*hm['protocol_failure_rate']:.1f}%)"
+    )
+    L.append(
+        f"- soft burden threshold exceeded: "
+        f"{hm['soft_burden_exceeded_steps']}/{hm['steps']} "
+        f"({100*hm['soft_burden_exceeded_rate']:.1f}%); execution is not blocked"
+    )
+    if hm.get("soft_burden_overage_metrics"):
+        L.append("- soft burden overage metrics: " + ", ".join(
+            f"`{key}`={value}"
+            for key, value in sorted(
+                hm["soft_burden_overage_metrics"].items()
+            )
+        ))
     L.append(f"- gate failures: {hm['validation_gate_failed_steps']} "
              f"({100*hm['gate_failure_rate']:.1f}%) | kept-context failures: "
              f"{hm['failed_step_kept_context']} ({100*hm['kept_context_rate']:.1f}%)"
@@ -361,14 +603,50 @@ def main():
                     help="calibrate theta from positive nonzero adjacent dev drops")
     args = ap.parse_args()
     out_dir = args.out or os.path.join(args.dir, "analysis")
+    expected_samples = None
+    manifest_path = os.path.join(args.dir, "dispatch_manifest.json")
+    if os.path.isfile(manifest_path):
+        with open(manifest_path, encoding="utf-8") as handle:
+            campaign_manifest = json.load(handle)
+        config = campaign_manifest.get("config") or {}
+        expected_samples = list(config.get("samples") or [])
+        if (campaign_manifest.get("schema")
+                != "anchorpatch.paired_campaign_manifest/1"
+                or not expected_samples
+                or config.get("num_round_trips") != args.K
+                or set(config.get("method_set") or [])
+                != {"hybridpatch", "fullrewrite"}):
+            raise RuntimeError(
+                "formal campaign manifest does not match requested analysis"
+            )
     mixed_fps = _hybrid_fingerprint_mixture(args.dir)
     if len(mixed_fps) > 1:
         raise RuntimeError(
             f"hybridpatch val/test reporting forbidden: mixed code fingerprints ({len(mixed_fps)})")
 
-    ap_rows = load_rows(os.path.join(args.dir, "anchorpatch"))
-    hybrid_rows = load_rows(os.path.join(args.dir, "hybridpatch"))
-    fr_rows = load_rows(os.path.join(args.dir, "fullrewrite"))
+    if expected_samples is not None:
+        legacy_dir = os.path.join(args.dir, "anchorpatch")
+        if (os.path.isdir(legacy_dir)
+                and any(name.endswith(".jsonl")
+                        for name in os.listdir(legacy_dir))):
+            raise RuntimeError(
+                "formal hybridpatch campaign cannot contain legacy anchorpatch arm"
+            )
+        ap_rows = []
+        hybrid_rows = load_formal_rows(
+            os.path.join(args.dir, "hybridpatch"),
+            "hybridpatch", expected_samples)
+        fr_rows = load_formal_rows(
+            os.path.join(args.dir, "fullrewrite"),
+            "fullrewrite", expected_samples)
+        for row in hybrid_rows + fr_rows:
+            if (row.get("round_trip_direction") == "backward"
+                    and row.get("round_trip_num") == args.K):
+                strict_formal_score(row)
+    else:
+        ap_rows = load_rows(os.path.join(args.dir, "anchorpatch"))
+        hybrid_rows = load_rows(os.path.join(args.dir, "hybridpatch"))
+        fr_rows = load_rows(os.path.join(args.dir, "fullrewrite"))
     critical_theta = (
         calibrate_critical_theta(hybrid_rows, fr_rows)
         if args.calibrate_critical_theta else args.critical_theta
@@ -407,6 +685,38 @@ def main():
     # ---- report ----
     primary_rows = hybrid_rows if hybrid_rows and not ap_rows else ap_rows
     primary_label = "HybridPatch" if hybrid_rows and not ap_rows else "AnchorPatch"
+    final_endpoint = sample_level_final_endpoint(
+        primary_rows, fr_rows, args.K,
+        expected_samples=expected_samples,
+    )
+    expected_n = (
+        len(expected_samples) if expected_samples is not None
+        else final_endpoint["n"]
+    )
+    endpoint_complete = (
+        final_endpoint["n"] == expected_n
+        and not final_endpoint["missing_method_a"]
+        and not final_endpoint["missing_method_b"]
+    )
+    endpoint_document = {
+        "schema": "hybridpatch.sample_level_final_endpoint/1",
+        "method_a": primary_label,
+        "method_b": "FullRewrite",
+        "trajectory_points_are_descriptive_only": True,
+        "expected_samples": expected_samples,
+        "expected_n": expected_n,
+        "complete": endpoint_complete,
+        **final_endpoint,
+    }
+    with open(os.path.join(out_dir, "sample_level_final_endpoint.json"), "w", encoding="utf-8") as fh:
+        json.dump(endpoint_document, fh, ensure_ascii=False, indent=2, sort_keys=True)
+        fh.write("\n")
+    if expected_samples is not None and not endpoint_complete:
+        raise RuntimeError(
+            f"formal canonical endpoint incomplete: "
+            f"n={final_endpoint['n']}/{expected_n}"
+        )
+
     L = [f"# {primary_label} vs FullRewrite — diagnostic comparison", ""]
     L.append(f"Model: {model_label(ap_rows, hybrid_rows, fr_rows)} | samples: {', '.join(samples)} "
              f"(n={len(samples)}) | round trips: {args.K} | distractor: {distractor_label(ap_rows, hybrid_rows, fr_rows)}")
@@ -426,6 +736,43 @@ def main():
     L.append("| FullRewrite | " + " | ".join(f"{frk[k]:.3f}" for k in range(1, args.K + 1)) + " |")
     L.append("")
 
+    # Canonical estimator for the paired campaign: one final endpoint per sample.
+    def endpoint_number(value, signed=False):
+        if value is None:
+            return "n/a"
+        return f"{value:+.3f}" if signed else f"{value:.3f}"
+
+    L.append(f"## Sample-level final endpoint (canonical paired estimator at backward RS@{args.K})")
+    L.append("")
+    L.append(
+        f"Each sample contributes at most one pair at the exact final backward RT{args.K}; "
+        "an earlier round trip is never substituted for a missing endpoint. The sample is "
+        "the unit of analysis."
+    )
+    L.append("")
+    L.append(
+        f"| endpoint | matched samples | mean {primary_label} | mean FullRewrite | "
+        "paired Δ | sample SD of Δ | positive / negative / tie |"
+    )
+    L.append("|---|---:|---:|---:|---:|---:|---:|")
+    L.append(
+        f"| backward RS@{args.K} | {final_endpoint['n']} | "
+        f"{endpoint_number(final_endpoint['mean_method_a'])} | "
+        f"{endpoint_number(final_endpoint['mean_method_b'])} | "
+        f"{endpoint_number(final_endpoint['paired_delta_a_minus_b'], signed=True)} | "
+        f"{endpoint_number(final_endpoint['sample_delta_sd'])} | "
+        f"{final_endpoint['positive']} / {final_endpoint['negative']} / "
+        f"{final_endpoint['ties']} |"
+    )
+    if final_endpoint["missing_method_a"] or final_endpoint["missing_method_b"]:
+        L.append("")
+        L.append(
+            "- Incomplete exact endpoints (excluded without earlier-RT substitution): "
+            f"missing {primary_label}={final_endpoint['missing_method_a'] or 'none'}; "
+            f"missing FullRewrite={final_endpoint['missing_method_b'] or 'none'}."
+        )
+    L.append("")
+
     # per domain summary
     summary_ks = summary_k_values(args.K)
     L.append("## RS@" + "{" + ",".join(str(k) for k in summary_ks) + "} per domain")
@@ -439,22 +786,26 @@ def main():
         L.append(f"| {dom} | FullRewrite | " + " | ".join(f"{fk[k]:.3f}" for k in summary_ks) + " |")
     L.append("")
 
-    # paired same-task
-    a, f, keys = paired(primary_rows, fr_rows)
-    st = paired_stats(a, f)
+    # Repeated sample-by-round-trip values are descriptive trajectory points only.
+    a, f, _ = paired(primary_rows, fr_rows)
+    st = paired_descriptive_stats(a, f)
     ae, fe, _ = paired(primary_rows, fr_rows, ecr_only=True)
-    ste = paired_stats(ae, fe)
-    L.append("## Paired same-task comparison (backward RS, matched by sample+round-trip)")
-    L.append(f"| condition | n pairs | mean {primary_label} | mean FullRewrite | Δ | t | p | Cohen d |")
-    L.append("|---|---|---|---|---|---|---|---|")
-    def fmt(s):
+    ste = paired_descriptive_stats(ae, fe)
+    L.append("## Backward trajectory points (descriptive only; noncanonical)")
+    L.append("")
+    L.append(
+        f"The {st['n']} sample×round-trip points describe the trajectory. Repeated points "
+        "from the same sample are not independent inferential pairs and do not replace the "
+        "sample-level final endpoint above. ECR conditioning is a post-treatment diagnostic."
+    )
+    L.append("")
+    L.append(f"| condition | n trajectory points | mean {primary_label} | mean FullRewrite | descriptive Δ |")
+    L.append("|---|---:|---:|---:|---:|")
+    def fmt_descriptive(s):
         return (f"| {s['n']} | {s['mean_ap']:.3f} | {s['mean_fr']:.3f} | "
-                f"{('%+.3f'%s['delta']) if s['delta'] is not None else 'n/a'} | "
-                f"{('%.2f'%s['t']) if s['t'] is not None else 'n/a'} | "
-                f"{('%.3f'%s['p']) if s['p'] is not None else 'n/a'} | "
-                f"{('%.2f'%s['cohend']) if s['cohend'] is not None else 'n/a'} |")
-    L.append("| all pairs " + fmt(st))
-    L.append("| ECR-conditioned (forward actually edited) " + fmt(ste))
+                f"{('%+.3f'%s['delta']) if s['delta'] is not None else 'n/a'} |")
+    L.append("| all trajectory points " + fmt_descriptive(st))
+    L.append("| ECR-conditioned (forward actually edited) " + fmt_descriptive(ste))
     L.append("")
 
     # preservation / three layers
@@ -477,12 +828,26 @@ def main():
     ap_crit, ap_tr = critical_failures(primary_rows, critical_theta)
     fr_crit, fr_tr = critical_failures(fr_rows, critical_theta)
     apt, frt = tokens(primary_rows), tokens(fr_rows)
+    ap_usage = usage_metrics(primary_rows)
+    fr_usage = usage_metrics(fr_rows)
     L.append("## Inflation guards, critical failures, tokens")
     L.append(f"- no-op forward steps: {primary_label} {ap_noop}/{ap_fwd}, FullRewrite {fr_noop}/{fr_fwd}")
     L.append(f"- critical failures (backward RS drop >= {critical_theta:.2f} or collapse to 0 between round trips): "
              f"{primary_label} {ap_crit}/{ap_tr}, FullRewrite {fr_crit}/{fr_tr}")
     L.append(f"- tokens (prompt+completion): {primary_label} {apt[2]:,} ({apt[0]:,}+{apt[1]:,}), "
              f"FullRewrite {frt[2]:,} ({frt[0]:,}+{frt[1]:,})")
+    L.append("")
+    L.append("| method | input | cache-read | cache-create | output | provider total | USD | usage rows |")
+    L.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    for label, usage in ((primary_label, ap_usage), ("FullRewrite", fr_usage)):
+        L.append(
+            f"| {label} | {usage['input_tokens']:,} | "
+            f"{usage['cache_read_input_tokens']:,} | "
+            f"{usage['cache_creation_input_tokens']:,} | "
+            f"{usage['output_tokens']:,} | {usage['total_tokens']:,} | "
+            f"{usage['total_usd']:.6f} | "
+            f"{usage['usd_steps']}/{usage['steps']} |"
+        )
     L.append("")
 
     if hybrid_rows:
@@ -492,11 +857,11 @@ def main():
         L.append("|---|" + "---|" * args.K)
         L.append("| HybridPatch | " + " | ".join(f"{hk[k]:.3f}" for k in range(1, args.K + 1)) + " |")
         L.append("")
-        L.append("## HybridPatch vs FullRewrite (paired backward RS)")
-        L.append("| pairing | n pairs | mean A | mean B | Δ(A−B) | t | p | Cohen d |")
-        L.append("|---|---|---|---|---|---|---|---|")
+        L.append("## HybridPatch vs FullRewrite trajectory (descriptive only; noncanonical)")
+        L.append("| pairing | n trajectory points | mean A | mean B | descriptive Δ(A−B) |")
+        L.append("|---|---:|---:|---:|---:|")
         hh, ff, _ = paired(hybrid_rows, fr_rows)
-        L.append("| hybridpatch vs FR " + fmt(paired_stats(hh, ff)))
+        L.append("| hybridpatch vs FR " + fmt_descriptive(paired_descriptive_stats(hh, ff)))
         hc, ht = critical_failures(hybrid_rows, critical_theta)
         fc, ft = critical_failures(fr_rows, critical_theta)
         L.append("")
@@ -512,7 +877,10 @@ def main():
     with open(os.path.join(out_dir, "comparison.md"), "w", encoding="utf-8") as fh:
         fh.write(report + "\n")
     print(report)
-    print(f"\n[analyze] wrote {os.path.join(out_dir, 'comparison.md')} and experiment_results.csv")
+    print(
+        f"\n[analyze] wrote {os.path.join(out_dir, 'comparison.md')}, "
+        "experiment_results.csv, and sample_level_final_endpoint.json"
+    )
 
 
 if __name__ == "__main__":

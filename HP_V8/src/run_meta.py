@@ -51,6 +51,13 @@ _FINGERPRINT_FILES = [
 ]
 
 METADATA_SCHEMA = "anchorpatch.run_metadata/3"
+STOP_CONDITION_SCHEMA = "anchorpatch.campaign_stop_condition/1"
+
+
+class CampaignStoppedError(RuntimeError):
+    """Raised before a semantic call when a formal campaign is latched stopped."""
+
+    _anchorpatch_api_recorded = True
 
 
 def code_fingerprint():
@@ -76,8 +83,148 @@ def append_jsonl_locked(path, record):
         portalocker.lock(f, portalocker.LOCK_EX)
         try:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         finally:
             portalocker.unlock(f)
+
+
+def _read_campaign_stop_unlocked(out_dir):
+    path = os.path.join(out_dir, "campaign_stop.json")
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"invalid campaign stop latch: {path}"
+        ) from exc
+    if (not isinstance(record, dict)
+            or record.get("schema") != STOP_CONDITION_SCHEMA
+            or not isinstance(record.get("condition"), str)
+            or not record.get("condition")):
+        raise RuntimeError(f"invalid campaign stop latch: {path}")
+    return [record]
+
+
+def read_campaign_stop_conditions(out_dir):
+    """Return the durable campaign-wide stop latch, failing closed on damage."""
+    with _campaign_metadata_lock(out_dir):
+        return _read_campaign_stop_unlocked(out_dir)
+
+
+def record_campaign_stop_condition(out_dir, condition, **details):
+    """Durably set the first-writer-wins campaign stop latch."""
+    if not isinstance(condition, str) or not condition:
+        raise ValueError("campaign stop condition must be a non-empty string")
+    reserved = {
+        "schema", "created_at", "condition", "worker_launch_id",
+        "worker_pid",
+    }
+    overlap = reserved & set(details)
+    if overlap:
+        raise ValueError(
+            f"campaign stop details override reserved fields: {sorted(overlap)}"
+        )
+    record = {
+        "schema": STOP_CONDITION_SCHEMA,
+        "created_at": _iso_with_timezone(_aware_now()),
+        "condition": condition,
+        "worker_launch_id": os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID"),
+        "worker_pid": os.getpid(),
+    }
+    record.update(details)
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, "campaign_stop.json")
+    with _campaign_metadata_lock(out_dir):
+        existing = _read_campaign_stop_unlocked(out_dir)
+        if existing:
+            return existing[0]
+        write_json_atomic(path, record)
+        return record
+
+
+def _raise_if_campaign_stopped(out_dir):
+    records = read_campaign_stop_conditions(out_dir)
+    if records:
+        conditions = sorted({str(row.get("condition")) for row in records})
+        raise CampaignStoppedError(
+            "campaign stop latch is set: " + ", ".join(conditions)
+        )
+
+
+def enforce_active_worker_authorization(out_dir, sample_id):
+    """Fail closed if this process is not in the dispatcher's active set."""
+    worker_id = os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID")
+    active_path = os.environ.get("ANCHORPATCH_ACTIVE_WORKER_SET_PATH")
+    if not worker_id and not active_path:
+        return
+    authorized = False
+    try:
+        if not worker_id or not active_path:
+            raise RuntimeError("active worker authorization is incomplete")
+        with open(active_path, encoding="utf-8") as handle:
+            active = json.load(handle)
+        authorized = (
+            isinstance(active, dict)
+            and active.get("schema") == "anchorpatch.active_worker_set/1"
+            and (active.get("workers") or {}).get(worker_id)
+            == {"sample": sample_id}
+        )
+    except (OSError, ValueError, RuntimeError):
+        authorized = False
+    if not authorized:
+        record_campaign_stop_condition(
+            out_dir,
+            "worker_authorization_drift",
+            sample=sample_id,
+            attempted_worker_launch_id=worker_id,
+        )
+        _raise_if_campaign_stopped(out_dir)
+
+
+def _enforce_pre_call_campaign_guards(out_dir, sample_id):
+    """Check the global latch and immutable campaign identity before a call."""
+    _raise_if_campaign_stopped(out_dir)
+    enforce_active_worker_authorization(out_dir, sample_id)
+    expected_commit = os.environ.get("ANCHORPATCH_EXPECTED_GIT_COMMIT")
+    expected_tree = os.environ.get("ANCHORPATCH_EXPECTED_GIT_TREE_STATE")
+    if expected_commit or expected_tree:
+        current_commit, current_tree = _git_identity()
+        if ((expected_commit and current_commit != expected_commit)
+                or (expected_tree and current_tree != expected_tree)):
+            record_campaign_stop_condition(
+                out_dir,
+                "git_identity_drift",
+                sample=sample_id,
+                expected_commit=expected_commit,
+                actual_commit=current_commit,
+                expected_tree_state=expected_tree,
+                actual_tree_state=current_tree,
+            )
+            _raise_if_campaign_stopped(out_dir)
+    expected_plan = os.environ.get(
+        "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256")
+    plan_path = os.environ.get("ANCHORPATCH_EXPECTED_TASK_PLAN_PATH")
+    if expected_plan or plan_path:
+        actual_plan = None
+        if plan_path and os.path.isfile(plan_path):
+            with open(plan_path, "rb") as handle:
+                actual_plan = hashlib.sha256(handle.read()).hexdigest()
+        if (not expected_plan or not plan_path or actual_plan != expected_plan):
+            record_campaign_stop_condition(
+                out_dir,
+                "task_plan_drift",
+                sample=sample_id,
+                expected_sha256=expected_plan,
+                actual_sha256=actual_plan,
+            )
+            _raise_if_campaign_stopped(out_dir)
+    # Close the identity-check/latch-check window as far as a file-based latch
+    # permits. Calls already in flight may finish, but no later semantic call
+    # proceeds after another worker durably sets the latch.
+    _raise_if_campaign_stopped(out_dir)
 
 
 def write_json_atomic(path, record):
@@ -387,6 +534,7 @@ class ApiCallRecorder:
             "step_id": step_id,
             "semantic_call_id": semantic_call_id,
             "worker_launch_id": self.worker_launch_id,
+            "worker_pid": os.getpid(),
         }
 
     def _semantic_ids(self, call_kind):
@@ -521,6 +669,7 @@ class ApiCallRecorder:
             append_jsonl_locked(os.path.join(self.out_dir, "api_anomalies.jsonl"), record)
 
     def generate(self, *args, **kwargs):
+        _enforce_pre_call_campaign_guards(self.out_dir, self.sample_id)
         self.call_index += 1
         call_id = f"call{self.call_index:06d}_{uuid.uuid4().hex[:8]}"
         kwargs = dict(kwargs)
@@ -1028,10 +1177,185 @@ def _one_prior_value(records, key):
     return json.loads(next(iter(values)))
 
 
+def register_task_plan(out_dir, sample_id, plan_path, *, num_round_trips):
+    """Lock one sample's exact task-plan bytes into the campaign ledger.
+
+    Every invocation sees the same shared mapping.  A changed plan is refused
+    before the next method can issue an API call, while different samples may
+    register concurrently under the existing campaign metadata lock.
+    """
+    if not isinstance(sample_id, str) or not sample_id:
+        raise ValueError("sample_id must be a non-empty string")
+    with open(plan_path, "rb") as handle:
+        payload = handle.read()
+    try:
+        decoded = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise RuntimeError(f"invalid task plan: {plan_path}") from exc
+    sequence = decoded.get("forward_state_sequence")
+    if not isinstance(sequence, list) or len(sequence) != num_round_trips:
+        raise RuntimeError(
+            f"task plan for {sample_id} must contain exactly "
+            f"{num_round_trips} forward states"
+        )
+    entry = {
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "round_trips": num_round_trips,
+    }
+    expected_sha256 = os.environ.get(
+        "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256"
+    )
+    if expected_sha256 and entry["sha256"] != expected_sha256:
+        raise RuntimeError(
+            f"task-plan hash differs from dispatch manifest for {sample_id}"
+        )
+    with _campaign_metadata_lock(out_dir) as metadata_path:
+        records = _read_run_metadata_strict(metadata_path)
+        if not records:
+            raise RuntimeError("task plan cannot be registered before run metadata")
+        prior_manifest = _one_prior_value(records, "task_plans") or {}
+        previous = prior_manifest.get(sample_id)
+        if previous is not None and previous != entry:
+            raise RuntimeError(
+                f"refusing task-plan drift for {sample_id}: "
+                f"registered {previous}, current {entry}"
+            )
+        manifest = dict(prior_manifest)
+        manifest[sample_id] = entry
+        for record in records:
+            record["task_plans"] = manifest
+        _write_jsonl_atomic(metadata_path, records)
+    return dict(entry)
+
+
+def read_run_metadata_snapshot(out_dir):
+    """Read one strict metadata snapshot under its separate campaign lock.
+
+    The writer atomically replaces ``run_metadata.jsonl`` while holding
+    ``.run_metadata.lock``.  Locking the metadata file itself would keep an
+    open Windows handle across ``os.replace`` and can make a live worker fail.
+    """
+    with _campaign_metadata_lock(out_dir) as metadata_path:
+        return [dict(record) for record in _read_run_metadata_strict(metadata_path)]
+
+
+def interrupt_running_invocations(out_dir, *, status, worker_launch_ids=None):
+    """Close stale runner invocations after their process leases are released.
+
+    Records are retained in place with an explicit non-success status.  The
+    caller must first establish that the corresponding worker processes have
+    stopped; this helper only performs the atomic ledger transition.
+    """
+    if status == "running" or not isinstance(status, str) or not status:
+        raise ValueError("interrupt status must be a non-running string")
+    selected = None if worker_launch_ids is None else set(worker_launch_ids)
+    finished_now = _aware_now()
+    changed = []
+    with _campaign_metadata_lock(out_dir) as metadata_path:
+        records = _read_run_metadata_strict(metadata_path)
+        for record in records:
+            if record.get("status") != "running":
+                continue
+            worker_launch_id = record.get("worker_launch_id")
+            if selected is not None and worker_launch_id not in selected:
+                continue
+            record["status"] = status
+            record["invocation_finished_at"] = _iso_with_timezone(finished_now)
+            changed.append({
+                "invocation_id": record.get("invocation_id"),
+                "worker_launch_id": worker_launch_id,
+                "worker_pid": record.get("worker_pid"),
+                "samples": list(record.get("samples") or []),
+            })
+        if changed:
+            active = [
+                record for record in records
+                if record.get("status") == "running"
+            ]
+            campaign_finished_at = (
+                None if active else _iso_with_timezone(finished_now)
+            )
+            for record in records:
+                record["finished_at"] = campaign_finished_at
+            _write_jsonl_atomic(metadata_path, records)
+    return changed
+
+
+def interrupt_audited_running_invocations(out_dir, *, status, audited):
+    """Atomically close exactly the stale invocations audited by the caller.
+
+    Any new or identity-changed ``running`` record makes the transition fail
+    without editing metadata. This closes the audit-to-interrupt TOCTOU window.
+    """
+    if status == "running" or not isinstance(status, str) or not status:
+        raise ValueError("interrupt status must be a non-running string")
+    audited = list(audited or [])
+    expected = {}
+    for item in audited:
+        invocation_id = item.get("invocation_id")
+        worker_id = item.get("worker_launch_id")
+        worker_pid = item.get("worker_pid")
+        sample = item.get("sample")
+        if (not isinstance(invocation_id, str) or not invocation_id
+                or invocation_id in expected
+                or not isinstance(worker_id, str) or not worker_id
+                or not isinstance(worker_pid, int)
+                or isinstance(worker_pid, bool) or worker_pid <= 0
+                or not isinstance(sample, str) or not sample):
+            raise RuntimeError(
+                "audited running invocation identities are invalid"
+            )
+        expected[invocation_id] = (worker_id, worker_pid, sample)
+    if len(expected) != len(audited):
+        raise RuntimeError("audited running invocation identities are invalid")
+    changed = []
+    with _campaign_metadata_lock(out_dir) as metadata_path:
+        records = _read_run_metadata_strict(metadata_path)
+        running = [record for record in records
+                   if record.get("status") == "running"]
+        actual_id_list = [record.get("invocation_id") for record in running]
+        if (any(not isinstance(value, str) or not value
+                for value in actual_id_list)
+                or len(actual_id_list) != len(set(actual_id_list))):
+            raise RuntimeError("running invocation identities are invalid")
+        actual_ids = set(actual_id_list)
+        if actual_ids != set(expected):
+            raise RuntimeError(
+                "running invocation set changed after provenance audit"
+            )
+        for record in running:
+            identity = (
+                record.get("worker_launch_id"), record.get("worker_pid"),
+                (record.get("samples") or [None])[0]
+                if len(record.get("samples") or []) == 1 else None,
+            )
+            if identity != expected[record.get("invocation_id")]:
+                raise RuntimeError(
+                    "running invocation identity changed after provenance audit"
+                )
+        finished_now = _aware_now()
+        for record in running:
+            record["status"] = status
+            record["invocation_finished_at"] = _iso_with_timezone(finished_now)
+            changed.append({
+                "invocation_id": record.get("invocation_id"),
+                "worker_launch_id": record.get("worker_launch_id"),
+                "worker_pid": record.get("worker_pid"),
+                "samples": list(record.get("samples") or []),
+            })
+        if changed:
+            for record in records:
+                record["finished_at"] = _iso_with_timezone(finished_now)
+            _write_jsonl_atomic(metadata_path, records)
+    return changed
+
+
 def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                         seed, model, distractor, max_tokens, notes="", printing=True,
                         context_shuffle_seeded=False,
-                        context_shuffle_seed_version=None):
+                        context_shuffle_seed_version=None,
+                        stop_on_collapse=False,
+                        stop_on_preservation_violation=False):
     """Register one invocation in a locked V8 campaign metadata ledger.
 
     The first invocation establishes the campaign Git identity and timezone-aware
@@ -1045,6 +1369,15 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
     os.makedirs(out_dir, exist_ok=True)
     fp = code_fingerprint()
     run_git_commit, git_tree_state = _git_identity()
+    expected_commit = os.environ.get("ANCHORPATCH_EXPECTED_GIT_COMMIT")
+    expected_tree_state = os.environ.get(
+        "ANCHORPATCH_EXPECTED_GIT_TREE_STATE")
+    if ((expected_commit and run_git_commit != expected_commit)
+            or (expected_tree_state
+                and git_tree_state != expected_tree_state)):
+        raise RuntimeError(
+            "runner Git identity differs from dispatch manifest"
+        )
     provider_runtime = {}
     if str(model).lower().startswith("minimax-m3"):
         from model_openai import minimax_runtime_config
@@ -1055,6 +1388,10 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
     invocation_id = uuid.uuid4().hex
 
     with _campaign_metadata_lock(out_dir) as path:
+        if _read_campaign_stop_unlocked(out_dir):
+            raise CampaignStoppedError(
+                "cannot append runner metadata after campaign stop latch"
+            )
         prior = _read_run_metadata_strict(path)
         if prior and any(record.get("schema") != METADATA_SCHEMA for record in prior):
             raise RuntimeError(
@@ -1094,6 +1431,34 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                     f"{current_revision}; use a new --out_dir"
                 )
 
+        campaign_config = {
+            "method_set": sorted(set(methods)),
+            "num_round_trips": num_round_trips,
+            "seed": seed,
+            "model": model,
+            "distractor": bool(distractor),
+            "max_tokens": max_tokens,
+            "context_shuffle_seeded": bool(context_shuffle_seeded),
+            "context_shuffle_seed_version": (
+                context_shuffle_seed_version if context_shuffle_seeded else None
+            ),
+            "stop_on_collapse": bool(stop_on_collapse),
+            "stop_on_preservation_violation": bool(
+                stop_on_preservation_violation
+            ),
+        }
+        previous_config = _one_prior_value(prior, "campaign_config")
+        if prior and previous_config is None:
+            raise RuntimeError(
+                f"refusing to resume/mix {out_dir!r}: prior campaign_config "
+                "is unrecorded"
+            )
+        if previous_config is not None and previous_config != campaign_config:
+            raise RuntimeError(
+                f"refusing to resume/mix {out_dir!r}: prior campaign_config "
+                "differs from the current invocation; use a new --out_dir"
+            )
+
         campaign_started_at = _one_prior_value(prior, "started_at")
         campaign_timezone = _one_prior_value(prior, "timezone")
         if prior and (campaign_started_at is None or campaign_timezone is None):
@@ -1127,13 +1492,22 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             "num_round_trips": num_round_trips, "seed": seed, "model": model,
             "distractor": bool(distractor), "max_tokens": max_tokens,
             "code_fingerprint": fp, "notes": notes,
+            "campaign_config": campaign_config,
+            "task_plans": _one_prior_value(prior, "task_plans") or {},
+            "worker_launch_id": os.environ.get(
+                "ANCHORPATCH_WORKER_LAUNCH_ID"
+            ),
+            "worker_pid": os.getpid(),
         }
         rec.update(provider_runtime)
-        if context_shuffle_seeded:
-            rec["context_shuffle_seeded"] = True
-            rec["context_shuffle_seed_version"] = (
-                context_shuffle_seed_version or "global_random_seed_v1"
-            )
+        rec["context_shuffle_seeded"] = bool(context_shuffle_seeded)
+        rec["context_shuffle_seed_version"] = (
+            context_shuffle_seed_version if context_shuffle_seeded else None
+        )
+        rec["stop_on_collapse"] = bool(stop_on_collapse)
+        rec["stop_on_preservation_violation"] = bool(
+            stop_on_preservation_violation
+        )
         records = prior + [rec]
         _write_jsonl_atomic(path, records)
         return dict(rec)
@@ -1153,6 +1527,11 @@ def finish_run_metadata(out_dir, invocation_id, *, status="finished"):
                 f"cannot finish unknown or duplicate invocation {invocation_id!r}"
             )
         target = matches[0]
+        if target.get("status") != "running":
+            raise RuntimeError(
+                f"cannot finish non-running invocation {invocation_id!r}: "
+                f"status={target.get('status')!r}"
+            )
         target["status"] = status
         target["invocation_finished_at"] = _iso_with_timezone(finished_now)
         active = [record for record in records if record.get("status") == "running"]

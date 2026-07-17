@@ -31,6 +31,8 @@ from hybrid_schema import (
     rev_of,
     route_of,
     task_family_of,
+    measure_protocol_burden,
+    protocol_burden_overages,
     validate_hybrid_envelope,
 )
 
@@ -933,6 +935,12 @@ def apply_hybrid(source_context, envelope, target_filenames=None, splitter_fn=sp
     discarded_ids = set()
     generated_bytes = 0
 
+    burden = measure_protocol_burden(envelope, bodies=bodies)
+    overages = (
+        protocol_burden_overages(burden)
+        if isinstance(envelope, dict) and envelope.get("protocol") == PROTOCOL_V8
+        else {}
+    )
     errors, warnings = validate_hybrid_envelope(
         envelope, bodies=bodies, editable_filenames=source_context.keys())
     route = route_of(envelope)
@@ -945,11 +953,14 @@ def apply_hybrid(source_context, envelope, target_filenames=None, splitter_fn=sp
         "protocol_rev": rev,
         "route_violations": [],
     })
+    if rev == PROTOCOL_V8:
+        log.hybrid.update({
+            "protocol_burden": burden,
+            "protocol_burden_exceeded": bool(overages),
+            "protocol_burden_overages": overages,
+        })
     if errors:
-        log.error = (
-            "protocol_burden_exceeded"
-            if "protocol_burden_exceeded" in errors else "schema_error"
-        )
+        log.error = "schema_error"
         return {}, log
 
     action = envelope.get("action") or {}

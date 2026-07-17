@@ -20,6 +20,9 @@ import argparse
 import re
 import random
 import fnmatch
+import time
+
+import portalocker
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
@@ -35,15 +38,19 @@ from utils_results import generate_response_id
 from domains import get_domain
 
 from run_meta import (RunLogger, dump_step_docs, append_run_metadata,
-                      finish_run_metadata,
+                      finish_run_metadata, register_task_plan,
                       ApiCallRecorder, record_model_content_anomaly,
-                      append_relay_rows_and_checkpoint, write_json_atomic)
+                      append_relay_rows_and_checkpoint, write_json_atomic,
+                      enforce_active_worker_authorization,
+                      read_campaign_stop_conditions,
+                      record_campaign_stop_condition)
 from hybrid_prompt import (build_hybrid_prompt, build_hybrid_repair_prompt,
                            classify_operation_family, extract_hybrid_json)
 from hybrid_executor import apply_hybrid
 from hybrid_gate import (validate_hybrid_output, audit_forward_completion,
                          partial_acceptance_eligible)
 from hybrid_schema import (PROTOCOL_V8, measure_protocol_burden,
+                           protocol_burden_overages,
                            validate_hybrid_envelope)
 
 MODEL_DEFAULT = "deepseek-v4-flash"
@@ -52,6 +59,110 @@ SAMPLES_ROOT = os.path.join(_ROOT, "data", "samples_delegate52")
 RESULTS_DIR = os.path.join(_HERE, "experiment_results")
 DEFAULT_SAMPLES = ["accounting1", "accounting2", "accounting3", "accounting4",
                    "accounting5", "accounting6", "calendar1", "calendar5"]
+
+
+def _dispatch_worker_start_barrier(out_dir, samples, num_round_trips,
+                                   invocation_id):
+    """Register the task plan and wait for dispatcher authorization pre-API."""
+    worker_id = os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID")
+    ready_path = os.environ.get("ANCHORPATCH_WORKER_READY_PATH")
+    ack_path = os.environ.get("ANCHORPATCH_WORKER_ACK_PATH")
+    configured = [worker_id, ready_path, ack_path]
+    if not any(configured):
+        return None
+    if not all(configured) or len(samples) != 1:
+        raise RuntimeError(
+            "formal dispatcher barrier requires one sample and complete worker identity"
+        )
+    sample_id = samples[0]
+    plan_path = os.path.abspath(
+        os.path.join(out_dir, f"{sample_id}.task_plan.json"))
+    entry = register_task_plan(
+        out_dir, sample_id, plan_path,
+        num_round_trips=num_round_trips,
+    )
+    ready = {
+        "schema": "anchorpatch.worker_ready/1",
+        "worker_launch_id": worker_id,
+        "worker_pid": os.getpid(),
+        "invocation_id": invocation_id,
+        "sample": sample_id,
+        "task_plan_path": plan_path,
+        "task_plan_sha256": entry["sha256"],
+    }
+    write_json_atomic(os.path.abspath(ready_path), ready)
+    timeout = float(os.environ.get(
+        "ANCHORPATCH_START_BARRIER_TIMEOUT", "300"))
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        stop_records = read_campaign_stop_conditions(out_dir)
+        if stop_records:
+            raise RuntimeError(
+                "campaign stopped before worker authorization: "
+                f"{stop_records[0].get('condition')}"
+            )
+        if os.path.isfile(ack_path):
+            with open(ack_path, encoding="utf-8") as handle:
+                ack = json.load(handle)
+            expected = {
+                "schema": "anchorpatch.worker_start/1",
+                "worker_launch_id": worker_id,
+                "worker_pid": os.getpid(),
+                "invocation_id": invocation_id,
+                "sample": sample_id,
+                "task_plan_sha256": entry["sha256"],
+            }
+            if ack != expected:
+                raise RuntimeError("dispatcher worker authorization mismatch")
+            return ready
+        time.sleep(0.1)
+    raise RuntimeError("timed out waiting for dispatcher worker authorization")
+
+
+def _record_preservation_stop(out_dir, method, sample_id, rt_num,
+                              direction, row):
+    bdpatch = row.get("bdpatch") if isinstance(row, dict) else None
+    count = (bdpatch or {}).get("preservation_violations")
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return False
+    record_campaign_stop_condition(
+        out_dir,
+        "preservation_violation",
+        method=method,
+        sample=sample_id,
+        round_trip_num=rt_num,
+        direction=direction,
+        preservation_violations=count,
+        result_committed=False,
+        api_call_ids=list(row.get("api_call_ids") or []),
+    )
+    return True
+
+
+def _require_formal_dispatch_environment(out_dir, samples):
+    """Prevent an unleased standalone runner from joining a paired campaign."""
+    manifest_path = os.path.join(
+        os.path.abspath(out_dir), "dispatch_manifest.json")
+    if not os.path.isfile(manifest_path):
+        return
+    required = [
+        "ANCHORPATCH_WORKER_LAUNCH_ID",
+        "ANCHORPATCH_WORKER_LOCK_PATH",
+        "ANCHORPATCH_WORKER_READY_PATH",
+        "ANCHORPATCH_WORKER_ACK_PATH",
+        "ANCHORPATCH_ACTIVE_WORKER_SET_PATH",
+        "ANCHORPATCH_EXPECTED_GIT_COMMIT",
+        "ANCHORPATCH_EXPECTED_GIT_TREE_STATE",
+        "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256",
+        "ANCHORPATCH_EXPECTED_TASK_PLAN_PATH",
+    ]
+    missing = [name for name in required if not os.environ.get(name)]
+    if len(samples) != 1 or missing:
+        raise RuntimeError(
+            "formal paired campaign requires one leased dispatcher worker; "
+            f"missing={missing}"
+        )
+    enforce_active_worker_authorization(out_dir, samples[0])
 
 
 def _read_committed_rounds(jsonl_path):
@@ -148,6 +259,14 @@ def _require_formal_opencode_transport(model):
             "formal MiniMax-M3 experiments require OPENCODE_TRANSPORT="
             "anthropic_sdk_v2; urllib_v1 is diagnostic-only"
         )
+    minimax_transport = (
+        os.environ.get("MINIMAX_TRANSPORT") or "opencode"
+    ).strip()
+    if minimax_transport != "opencode":
+        raise RuntimeError(
+            "formal MiniMax-M3 experiments require MINIMAX_TRANSPORT=opencode; "
+            "official_nonstream belongs to a different transport revision"
+        )
 
 
 def _editable(ctx, distractor):
@@ -194,16 +313,11 @@ def _final_target_metrics(input_real, final_context, target_filenames):
     return touched, ratio
 
 
-def _is_protocol_burden_error(errors):
-    return any("protocol_burden_exceeded" in str(error) for error in (errors or []))
-
-
-
 def _hybrid_key(attempt):
     log = attempt.get("exec_log")
     rate = round(log.op_accept_rate, 4) if log is not None else 0.0
     envelope = attempt.get("envelope")
-    # A V8 schema/burden refusal happens before any action is eligible to run.
+    # A V8 schema refusal happens before any action is eligible to run.
     # HybridExecLog historically reports the empty 0/0 operation set as a
     # 1.0 acceptance rate; that legacy convention must not make a refused
     # primary outrank an executable (including partially acceptable) repair.
@@ -211,7 +325,7 @@ def _hybrid_key(attempt):
     # byte-for-byte compatible with its existing policy.
     if (isinstance(envelope, dict) and envelope.get("protocol") == PROTOCOL_V8
             and log is not None
-            and log.error in {"schema_error", "protocol_burden_exceeded"}
+            and log.error == "schema_error"
             and log.ops_total == 0):
         rate = -1.0
     return (
@@ -231,6 +345,7 @@ def _run_attempt_hybrid(raw, input_real, target_filenames, readonly_names,
         "envelope": envelope,
         "bodies": bodies,
         "burden": {},
+        "burden_overages": {},
         "protocol_burden_exceeded": False,
         "partial_extraction": em.get("partial_extraction"),
         "fence_complete": em.get("fence_complete"),
@@ -256,11 +371,15 @@ def _run_attempt_hybrid(raw, input_real, target_filenames, readonly_names,
         return a
 
     burden = measure_protocol_burden(envelope, bodies=bodies)
+    overages = (
+        protocol_burden_overages(burden)
+        if envelope.get("protocol") == PROTOCOL_V8 else {}
+    )
     schema_errors, schema_warnings = validate_hybrid_envelope(
         envelope, bodies=bodies, editable_filenames=input_real.keys())
-    burden_exceeded = _is_protocol_burden_error(schema_errors)
     a["burden"] = dict(burden or {})
-    a["protocol_burden_exceeded"] = burden_exceeded
+    a["burden_overages"] = overages
+    a["protocol_burden_exceeded"] = bool(overages)
     a["schema_errors"] = list(schema_errors)
     a["schema_warnings"] = list(schema_warnings)
     gen, log = apply_hybrid(input_real, envelope, target_filenames, bodies=bodies)
@@ -302,9 +421,7 @@ def _run_attempt_hybrid(raw, input_real, target_filenames, readonly_names,
     if not gate_pass:
         errors += [f"validation: {e}" for e in gate_errors]
 
-    if burden_exceeded:
-        trigger = "protocol_burden_exceeded"
-    elif em.get("partial_extraction"):
+    if em.get("partial_extraction"):
         trigger = "partial_extraction"
     elif schema_errors:
         trigger = "schema_error"
@@ -528,6 +645,9 @@ def _edit_step(method, domain, sample_id, model, current_context, distractor,
             a0.get("protocol_burden_exceeded")
             or (a1 and a1.get("protocol_burden_exceeded"))
         )
+        attempt_overages = {"primary": a0.get("burden_overages") or {}}
+        if a1 is not None:
+            attempt_overages["repair"] = a1.get("burden_overages") or {}
         touched_file_count, size_ratio = _final_target_metrics(
             input_real, gen_real, target_filenames)
         v2_info = {
@@ -549,6 +669,7 @@ def _edit_step(method, domain, sample_id, model, current_context, distractor,
             "prompt_chars": prompt_chars,
             "repair_prompt_chars": repair.get("repair_prompt_chars") or 0,
             "envelope_chars": burden.get("envelope_chars"),
+            "envelope_bytes": burden.get("envelope_bytes"),
             "local_op_count": burden.get("local_op_count"),
             "bulk_op_count": burden.get("bulk_op_count"),
             "explicit_op_count": burden.get("explicit_op_count"),
@@ -557,6 +678,8 @@ def _edit_step(method, domain, sample_id, model, current_context, distractor,
             "touched_file_count": touched_file_count,
             "input_output_size_ratio": size_ratio,
             "protocol_burden_exceeded": burden_exceeded,
+            "protocol_burden_overages": chosen.get("burden_overages") or {},
+            "protocol_burden_attempt_overages": attempt_overages,
             "invalid_json": chosen.get("invalid_json"),
             "partial_extraction": chosen.get("partial_extraction"),
             "fence_complete": chosen.get("fence_complete"),
@@ -674,7 +797,7 @@ def _row(method, sample_id, sample_type, model, rid_chain, state_chain, rt_num,
 def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor=True,
               out_dir=RESULTS_DIR, model=MODEL_DEFAULT, max_tokens=None,
               generate_fn=None, printing=True, inline_report=False, fr_baseline=None,
-              stop_on_collapse=False):
+              stop_on_collapse=False, stop_on_preservation_violation=False):
     _require_formal_opencode_transport(model)
     if max_tokens is None and not str(model).lower().startswith("minimax-m3"):
         max_tokens = 20000
@@ -706,6 +829,15 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
         task_plan = build_relay_task_plan(possible_forward, num_round_trips, seed=seed)
         save_relay_task_plan(plan_path, task_plan)
     task_plan = task_plan[:num_round_trips]
+    registered_plan = register_task_plan(
+        out_dir, sample_id, plan_path, num_round_trips=num_round_trips)
+    expected_plan_sha = os.environ.get(
+        "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256")
+    if (expected_plan_sha
+            and registered_plan.get("sha256") != expected_plan_sha):
+        raise RuntimeError(
+            f"task-plan hash differs from dispatch manifest for {sample_id}"
+        )
 
     method_dir = os.path.join(out_dir, method)
     os.makedirs(method_dir, exist_ok=True)
@@ -774,6 +906,13 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
                        evaluation, meta, elog, tag, fwd_changed, fwd_changed,
                        include_distractor, v2_info=v2i, edit_instruction=fwd_instr)
         pending_rows.append(fwd_row)
+        if (stop_on_preservation_violation
+                and _record_preservation_stop(
+                    out_dir, method, sample_id, rt_num, "forward", fwd_row)):
+            log.close()
+            raise RuntimeError(
+                f"preservation_violations>0 at {method}/{sample_id}/RT{rt_num}/forward"
+            )
         if api_recorder:
             record_model_content_anomaly(out_dir, fwd_row)
         dump_step_docs(out_dir, method, sample_id, rt_num, "fwd", fwd_target_id, gen_real,
@@ -808,6 +947,13 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
                        evaluation, meta, elog, tag, bwd_changed, fwd_changed,
                        include_distractor, v2_info=v2i, edit_instruction=bwd_instr)
         pending_rows.append(bwd_row)
+        if (stop_on_preservation_violation
+                and _record_preservation_stop(
+                    out_dir, method, sample_id, rt_num, "backward", bwd_row)):
+            log.close()
+            raise RuntimeError(
+                f"preservation_violations>0 at {method}/{sample_id}/RT{rt_num}/backward"
+            )
         if api_recorder:
             record_model_content_anomaly(out_dir, bwd_row)
         dump_step_docs(out_dir, method, sample_id, rt_num, "bwd", initial_state_id, gen_real,
@@ -904,12 +1050,18 @@ def main():
                     help="early-stop a sample's relay once a backward RS collapses to 0 "
                          "(cliff-drop) — the remaining round trips are skipped to save compute. "
                          "Off by default to preserve the full-10RT paired-comparison semantics.")
+    ap.add_argument(
+        "--stop_on_preservation_violation", action="store_true",
+        help="fail before the next API call if any generated HP row reports a "
+             "preservation violation",
+    )
     args = ap.parse_args()
     if args.max_tokens == 0:
         args.max_tokens = None  # MiniMax model layer substitutes 131072.
     elif args.max_tokens is None and not str(args.model).lower().startswith("minimax-m3"):
         args.max_tokens = 20000
     _require_formal_opencode_transport(args.model)
+    _require_formal_dispatch_environment(args.out_dir, args.sample)
 
     fr_baseline = None
     if args.fr_baseline and os.path.exists(args.fr_baseline):
@@ -921,29 +1073,77 @@ def main():
         seed=args.seed, model=args.model, distractor=not args.skip_distractor,
         max_tokens=args.max_tokens, notes=args.notes,
         context_shuffle_seeded=True,
-        context_shuffle_seed_version="global_random_seed_v1")
+        context_shuffle_seed_version="global_random_seed_v1",
+        stop_on_collapse=args.stop_on_collapse,
+        stop_on_preservation_violation=args.stop_on_preservation_violation)
 
     finish_status = "failed"
     try:
+        _dispatch_worker_start_barrier(
+            args.out_dir, args.sample, args.num_round_trips,
+            run_metadata["invocation_id"],
+        )
         for sample_id in args.sample:
             for method in args.methods:
-                try:
-                    run_relay(method, sample_id, num_round_trips=args.num_round_trips, seed=args.seed,
-                              include_distractor=not args.skip_distractor, out_dir=args.out_dir,
-                              model=args.model, max_tokens=args.max_tokens,
-                              inline_report=args.inline_report, fr_baseline=fr_baseline,
-                              stop_on_collapse=args.stop_on_collapse)
-                except Exception as e:
-                    # One sample's terminal failure must not kill the rest of the
-                    # campaign; the checkpoint stays at the last committed RT so a
-                    # relaunch of the same command resumes idempotently.
-                    print(f"[main] {method}/{sample_id} ABORTED: {e} — continuing with next sample",
-                          file=sys.stderr, flush=True)
+                run_relay(
+                    method, sample_id,
+                    num_round_trips=args.num_round_trips, seed=args.seed,
+                    include_distractor=not args.skip_distractor,
+                    out_dir=args.out_dir, model=args.model,
+                    max_tokens=args.max_tokens, inline_report=args.inline_report,
+                    fr_baseline=fr_baseline,
+                    stop_on_collapse=args.stop_on_collapse,
+                    stop_on_preservation_violation=(
+                        args.stop_on_preservation_violation
+                    ),
+                )
         finish_status = "finished"
     finally:
         finish_run_metadata(
             args.out_dir, run_metadata["invocation_id"], status=finish_status)
 
 
+def _run_cli_with_worker_lease():
+    """Hold the dispatcher's per-sample lease for this process lifetime."""
+    lock_path = os.environ.get("ANCHORPATCH_WORKER_LOCK_PATH")
+    if not lock_path:
+        try:
+            out_index = sys.argv.index("--out_dir") + 1
+            standalone_out_dir = os.path.abspath(sys.argv[out_index])
+        except (ValueError, IndexError) as exc:
+            raise RuntimeError(
+                "standalone runner requires explicit --out_dir"
+            ) from exc
+        os.makedirs(standalone_out_dir, exist_ok=True)
+        dispatcher_lock_path = os.path.join(
+            standalone_out_dir, ".paired_dispatch.lock")
+        with open(dispatcher_lock_path, "a+", encoding="utf-8") as lease:
+            try:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            except portalocker.exceptions.LockException as exc:
+                raise RuntimeError(
+                    "paired dispatcher already owns this out_dir"
+                ) from exc
+            try:
+                return main()
+            finally:
+                portalocker.unlock(lease)
+    os.makedirs(os.path.dirname(os.path.abspath(lock_path)), exist_ok=True)
+    with open(lock_path, "a+", encoding="utf-8") as lease:
+        try:
+            portalocker.lock(
+                lease, portalocker.LOCK_EX | portalocker.LOCK_NB
+            )
+        except portalocker.exceptions.LockException as exc:
+            raise RuntimeError(
+                f"another runner owns worker lease {lock_path}"
+            ) from exc
+        try:
+            return main()
+        finally:
+            portalocker.unlock(lease)
+
+
 if __name__ == "__main__":
-    main()
+    _run_cli_with_worker_lease()

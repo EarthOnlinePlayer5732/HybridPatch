@@ -4,6 +4,7 @@ Run from repo root:
   PYTHONUTF8=1 python src/test_hybrid_executor.py
 """
 
+import json
 import os
 import sys
 
@@ -15,9 +16,11 @@ for _p in (_ROOT, _HERE):
 
 from hybrid_executor import apply_hybrid
 from hybrid_gate import validate_hybrid_output, partial_acceptance_eligible
+import experiment_runner
 import hybrid_index
 import hybrid_prompt
 import splitters
+import verify_anchorpatch
 from hybrid_prompt import (extract_hybrid_json, BODIES_HEADER,
                            build_hybrid_prompt, build_hybrid_repair_prompt,
                            classify_operation_family)
@@ -904,62 +907,141 @@ def test_v8_bulk_rejects_unknown_scope_before_execution():
     ), log.to_dict())
 
 
-def _assert_burden_rejected(ctx, envelope, metric, bodies=None):
+def _assert_burden_is_soft(ctx, envelope, metric, bodies=None, targets=None):
     burden = measure_protocol_burden(envelope, bodies=bodies)
     assert_true(burden[metric] > PROTOCOL_BURDEN_LIMITS[metric], burden)
-    out, log = apply_hybrid(ctx, envelope, list(ctx), bodies=bodies)
-    assert_true(out == {} and log.error == "protocol_burden_exceeded", log.to_dict())
-    assert_true(log.ops_accepted == 0 and log.ops_rejected == 0, log.to_dict())
-    assert_true(any(e.startswith("protocol_burden_exceeded:" + metric + ":")
-                    for e in log.hybrid["schema_errors"]), log.to_dict())
+    errors, _warnings = validate_hybrid_envelope(
+        envelope, bodies=bodies, editable_filenames=ctx.keys())
+    assert_true(not any("protocol_burden_exceeded" in error for error in errors), errors)
+    out, log = apply_hybrid(
+        ctx, envelope, targets if targets is not None else list(ctx), bodies=bodies)
+    assert_true(bool(out) and log.error is None, log.to_dict())
+    assert_true(log.ops_rejected == 0, log.to_dict())
+    assert_true(log.preservation_violations == 0, log.to_dict())
+    assert_true(log.hybrid["protocol_burden_exceeded"] is True, log.to_dict())
+    detail = log.hybrid["protocol_burden_overages"].get(metric)
+    assert_true(detail == {
+        "actual": burden[metric],
+        "threshold": PROTOCOL_BURDEN_LIMITS[metric],
+    }, log.to_dict())
+    target_names = targets if targets is not None else list(ctx)
+    attempt = experiment_runner._run_attempt_hybrid(
+        "```json\n" + json.dumps(envelope, ensure_ascii=False) + "\n```",
+        ctx, target_names, [], require_effective_change=False)
+    assert_true(attempt["gate_pass"] is True, attempt)
+    assert_true(attempt["need_repair"] is False and attempt["trigger"] is None, attempt)
+    assert_true(attempt["protocol_burden_exceeded"] is True, attempt)
+    assert_true(attempt["burden_overages"].get(metric) == detail, attempt)
+    return out, log
 
 
-def test_v8_each_protocol_burden_limit_rejected_before_execution():
-    ctx = {"out.txt": "x\n"}
+def test_v8_each_protocol_burden_limit_is_soft_telemetry():
+    local_tokens = [f"local_{i:02d}_token" for i in range(
+        PROTOCOL_BURDEN_LIMITS["local_op_count"] + 1)]
+    ctx = {"out.txt": " ".join(local_tokens) + "\n"}
     local_ops = [
-        {"op": "replace", "file": "out.txt", "old_text": "x", "new_text": "x"}
-        for _ in range(PROTOCOL_BURDEN_LIMITS["local_op_count"] + 1)
+        {"op": "replace", "file": "out.txt", "old_text": token,
+         "new_text": token.upper()}
+        for token in local_tokens
     ]
-    _assert_burden_rejected(
+    _assert_burden_is_soft(
         ctx, env("local_patch", {"ops": local_ops}, protocol=PROTOCOL_V8),
         "local_op_count")
 
+    bulk_tokens = [f"bulk_{i:02d}_token" for i in range(
+        PROTOCOL_BURDEN_LIMITS["bulk_op_count"] + 1)]
+    ctx = {"out.txt": " ".join(bulk_tokens) + "\n"}
     bulk_ops = [
-        {"op": "replace_all", "scope": ["out.txt"], "old_text": "x", "new_text": "x"}
-        for _ in range(PROTOCOL_BURDEN_LIMITS["bulk_op_count"] + 1)
+        {"op": "replace_all", "scope": ["out.txt"], "old_text": token,
+         "new_text": token.upper()}
+        for token in bulk_tokens
     ]
-    _assert_burden_rejected(
+    _assert_burden_is_soft(
         ctx, env("bulk_patch", {"ops": bulk_ops}, protocol=PROTOCOL_V8),
         "bulk_op_count")
 
     anchor_body = "x" * (PROTOCOL_BURDEN_LIMITS["anchor_bytes"] + 1)
+    ctx = {"out.txt": anchor_body + "\n"}
     anchor_env = env("local_patch", {"ops": [{
-        "op": "replace", "file": "out.txt", "old_text": BODY_REF_PREFIX + "anchor",
-        "new_text": "x",
+        "op": "replace", "file": "out.txt", "old_text": anchor_body,
+        "new_text": "y",
     }]}, protocol=PROTOCOL_V8)
-    _assert_burden_rejected(ctx, anchor_env, "anchor_bytes", bodies={"anchor": anchor_body})
+    _assert_burden_is_soft(ctx, anchor_env, "anchor_bytes")
 
+    ctx = {"out.txt": "x\n"}
     envelope_env = env("bounded_rewrite", {"files": [{
         "file": "out.txt", "content": "z" * PROTOCOL_BURDEN_LIMITS["envelope_bytes"],
     }]}, protocol=PROTOCOL_V8)
-    _assert_burden_rejected(ctx, envelope_env, "envelope_bytes")
+    _assert_burden_is_soft(ctx, envelope_env, "envelope_bytes")
 
-    ids = [f"out.txt:B{i}" for i in range(PROTOCOL_BURDEN_LIMITS["explicit_block_id_count"] + 1)]
+    # Cross both the empirical 39-ID marker and the legacy 64/128 DSL caps.
+    # V8 must execute the full envelope; V1-V7 keep their historical caps.
+    source = "".join(f"block-{i}\n\n" for i in range(140))
+    blocks = split_struct2(source.encode("utf-8"))
+    ids = [block_id_for("src.txt", block.block_id) for block in blocks[:129]]
+    assert_true(len(ids) == 129, len(ids))
     dsl_env = env("dsl_rules", {"rules": [{
         "rule": "copy_blocks", "output": "out.txt", "block_ids": ids,
     }]}, protocol=PROTOCOL_V8)
-    _assert_burden_rejected(ctx, dsl_env, "explicit_block_id_count")
+    _assert_burden_is_soft(
+        {"src.txt": source}, dsl_env, "explicit_block_id_count",
+        targets=["out.txt"])
+    legacy_dsl_env = env("dsl_rules", {"rules": [{
+        "rule": "copy_blocks", "output": "out.txt", "block_ids": ids,
+    }]}, protocol=PROTOCOL_V7)
+    legacy_errors, _warnings = validate_hybrid_envelope(legacy_dsl_env)
+    assert_true(any(
+        "dsl explicit id count exceeds limit 64" == error
+        for error in legacy_errors
+    ), legacy_errors)
+
+    # The old 16-rule cap is also protocol length, not a V8 correctness rule.
+    rule_source = "".join(f"rule-block-{i}\n\n" for i in range(17))
+    rule_blocks = split_struct2(rule_source.encode("utf-8"))
+    rule_ids = [
+        block_id_for("src.txt", block.block_id) for block in rule_blocks[:17]
+    ]
+    rule_outputs = [f"out-{i}.txt" for i in range(17)]
+    many_rules = env("dsl_rules", {"rules": [
+        {
+            "rule": "copy_blocks",
+            "output": output,
+            "block_ids": [block_id],
+        }
+        for output, block_id in zip(rule_outputs, rule_ids)
+    ]}, protocol=PROTOCOL_V8)
+    errors, _warnings = validate_hybrid_envelope(many_rules)
+    assert_true(not any("dsl rule count exceeds" in error for error in errors), errors)
+    out, log = apply_hybrid(
+        {"src.txt": rule_source}, many_rules, rule_outputs)
+    assert_true(set(out) == set(rule_outputs), (out.keys(), log.to_dict()))
+    assert_true(log.error is None and log.ops_accepted == 17,
+                log.to_dict())
+    legacy_many_rules = env(
+        "dsl_rules", {"rules": many_rules["action"]["rules"]},
+        protocol=PROTOCOL_V7,
+    )
+    legacy_errors, _warnings = validate_hybrid_envelope(legacy_many_rules)
+    assert_true(any(
+        "dsl rule count exceeds limit 16" == error
+        for error in legacy_errors
+    ), legacy_errors)
 
 
-def test_v8_burden_limit_equality_is_allowed():
+def test_v8_burden_at_threshold_is_not_exceeded():
     body = "x" * PROTOCOL_BURDEN_LIMITS["anchor_bytes"]
     envelope = env("local_patch", {"ops": [{
         "op": "replace", "file": "out.txt", "old_text": BODY_REF_PREFIX + "anchor",
-        "new_text": "x",
+        "new_text": "y",
     }]}, protocol=PROTOCOL_V8)
     errors, _warnings = validate_hybrid_envelope(
         envelope, bodies={"anchor": body}, editable_filenames=["out.txt"])
     assert_true("protocol_burden_exceeded" not in errors, errors)
+    out, log = apply_hybrid(
+        {"out.txt": body + "\n"}, envelope, ["out.txt"], bodies={"anchor": body})
+    assert_true(out == {"out.txt": "y\n"} and not log.error, log.to_dict())
+    assert_true(log.hybrid["protocol_burden_exceeded"] is False, log.to_dict())
+    assert_true(log.hybrid["protocol_burden_overages"] == {}, log.to_dict())
 
 
 def test_v7_legacy_missing_ranges_and_over_budget_still_execute():
@@ -1081,6 +1163,59 @@ def test_v8_v7_snapshot_body_ref_c2_and_partial_parity():
         (v7_partial_log.to_dict(), v8_partial_log.to_dict()))
 
 
+def test_v8_runner_and_verifier_choose_same_partial_repair_after_schema_error():
+    source = {"out.txt": "alpha\nbeta\n"}
+    primary = env("local_patch", {
+        "ops": [{
+            "op": "replace", "file": "out.txt",
+            "old_text": "alpha", "new_text": "WRONG",
+        }],
+    }, protocol=PROTOCOL_V8)
+    primary["plan"]["edit_footprint"] = "many_repeated_edits"
+    repair = env("local_patch", {
+        "ops": [
+            {
+                "op": "replace", "file": "out.txt",
+                "old_text": "alpha", "new_text": "ALPHA",
+            },
+            {
+                "op": "replace", "file": "out.txt",
+                "old_text": "missing", "new_text": "unused",
+            },
+        ],
+    }, protocol=PROTOCOL_V8)
+    primary_raw = "```json\n" + json.dumps(primary) + "\n```"
+    repair_raw = "```json\n" + json.dumps(repair) + "\n```"
+
+    runner_primary = experiment_runner._run_attempt_hybrid(
+        primary_raw, source, ["out.txt"], [])
+    runner_repair = experiment_runner._run_attempt_hybrid(
+        repair_raw, source, ["out.txt"], [])
+    replay_primary = verify_anchorpatch._run_hybrid_attempt_replay(
+        primary_raw, source, ["out.txt"], [])
+    replay_repair = verify_anchorpatch._run_hybrid_attempt_replay(
+        repair_raw, source, ["out.txt"], [])
+
+    assert_true(runner_primary["key"] == replay_primary["key"],
+                (runner_primary["key"], replay_primary["key"]))
+    assert_true(runner_repair["key"] == replay_repair["key"],
+                (runner_repair["key"], replay_repair["key"]))
+    assert_true(replay_primary["key"][-1] == -1.0, replay_primary["key"])
+    assert_true(replay_repair["key"] > replay_primary["key"],
+                (replay_primary["key"], replay_repair["key"]))
+
+    row = {
+        "round_trip_direction": "backward",
+        "bdpatch": {"hybrid": {"repair": {
+            "attempted": True,
+            "original_raw": primary_raw,
+            "repair_raw": repair_raw,
+        }}},
+    }
+    replayed = verify_anchorpatch._apply_hybrid(row, source, ["out.txt"], [])
+    assert_true(replayed == {"out.txt": "ALPHA\nbeta\n"}, replayed)
+
+
 def test_v8_all_routes_preserve_untouched_blocks():
     cases = [
         ({"out.txt": "alpha\nbeta\n"}, env("local_patch", {"ops": [{
@@ -1154,9 +1289,12 @@ def test_v8_block_prompt_uses_only_coarse_index():
     assert_true(classification["operation_family"] == "sort", classification)
     assert_true(classification["prompt_profile"] == "block_movement", classification)
     assert_true(calls == ["coarse"], calls)
-    for required in ("[BLOCK INDEX]", "| coarse |", "dsl_rules", "bounded_rewrite"):
+    for required in (
+        "[BLOCK INDEX]", "| coarse |", "local_patch", "bulk_patch",
+        "dsl_rules", "bounded_rewrite",
+    ):
         assert_true(required in prompt, required)
-    for forbidden in ("[FILE INDEX]", "local_patch", "bulk_patch", "medium", "fine"):
+    for forbidden in ("[FILE INDEX]", "medium", "fine"):
         assert_true(forbidden not in prompt, forbidden)
 
 
@@ -1222,91 +1360,35 @@ def test_v8_invalid_json_block_repair_restores_profile_routes_and_sources():
         readonly_filenames=["reference.txt"],
         prompt_classification=classification, current_route=None)
     for required in (
-        "dsl_rules:", "bounded_rewrite:", "block_movement", "whole_file_change",
+        "local_patch:", "bulk_patch:", "dsl_rules:", "bounded_rewrite:",
+        "few_precise_edits", "many_repeated_edits", "block_movement",
+        "whole_file_change",
         "SOURCE_A", "SOURCE_B", "[BLOCK INDEX]",
         "Repair prompt profile: block_movement",
     ):
         assert_true(required in prompt, required)
-    for forbidden in ("local_patch:", "bulk_patch:"):
-        assert_true(forbidden not in prompt, forbidden)
 
 
-def test_v8_local_burden_repair_allows_more_compressed_routes():
-    previous = env("local_patch", {"ops": [{
-        "op": "replace", "file": "a.txt", "old_text": "old", "new_text": "new",
-    }]}, protocol=PROTOCOL_V8)
+def test_v8_optional_bounded_repair_restores_all_editable_sources():
+    previous = {
+        "protocol": PROTOCOL_V8,
+        "plan": {"task_family": "unknown", "edit_footprint": "few_precise_edits"},
+        "action": {"route": "unknown_route"},
+    }
     prompt = build_hybrid_repair_prompt(
-        ["protocol_burden_exceeded", "protocol_burden_exceeded:anchor_bytes:4081>4080"],
-        previous_envelope=previous,
-        editable_context={"a.txt": "old\n", "unrelated.txt": "SECRET_UNRELATED\n"},
-        edit_instruction="Update the requested token.", target_filenames=["a.txt"],
+        ["action.route unknown: 'unknown_route'"], previous_envelope=previous,
+        editable_context={"a.txt": "SOURCE_A\n", "b.txt": "SOURCE_B\n"},
+        edit_instruction="Repair the response.", target_filenames=["new.txt"],
         readonly_filenames=["reference.txt"],
-        prompt_classification=classify_operation_family("Update the token."),
-        current_route="local_patch")
-    for route, footprint in (
-        ("local_patch", "few_precise_edits"),
-        ("bulk_patch", "many_repeated_edits"),
-        ("bounded_rewrite", "whole_file_change"),
+        prompt_classification=classify_operation_family("Replace the token."),
+        current_route=None)
+    for required in (
+        "local_patch:", "bulk_patch:", "bounded_rewrite:",
+        "SOURCE_A", "SOURCE_B", "reference.txt",
     ):
-        assert_true(f'- {route} -> edit_footprint="{footprint}"' in prompt, route)
+        assert_true(required in prompt, required)
     assert_true("dsl_rules:" not in prompt, prompt)
-    assert_true("SECRET_UNRELATED" not in prompt, prompt)
-    assert_true(prompt.count("Protocol burden fix:") == 1, prompt)
-
-
-def test_v8_dsl_burden_repair_allows_bounded_rewrite():
-    source = "one\n\ntwo\n"
-    block = split_struct2(source.encode("utf-8"))[0]
-    previous = env("dsl_rules", {"rules": [{
-        "rule": "copy_blocks", "output": "out.txt",
-        "block_ids": [block_id_for("src.txt", block.block_id)],
-    }]}, protocol=PROTOCOL_V8)
-    prompt = build_hybrid_repair_prompt(
-        ["protocol_burden_exceeded:explicit_block_id_count:40>39"],
-        previous_envelope=previous, editable_context={"src.txt": source},
-        edit_instruction="Move the section after the header.",
-        target_filenames=["out.txt"], readonly_filenames=[],
-        prompt_classification=classify_operation_family(
-            "Move the section after the header."), current_route="dsl_rules")
-    for route, footprint in (
-        ("dsl_rules", "block_movement"),
-        ("bounded_rewrite", "whole_file_change"),
-    ):
-        assert_true(f'- {route} -> edit_footprint="{footprint}"' in prompt, route)
-    for forbidden in ("local_patch:", "bulk_patch:"):
-        assert_true(forbidden not in prompt, forbidden)
-    assert_true("[BLOCK INDEX]" in prompt, prompt)
-
-
-def test_v8_bulk_and_bounded_burden_repair_route_matrix():
-    classification = classify_operation_family("Replace all requested tokens.")
-    bulk = env("bulk_patch", {"ops": [{
-        "op": "replace_all", "old_text": "old", "new_text": "new",
-        "scope": ["a.txt"],
-    }]}, protocol=PROTOCOL_V8)
-    bulk_prompt = build_hybrid_repair_prompt(
-        ["protocol_burden_exceeded:bulk_op_count:31>30"],
-        previous_envelope=bulk, editable_context={"a.txt": "old\n"},
-        edit_instruction="Replace all requested tokens.", target_filenames=["a.txt"],
-        readonly_filenames=[], prompt_classification=classification,
-        current_route="bulk_patch")
-    for required in ("bulk_patch:", "bounded_rewrite:"):
-        assert_true(required in bulk_prompt, required)
-    for forbidden in ("local_patch:", "dsl_rules:"):
-        assert_true(forbidden not in bulk_prompt, forbidden)
-
-    bounded = env("bounded_rewrite", {"files": [{
-        "file": "a.txt", "content": "new\n",
-    }]}, protocol=PROTOCOL_V8)
-    bounded_prompt = build_hybrid_repair_prompt(
-        ["protocol_burden_exceeded:envelope_bytes:2899>2898"],
-        previous_envelope=bounded, editable_context={"a.txt": "old\n"},
-        edit_instruction="Rewrite a.txt.", target_filenames=["a.txt"],
-        readonly_filenames=[], prompt_classification=classification,
-        current_route="bounded_rewrite")
-    assert_true("bounded_rewrite:" in bounded_prompt, bounded_prompt)
-    for forbidden in ("local_patch:", "bulk_patch:", "dsl_rules:"):
-        assert_true(forbidden not in bounded_prompt, forbidden)
+    assert_true("READONLY_BODY" not in prompt, prompt)
 
 
 def test_v8_bounded_rewrite_repair_restores_all_editable_sources():
@@ -1386,12 +1468,13 @@ def main():
         test_v8_local_file_cannot_be_overridden_by_legacy_selectors,
         test_v8_bulk_requires_nonempty_scope,
         test_v8_bulk_rejects_unknown_scope_before_execution,
-        test_v8_each_protocol_burden_limit_rejected_before_execution,
-        test_v8_burden_limit_equality_is_allowed,
+        test_v8_each_protocol_burden_limit_is_soft_telemetry,
+        test_v8_burden_at_threshold_is_not_exceeded,
         test_v7_legacy_missing_ranges_and_over_budget_still_execute,
         test_v1_v7_bulk_unknown_scope_replay_is_unchanged,
         test_v8_inherits_v7_execution_gate_and_partial_semantics,
         test_v8_v7_snapshot_body_ref_c2_and_partial_parity,
+        test_v8_runner_and_verifier_choose_same_partial_repair_after_schema_error,
         test_v8_all_routes_preserve_untouched_blocks,
         test_v8_default_prompt_has_no_index_or_dsl,
         test_v8_block_prompt_uses_only_coarse_index,
@@ -1399,9 +1482,7 @@ def main():
         test_v8_repair_prompt_is_relevant_and_compact,
         test_v8_invalid_json_default_repair_restores_profile_routes_and_sources,
         test_v8_invalid_json_block_repair_restores_profile_routes_and_sources,
-        test_v8_local_burden_repair_allows_more_compressed_routes,
-        test_v8_dsl_burden_repair_allows_bounded_rewrite,
-        test_v8_bulk_and_bounded_burden_repair_route_matrix,
+        test_v8_optional_bounded_repair_restores_all_editable_sources,
         test_v8_bounded_rewrite_repair_restores_all_editable_sources,
     ]
     for test in tests:
