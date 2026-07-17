@@ -86,7 +86,7 @@ V8 plan 恰好包含两个字段：
 
 run metadata 升级为 `anchorpatch.run_metadata/3`，在锁内记录并复用 campaign 的 `run_git_commit`、`git_tree_state`、带时区 `started_at` 与 `finished_at`，拒绝跨 commit、tree state、代码指纹、campaign config、task-plan hash 或 transport 混跑。配对 dispatcher 为每个 sample 持有进程期租约，并以 active-worker set、PID、task-plan start barrier 和先落盘 authorization 后发布 ACK 的顺序阻止未授权调用；journal replay 按 semantic-call identity 审计而不误算为第二次 provider POST。first-writer-wins stop latch 在 preservation、代码/计划漂移或 campaign 停止后阻止新的语义调用；fail-fast 后只有在租约释放且 worker/PID provenance 可审计时才关闭遗留 `running` invocation。任何已有 preservation violation 会在恢复启动 worker 前拒绝 campaign。
 
-付费 dispatcher 固定 smoke 为 2 样本×2RT（16 行）、main 为用户指定 10 样本×10RT（400 行）；main 必须先严格复核同提交 smoke 的完整性、路径身份、exact final backward 可计分性、preservation tagged union、API/worker provenance 和 16/16 USD coverage，再按固定 `400/16=25` 投影。投影 `<= USD 50` 才可读取 Key 并启动 worker；该门禁是启动前成本估算，不是运行时账单上限。
+付费 dispatcher 固定 smoke 为 2 样本×2RT（16 行）、main 为用户指定 10 样本×10RT（400 行）；main 必须先严格复核同提交 smoke 的完整性、路径身份、exact final backward 可计分性、preservation tagged union、API/worker provenance 和 16/16 USD coverage，再按固定 `400/16=25` 投影。投影 `<= USD 50` 才可读取 Key 并启动 worker；该门禁是启动前成本估算，不是运行时账单上限。全新 campaign 在尚无 committed rows 时允许 checkpoint 尚未创建；一旦存在 committed rows，checkpoint 缺失或类型非法仍由 preflight 拒绝，完成态继续要求精确 RT 数和行数。
 
 正式 paired 分析以每个样本 exact final backward `RS@K` 为单位，输出 `sample_level_final_endpoint.json`；sample×RT 轨迹只作 descriptive，不进入 canonical iid 推断。
 
@@ -106,7 +106,7 @@ run metadata 升级为 `anchorpatch.run_metadata/3`，在锁内记录并复用 c
 | `run_meta.py` | `a7c1ccd83723` |
 | `requirements.txt` | `38ffe361be94` |
 | `verify_anchorpatch.py` | `310fd2ee8ed5` |
-| `paired_campaign_dispatch.py` | `fecee3596fb5` |
+| `paired_campaign_dispatch.py` | `035f13bc161b` |
 | `analyze.py` | `4550d351652d` |
 
 ## 零 API 验证（2026-07-17）
@@ -116,7 +116,7 @@ run metadata 升级为 `anchorpatch.run_metadata/3`，在锁内记录并复用 c
 1. 全部 85 个 `src/**/*.py` 编译到临时 `PYTHONPYCACHEPREFIX`：PASS；源码目录未生成 `__pycache__`。
 2. `PYTHONUTF8=1 python -B ./src/test_hybrid_executor.py`：`RESULT: PASS (71 tests)`。
 3. `PYTHONUTF8=1 python -B ./src/splitters.py`：`RESULT: PASS (all splitters byte-exact coverage)`。
-4. `PYTHONUTF8=1 python -B ./src/test_model_openai.py`：50 tests，PASS；覆盖 semantic journal replay、duplicate provider POST、worker lease/cohort authorization barrier、stop latch、audited stale closure、strict campaign identity、exact integer/score/preservation 校验、smoke 成本门和 preservation fail-fast 时序。
+4. `PYTHONUTF8=1 python -B ./src/test_model_openai.py`：51 tests，PASS；覆盖 semantic journal replay、duplicate provider POST、worker lease/cohort authorization barrier、stop latch、audited stale closure、全新 campaign checkpoint preflight、strict campaign identity、exact integer/score/preservation 校验、smoke 成本门和 preservation fail-fast 时序。
 5. `PYTHONUTF8=1 python -B ./src/analyze_protocol_burden.py`：400 行、394 个成功信封、25 个软阈值并集超限形态、1/399 个路径不兼容，PASS。
 6. `PYTHONUTF8=1 python -B ./src/test_analyze.py`：5 tests，PASS；formal analyzer 严格绑定 manifest/sample/method，只接受有限数值或明确 evaluator error，并要求 exact final RT 的完整 sample-level endpoint。
 7. `PYTHONUTF8=1 python -B ../tools/test_process_experiment.py`：9 tests，PASS。

@@ -508,6 +508,41 @@ class OpenCodeTransportTests(unittest.TestCase):
 
 
 class IntegrationContractTests(unittest.TestCase):
+    def test_paired_dispatch_preflight_allows_missing_new_checkpoints(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["state_a"])
+            manifest = {
+                "schema": paired_dispatch.SCHEMA,
+                "run_git_commit": "1" * 40,
+                "config": {
+                    "samples": ["sample"],
+                    "method_set": ["fullrewrite", "hybridpatch"],
+                    "num_round_trips": 1,
+                },
+                "task_plans": {
+                    "sample": {
+                        "path": "sample.task_plan.json",
+                        "sha256": paired_dispatch._sha256(plan_path),
+                        "forward_state_sequence": ["state_a"],
+                    },
+                },
+            }
+            with mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean"),
+            ):
+                preflight = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, active_samples={"sample"})
+                completion = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+
+            self.assertEqual(preflight["errors"], [])
+            self.assertTrue(any(
+                "incomplete task" in error
+                for error in completion["errors"]
+            ))
+
     def test_paired_dispatch_counterbalances_and_checks_campaign_integrity(self):
         orders = [paired_dispatch.method_order(index) for index in range(10)]
         self.assertEqual(
@@ -640,6 +675,21 @@ class IntegrationContractTests(unittest.TestCase):
             with mock.patch.object(
                 paired_dispatch, "_git_identity", return_value=("1" * 40, "clean")
             ):
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertEqual(inspection["errors"], [])
+
+                fullrewrite_checkpoint = os.path.join(
+                    out_dir, "fullrewrite", "sample.ckpt.json")
+                os.remove(fullrewrite_checkpoint)
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, active_samples={"sample"})
+                self.assertTrue(any(
+                    "missing checkpoint: fullrewrite/sample" in error
+                    for error in inspection["errors"]
+                ))
+                run_meta.write_json_atomic(
+                    fullrewrite_checkpoint, {"completed_round_trips": 1})
                 inspection = paired_dispatch.inspect_campaign(
                     out_dir, manifest, require_complete=True)
                 self.assertEqual(inspection["errors"], [])

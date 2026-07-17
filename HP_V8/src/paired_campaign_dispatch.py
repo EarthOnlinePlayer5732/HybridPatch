@@ -481,6 +481,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         expected_samples if require_complete
         else set(required_complete_samples or [])
     )
+    active_samples = set(active_samples or [])
 
     try:
         stop_records = read_campaign_stop_conditions(out_dir)
@@ -807,19 +808,25 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                 )
             checkpoint_path = os.path.join(
                 out_dir, method, f"{sample}.ckpt.json")
-            checkpoint = _read_json(checkpoint_path) if os.path.exists(
-                checkpoint_path) else {}
-            completed_value = (
-                checkpoint.get("completed_round_trips")
-                if isinstance(checkpoint, dict) else None
+            checkpoint_exists = os.path.exists(checkpoint_path)
+            checkpoint = (
+                _read_json(checkpoint_path) if checkpoint_exists else None
             )
-            completed = completed_value if _is_exact_int(
-                completed_value) and completed_value >= 0 else None
-            if completed is None:
-                errors.append(
-                    f"invalid checkpoint completed_round_trips: "
-                    f"{method}/{sample}"
+            completed = None
+            if checkpoint_exists:
+                completed_value = (
+                    checkpoint.get("completed_round_trips")
+                    if isinstance(checkpoint, dict) else None
                 )
+                completed = completed_value if _is_exact_int(
+                    completed_value) and completed_value >= 0 else None
+                if completed is None:
+                    errors.append(
+                        f"invalid checkpoint completed_round_trips: "
+                        f"{method}/{sample}"
+                    )
+            elif rows:
+                errors.append(f"missing checkpoint: {method}/{sample}")
             if sample in completion_samples and (
                     completed != target_rt or len(rows) != 2 * target_rt):
                 errors.append(
@@ -830,7 +837,6 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     if preservation:
         errors.append(f"preservation_violations={preservation}")
 
-    active_samples = set(active_samples or [])
     latest_by_sample = {}
     for record in metadata:
         for sample in record.get("samples") or []:
