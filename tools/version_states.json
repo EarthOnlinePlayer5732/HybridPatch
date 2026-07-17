@@ -1,12 +1,13 @@
 {
+  "active_version": "HP_V8",
+  "next_version": "HP_V9",
   "schema": "hybridpatch.version_states/1",
-  "active_version": null,
-  "next_version": "HP_V8",
   "versions": {
     "HP_V3": "frozen",
     "HP_V4": "frozen",
     "HP_V5": "frozen",
     "HP_V6": "frozen",
-    "HP_V7": "frozen"
+    "HP_V7": "frozen",
+    "HP_V8": "active"
   }
 }
