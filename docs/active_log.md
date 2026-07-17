@@ -471,3 +471,26 @@
 - scope: user-fixed 10 exposed samples × 10RT × `hybridpatch,fullrewrite`; MiniMax-M3; transport `opencode_anthropic_sdk/3`; seed42; distractor-on; same per-sample task plan
 - interpretation boundary: hand-selected and historically exposed samples; report RS@1/5/10 and label the user-requested 20-edit-step endpoint as RT10 backward, never as an unseen-set estimate
 - launch gate: exact same clean commit as successful smoke; no code/config/transport/evaluator/scoring change between phases; no paid call made at entry time
+
+## 2026-07-17 - After Experiment: HP_V8 soft-budget paid smoke2 — operational PASS, effect NO-GO
+
+- identity: `exp_20260717_hybridv8_softbudget_smoke2`; commit `e6abad4449f7c2536c914725586fb44094546d76`; clean tree; MiniMax-M3; transport-v3; seed42; distractor-on
+- preflight: all zero-API tests/runtime evaluators passed; 11/11 Key probes completed with 2,302 provider tokens; no Key value was printed or copied
+- completeness: 16/16 result rows and four checkpoints complete; 17 calls = 16 primary + 1 HP repair; verifier PASS 8/8 backward; `preservation_violations=0`
+- exact RT2: HP 0.500000 vs FR 0.998361, delta -0.498361 (n=2 exposed samples); CF HP 1/2 vs FR 0/2; diagnostic only
+- usage: HP 426,989 tokens / USD 0.388963; FR 316,543 / USD 0.276923; total USD 0.665886; fixed ×25 launch projection USD 16.6471, cost gate GO
+- protocol: HP bounded 8/8; profiles block/default 4/4; repair 1/1/1; protocol failures 0/8; burden overage 0/8
+- review/finalize: two independent read-only reviews; integrity PASS and method-effect NO-GO; official prepare/finalize and both record validators PASS. The generated canonical record/catalog/index snapshot is private-only because committing the global rebuild would rewrite frozen version overlays
+- retention: private ZIP `../hybridpatch_private_archives/exp_20260717_hybridv8_softbudget_smoke2__e6abad4.zip`, SHA-256 `378d160dd25efb38e857983903dac248afd559b057abb7d0add63bdbe6ad5dd6`; exact local-secret and heuristic matches 0
+
+## 2026-07-17 - After Experiment: HP_V8 soft-budget paired10 — failed_informative stop
+
+- identity: `exp_20260717_hybridv8_softbudget_paired10`; same clean commit/config as smoke; smoke completeness/cost gate passed before any main worker launch
+- stop: provider `APIStatusError: Streaming response failed` at `hybridpatch/musicsheet2/rt02/backward/hybridpatch_primary`; dispatcher stopped and reconciled all workers; no preservation, Git, evaluator or duplicate-row trigger
+- integrity: 192/400 committed rows (HP/FR 96/96; backward 48/48), exact checkpoints and API locators; verifier PASS 96/96; preservation 0
+- resume decision: ledger persisted terminal `call_failed`; reserve KEY_11 cannot clear the semantic-call terminal state and a resume would fail before provider POST; two independent audits returned NO-GO, so no resume was attempted
+- endpoint: formal analyzer correctly failed at n=1/10 exact RT10; requested 10-sample/20-edit-step result is unavailable. Docker6 is the sole complete pair (HP 0.982759, FR 0.928855) and is not a method estimate
+- partial diagnostics: CF HP 2/41 vs FR 0/42; routes bounded/local/bulk/dsl 55/30/6/5; protocol failure 1/96; repair attempted/used/success 12/9/8; soft burden 7/96; preservation 0
+- usage lower bounds: committed rows HP/FR 3,318,844/2,448,339 tokens and USD 2.462493/1.790758; API ledger HP/FR 3,545,711/2,635,378 and USD 2.681167/1.995007; eight killed in-flight calls lack final usage
+- retention: `analysis/failure_summary.md`; private ZIP `../hybridpatch_private_archives/exp_20260717_hybridv8_softbudget_paired10__e6abad4__failed_informative.zip`, SHA-256 `08eba3ee36b2c63df5e58b7d0c5796e3ba4b5409ecc1476e9bf4cf4b83d6c694`; secret/heuristic matches 0
+- record status: official prepare stops at incomplete formal endpoint as intended; no manual canonical record was created and no method-effect claim is eligible

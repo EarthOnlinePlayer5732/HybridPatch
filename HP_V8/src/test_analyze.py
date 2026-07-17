@@ -95,6 +95,8 @@ class SampleLevelFinalEndpointTests(unittest.TestCase):
             self.assertIn("matched samples | mean HybridPatch", report)
             self.assertIn("Backward trajectory points (descriptive only; noncanonical)", report)
             self.assertIn("| method | input | cache-read | cache-create | output | provider total | USD |", report)
+            self.assertIn("pre-registered sample scope", report)
+            self.assertNotIn("accounting", report)
             self.assertNotIn("| p |", report)
 
             endpoint_path = os.path.join(

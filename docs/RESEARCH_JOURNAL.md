@@ -283,6 +283,37 @@ think5 归因中剩余的失败：声明了 `@body:X` 却完全不写 [FILE BODI
 因此必须同步披露混合来源边界；同 transport-v3 方法效应仍由 Δ+0.008 回答。
 定义、来源清单和逐样本表见 `Baseline/FR+Official/`，结论详见 FINDINGS §232。
 
+### 5.11 HP_V8 soft-budget smoke 与 paired10 stop（2026-07-17）——链路可审计，方法结论未形成
+
+`hybridpatch/8` 在提交 `e6abad4449f7c2536c914725586fb44094546d76`
+上使用 MiniMax-M3、transport-v3、seed42、distractor-on 做了先 smoke 后 paired10 的
+预注册诊断。smoke 为 2 个已曝光样本 × 2RT × 双臂；paired10 为用户固定的 10 个
+已曝光样本 × 10RT × 双臂。两个阶段使用同一 task-plan/config 身份。
+
+**smoke 完整性**：16/16 行提交，17 calls（含一次 HP repair），verifier PASS 8/8，
+preservation 0。exact RT2 为 HP 0.500 vs FR 0.998，delta -0.498（n=2）；HP/FR
+tokens 426,989/316,543，费用 USD 0.388963/0.276923。HP 8/8 均选择 bounded，
+repair 1/8，soft burden 0/8。因此它证明链路、repair 个例、记录和重放，不证明
+local/bulk/DSL、软超限或效果优势。独立完整性审阅与正式 prepare/finalize 均 PASS；
+record/catalog/index 快照仅收入私有 ZIP，避免提交时重写冻结版本 overlay。
+
+`obj3d2` HP RT2 的 0 分不是单一归因：全局声明 OBJ 数组触发 evaluator 的局部
+group-layout 敏感性，夸大几何损伤；同时生成文件确有 texcoord 数量和 face-corner UV
+错配。treebank4 的唯一 repair 则是缺 JSON closing fence，body 保持相同但需要完整
+二次响应，额外 15,874 tokens / 约 USD 0.01519。两例详见 smoke 私有归档中的
+`analysis/failure_analysis.md` 与 HP_V8 版本卡。
+
+**paired10 停止**：在 192/400 行后，musicsheet2 HP RT2 backward 遇到 provider
+`Streaming response failed`，冻结 ledger 将调用写为 terminal `call_failed`，
+dispatcher fail-fast 回收全体。verifier 仍 PASS 96/96，preservation 0，行/checkpoint/
+API locator 完整。KEY_11 不能解除 terminal；无进展 resume 未执行。formal analyzer
+拒绝 n=1/10 endpoint，因此没有 10 样本 RS@10/20-edit-step 结果。部分 usage 和失败
+统计仅作为 `failed_informative` 诊断，见版本卡与 failure summary，不进入方法结论。
+
+这轮的结论边界是：性能优先的软 burden 实现没有因阈值阻断已观察输出，且完整路径
+在 prompt/schema 层存在；但真实 smoke 未覆盖三条非 bounded 路径，主 campaign 又不
+完整，故唯一可靠 live 声明仍是 chain integrity、可重放 provenance 与 preservation=0。
+
 ---
 
 ## 6. 追加约定（怎么继续写这份文档）

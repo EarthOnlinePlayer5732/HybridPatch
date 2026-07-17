@@ -721,10 +721,9 @@ def main():
     L.append(f"Model: {model_label(ap_rows, hybrid_rows, fr_rows)} | samples: {', '.join(samples)} "
              f"(n={len(samples)}) | round trips: {args.K} | distractor: {distractor_label(ap_rows, hybrid_rows, fr_rows)}")
     L.append("")
-    L.append("> Positioning: a **diagnostic** experiment (small n; accounting is a known "
-             "AnchorPatch/HybridPatch-favorable domain with order-invariant coverage² scoring). "
-             "RS is the headline metric per request; preservation is the reliable secondary. "
-             "Not a final universal superiority claim.")
+    L.append("> Positioning: interpret this report within the pre-registered sample scope. "
+             "Small or targeted scopes are diagnostic and do not support a universal "
+             "superiority claim; preservation is reported as a separate structural invariant.")
     L.append("")
 
     # RS@k overall

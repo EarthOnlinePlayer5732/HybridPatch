@@ -1,14 +1,22 @@
 # HP_V8（hybridpatch/8）版本卡草稿
 
-状态：**active draft**。本版已完成零 API 实现与回归验证，尚未运行任何 API 实验；因此不声称评分、真实 token 或协议失败率已经改善。
+状态：**active draft**。本版已完成零 API 实现与回归验证，并在提交
+`e6abad4449f7c2536c914725586fb44094546d76` 上运行了一个 2 样本付费 smoke；
+后续 10 样本诊断 campaign 依停止条件中止。现有证据不支持方法优越性或总体效果结论。
 
 ## 五问摘要
 
 1. **为什么迭代**：V7 的主提示无条件包含文件表、三层索引和四条完整路径，repair 又重复全部 schema、全部文件和原始响应；初版 V8 又让分类器关闭 local/bulk，并把经验 P95 当成硬拒绝，可能损害任务完成能力。
 2. **优化方向**：性能优先于 token 成本。词法分类只控制 coarse 块索引和 `dsl_rules` 是否出现，不能关闭 local/bulk；V8 plan 与 repair 继续精简，但协议负担阈值只作软 telemetry。
-3. **当前证据**：冻结 dev20 的 400 步零 API 配对重放中，primary 平均字符数由 27,459.715 降为 20,662.020（-24.755%），36 个实际 V7 repair 对应的反事实 V8 repair 平均由 20,009.222 降为 16,044.667（-19.814%）。这些是字符数，不是 tokenizer token，也不是 API 效果证据。
-4. **新问题**：25/394（6.35%）个历史成功信封超过至少一个经验 P95，但现在只被标记而不改变执行；路径审计仍有 1/399（0.25%）个 default-profile V7 chosen route 为 DSL；DSL 成功样本只有 1 个；词法分类仍可能漏掉需要块索引的任务。
-5. **下一轮靶子**：先以已提交的干净代码完成 2 样本付费 smoke，再在同模型、任务计划、transport 与 distractor 设置下运行预注册的 10 样本配对 campaign，检验评分、真实 token、协议失败和 preservation。
+3. **当前证据**：冻结 dev20 的 400 步零 API 重放显示 primary 字符数
+   `27,459.715→20,662.020`（-24.755%），反事实 repair
+   `20,009.222→16,044.667`（-19.814%）。付费 smoke 完成 16/16 行并重放
+   8/8 backward，HP/FR exact RT2 为 `0.500/0.998`；该 n=2 已曝光范围只证明链路。
+4. **新问题**：离线仍有 1/399 路径不兼容与 25/394 软 burden 超限形态；smoke
+   8/8 HP 步都选 bounded 且无超限，未 live 覆盖 local/bulk/DSL 或软超限。
+   paired10 又在 provider terminal stream failure 后停于 192/400 行，无法形成 n=10 终点。
+5. **下一轮靶子**：先审计 obj3d2 的 evaluator-layout/真实 UV 双重失效与 framing
+   repair 成本，再以新的预注册实验编号决定是否重跑；原 failed campaign 不得重掷。
 
 ## 唯一研究假设
 
@@ -26,7 +34,7 @@
 - `data/`：单独建立指向顶层共享 `data/` 的 Windows junction；不进入 Git。
 - 冻结边界：HP_V3–HP_V7、Baseline、transport、顶层 data、domain evaluator、scoring 与冻结实验记录均未修改。
 
-**验收等级：来源快照为字节级确证；V8 方法效果仍待 API 实验。**
+**验收等级：来源快照为字节级确证；付费链路可运行且可重放，V8 方法效果未确立。**
 
 ## 协议与提示
 
@@ -107,7 +115,7 @@ run metadata 升级为 `anchorpatch.run_metadata/3`，在锁内记录并复用 c
 | `requirements.txt` | `38ffe361be94` |
 | `verify_anchorpatch.py` | `310fd2ee8ed5` |
 | `paired_campaign_dispatch.py` | `035f13bc161b` |
-| `analyze.py` | `4550d351652d` |
+| `analyze.py` | `32178dc554c5` |
 
 ## 零 API 验证（2026-07-17）
 
@@ -123,7 +131,62 @@ run metadata 升级为 `anchorpatch.run_metadata/3`，在锁内记录并复用 c
 8. 用 V8 verifier 只读重放冻结 V7 dev20：`HONESTY GATE: PASS`，400 个 backward RS 全部从 raw response 复现。
 9. 用户指定 10 个样本的 initial-state runtime evaluator 与 seed-42/10RT task-plan preflight：全部 score=1.0、plan 长度与状态引用有效。
 
-尚未运行 API、Key probe、付费 smoke 或 paired10；因此本卡仍不提供真实 token、费用或效果结论。
+## 付费诊断（2026-07-17）
+
+所有调用使用 MiniMax-M3、`opencode_anthropic_sdk/3`、seed 42、
+distractor-on 和冻结 task plans。11 个 Key 的最小探针为 11/11 可用，共 2,302 provider
+tokens；Key 值未写入日志。
+
+### `exp_20260717_hybridv8_softbudget_smoke2`
+
+- 运行提交与 tree：`e6abad4449f7c2536c914725586fb44094546d76`，`clean`。
+- 2 样本 × 2 RT × 2 方向 × 2 方法完整提交 16/16 行；17 个 API call =
+  16 primary + 1 HP repair；verifier PASS 8/8 backward。
+- exact backward RT2：HP `0.500000`，FR `0.998361`，配对差
+  `-0.498361`（n=2）。HP severe failure `1/2`，FR `0/2`。
+- HP/FR provider tokens 为 `426,989/316,543`，估算费用
+  USD `0.388963/0.276923`；总费用 USD `0.665886`，×25 启动投影
+  USD `16.6471 < 50`。
+- HP route 全为 `bounded_rewrite=8/8`；profile
+  `block_movement=4/default=4`；repair attempted/used/success
+  `1/1/1`；protocol failure `0/8`；soft burden `0/8`；
+  `preservation_violations=0`。
+- `obj3d2` 的 0 分同时包含 evaluator 对全局 OBJ 数组布局的敏感性和真实 UV
+  round-trip 损失；不排除、不归为单一方法或 evaluator 原因。完整性审阅 PASS，
+  lifecycle=`complete`、evidence=`diagnostic`。
+- 官方 prepare/finalize 与两个 record validator 均曾 PASS；生成的 canonical record、
+  当时的 catalog/index 快照和完整 raw 一并收入私有 ZIP。为遵守本轮冻结边界，
+  PR 不提交会连带改写 HP_V3–V7/Baseline/transport overlay 的全局登记。
+  ZIP：`../hybridpatch_private_archives/exp_20260717_hybridv8_softbudget_smoke2__e6abad4.zip`，
+  SHA-256 `378d160dd25efb38e857983903dac248afd559b057abb7d0add63bdbe6ad5dd6`。
+
+### `exp_20260717_hybridv8_softbudget_paired10`
+
+- 同提交与配置启动后，`hybridpatch/musicsheet2/rt02/backward` 遇到 provider
+  `APIStatusError: Streaming response failed`。dispatcher fail-fast 停止并回收全部 worker。
+- 192/400 结果行已原子提交（两臂各 96；两臂各 48 backward），checkpoint、API
+  定位与行身份一致；verifier PASS 96/96 backward；`preservation_violations=0`。
+- 冻结 ledger 已把该 semantic call 写成 terminal `call_failed`。换 KEY_11 也会在
+  provider POST 前拒绝，故未尝试无进展 resume。campaign 定性为
+  `failed_informative`。
+- formal analyzer 按设计拒绝：exact RT10 endpoint 仅 n=1/10，因此不存在可报告的
+  10 样本 RS@10（用户所称 20 edit-step endpoint）。唯一完整 pair 是 docker6，
+  HP/FR `0.982759/0.928855`，不得外推。
+- 部分轨迹 severe failure HP `2/41`、FR `0/42`；HP route
+  `bounded=55/local=30/bulk=6/dsl=5`，protocol failure `1/96`，
+  repair attempted `12/96`、used 9、success 8，soft burden `7/96`，
+  preservation 0。
+- 已提交结果 usage：HP/FR `3,318,844/2,448,339` tokens，
+  USD `2.462493/1.790758`。含已记录 repair/failure call 的 API ledger 下界为
+  `3,545,711/2,635,378` tokens、USD `2.681167/1.995007`；8 个终止中的
+  generation-progress call 无最终 usage，真实账单可能更高。
+- 失败摘要：`exp_20260717_hybridv8_softbudget_paired10/analysis/failure_summary.md`。
+  私有 ZIP：`../hybridpatch_private_archives/exp_20260717_hybridv8_softbudget_paired10__e6abad4__failed_informative.zip`，
+  SHA-256 `08eba3ee36b2c63df5e58b7d0c5796e3ba4b5409ecc1476e9bf4cf4b83d6c694`。
+
+两个 ZIP 均通过解压测试；对本机识别的 14 个 secret 值，精确命中为 0，
+启发式凭据标记为 0。smoke 是 operational evidence，不是方法效果实验；
+paired10 没有完整 endpoint，也未 finalize 为 canonical 结果 record。
 
 ## 运行方式
 
@@ -133,4 +196,5 @@ PYTHONUTF8=1 python src/experiment_runner.py ...
 python -B src/verify_anchorpatch.py --dir exp_<YYYYMMDD>_<slug>
 ```
 
-正式 API campaign 仍须先按仓库标准实验流程完成计划、审阅、零 API preflight、runtime evaluator smoke、Key 小探针与最终命令复核；顶层凭据不得复制到本目录。
+后续 API campaign 必须使用新的实验编号，重新完成计划、审阅、零 API preflight、
+runtime evaluator smoke、Key 小探针与最终命令复核；顶层凭据不得复制到本目录。
