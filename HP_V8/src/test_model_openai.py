@@ -1780,6 +1780,142 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(len(api_rows), 1)
             self.assertIsNone(api_rows[0]["classification"])
 
+    def test_live_inspection_avoids_cross_file_torn_snapshot(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {
+                "OPENCODE_API_KEY": "unit-test-key",
+                "ANCHORPATCH_WORKER_LAUNCH_ID": "worker-a",
+            }, clear=False,
+        ):
+            manifest = self._write_active_inspection_fixture(
+                out_dir, method="fullrewrite")
+
+            def successful_generate(*_args, **kwargs):
+                kwargs["_raw_event_sink"]({
+                    "record_type": "attempt_start", "attempt_index": 1,
+                    "attempt_kind": "transport_initial",
+                })
+                kwargs["_raw_event_sink"]({
+                    "record_type": "sdk_stream_event", "attempt_index": 1,
+                    "event": {"type": "content_block_delta",
+                              "delta": {"type": "text_delta"}},
+                })
+                kwargs["_raw_event_sink"]({
+                    "record_type": "attempt_end", "attempt": {
+                        "attempt_index": 1,
+                        **self._successful_attempt_end_fields(),
+                    },
+                })
+                result = {
+                    "message": "complete", "http_status": 200,
+                    "stream_complete": True, "finish_reason": "end_turn",
+                    "stop_reason": "end_turn",
+                    "response_classification": "normal",
+                    "prompt_tokens": 5, "completion_tokens": 1,
+                    "total_tokens": 6, "input_tokens": 5,
+                    "output_tokens": 1, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "transport_attempts": [{
+                        "attempt_index": 1, "status": "success"}],
+                    "call_kind": "fullrewrite_primary",
+                    "thinking_mode": "adaptive",
+                    "transport": "anthropic_sdk_v2",
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "max_response_slots": 2,
+                    "response_slots_used": 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": 1,
+                }
+                kwargs["_response_commit_sink"](result)
+                return result
+
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "fullrewrite", "sample", None,
+                "minimax-m3", successful_generate)
+            api_snapshot_taken = threading.Event()
+            writer_done = threading.Event()
+            inspection_results = []
+            inspection_errors = []
+            real_read_jsonl = paired_dispatch._read_jsonl
+
+            def blocked_read_jsonl(path):
+                rows = real_read_jsonl(path)
+                if (os.path.basename(path) == "api_calls.jsonl"
+                        and not api_snapshot_taken.is_set()):
+                    api_snapshot_taken.set()
+                    if not writer_done.wait(5):
+                        raise RuntimeError(
+                            "unit-test publication barrier timed out")
+                return rows
+
+            def inspect_live_campaign():
+                try:
+                    inspection_results.append(
+                        paired_dispatch.inspect_campaign(
+                            out_dir, manifest,
+                            active_samples={"sample"}))
+                except BaseException as exc:
+                    inspection_errors.append(exc)
+
+            with mock.patch.object(
+                    run_meta, "_enforce_pre_call_campaign_guards"), \
+                    mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "_read_jsonl",
+                        side_effect=blocked_read_jsonl):
+                inspector = threading.Thread(
+                    target=inspect_live_campaign, daemon=True)
+                inspector.start()
+                self.assertTrue(api_snapshot_taken.wait(5))
+                try:
+                    for direction in ("forward", "backward"):
+                        recorder.set_step(1, direction, "target")
+                        recorder.generate(
+                            [{"role": "user", "content": "Hello"}],
+                            model="minimax-m3",
+                            call_kind="fullrewrite_primary")
+                    rows = [
+                        {
+                            "sample_id": "sample",
+                            "method": "fullrewrite",
+                            "round_trip_num": 1,
+                            "round_trip_direction": "forward",
+                            "evaluation": {},
+                        },
+                        {
+                            "sample_id": "sample",
+                            "method": "fullrewrite",
+                            "round_trip_num": 1,
+                            "round_trip_direction": "backward",
+                            "evaluation": {"score": 1.0},
+                        },
+                    ]
+                    commit = run_meta.append_relay_rows_and_checkpoint(
+                        os.path.join(
+                            out_dir, "fullrewrite", "sample.jsonl"),
+                        os.path.join(
+                            out_dir, "fullrewrite", "sample.ckpt.json"),
+                        rows, {"completed_round_trips": 1},
+                        campaign_out_dir=out_dir)
+                    self.assertEqual(commit["status"], "appended")
+                finally:
+                    writer_done.set()
+                inspector.join(5)
+
+            self.assertFalse(inspector.is_alive())
+            self.assertEqual(inspection_errors, [])
+            self.assertEqual(len(inspection_results), 1)
+            self.assertEqual(inspection_results[0]["errors"], [])
+            self.assertEqual(len(real_read_jsonl(os.path.join(
+                out_dir, "api_calls.jsonl"))), 2)
+            self.assertEqual(len(real_read_jsonl(os.path.join(
+                out_dir, "fullrewrite", "sample.jsonl"))), 2)
+
     def test_formal_recovery_authorization_state_machine(self):
         def build_fixture(out_dir, variant):
             sample = "sample"
@@ -2982,6 +3118,7 @@ class IntegrationContractTests(unittest.TestCase):
                     notes="unit",
                 )
                 held_lease = []
+                latch_seen_before_termination = []
 
                 def fake_popen(_command, **kwargs):
                     worker_id = kwargs["env"][
@@ -3007,6 +3144,11 @@ class IntegrationContractTests(unittest.TestCase):
                             portalocker.LOCK_EX | portalocker.LOCK_NB)
                         held_lease.append(lease)
                     return FakeProcess()
+
+                def fail_termination(_running):
+                    latch_seen_before_termination.extend(
+                        run_meta.read_campaign_stop_conditions(out_dir))
+                    raise RuntimeError("terminate/kill failed")
 
                 inspections = iter([
                     {"errors": [], "api_calls": 0,
@@ -3044,8 +3186,7 @@ class IntegrationContractTests(unittest.TestCase):
                                 side_effect=fake_popen), \
                             mock.patch.object(
                                 paired_dispatch, "_terminate_workers",
-                                side_effect=RuntimeError(
-                                    "terminate/kill failed")), \
+                                side_effect=fail_termination), \
                             mock.patch.object(
                                 paired_dispatch.time, "sleep"):
                         result = paired_dispatch._launch_under_lease(
@@ -3056,6 +3197,19 @@ class IntegrationContractTests(unittest.TestCase):
                         lease.close()
 
                 self.assertEqual(result, 1)
+                self.assertEqual(len(latch_seen_before_termination), 1)
+                self.assertEqual(
+                    latch_seen_before_termination[0]["condition"],
+                    "dispatcher_integrity_failure")
+                self.assertEqual(
+                    latch_seen_before_termination[0]["error_type"],
+                    "RuntimeError")
+                self.assertIn(
+                    "forced global integrity error",
+                    latch_seen_before_termination[0]["error"])
+                self.assertEqual(
+                    run_meta.read_campaign_stop_conditions(out_dir),
+                    latch_seen_before_termination)
                 with open(
                     paired_dispatch._active_worker_set_path(out_dir),
                     encoding="utf-8",

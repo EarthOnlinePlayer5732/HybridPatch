@@ -531,3 +531,48 @@
 - credential/API status: the local Key inventory reported 11 expected nonempty labels without printing
   values; the failed dry-run made zero provider calls. API remains `NO-GO` until the fix commit, repeated
   formal dry-run and live Key probe pass.
+
+## 2026-07-18 - After Experiment: transport-v4 paired10 — causal snapshot stop
+
+- identity: `exp_20260718_hybridv8_transportv4_paired10`; commit
+  `6f404de635cc97883736dbccb34c0358ec3f005f`; clean tree; MiniMax-M3; seed42;
+  distractor-on; user-fixed 10 samples
+- prior gate: the same-commit 2-sample smoke completed 16/16 with verifier PASS,
+  preservation 0 and projected main cost USD 15.754035; two independent reviews returned operational GO
+- live transport evidence: HP docker6 RT1 forward and musicsheet2 RT1 forward each observed a
+  generation-progress incomplete stream, consumed response slot 1 and completed the exact-payload replay
+  in slot 2; sibling workers continued
+- stop: at 124/400 committed rows, strict inspection reported missing API mapping for HP/json2 RT7
+  backward and correctly latched a campaign-global integrity stop; all 10 workers were reconciled and the
+  active set became empty
+- diagnosis: final evidence has exactly one API row, `response_committed` ledger event, journal and result
+  for that step. API mtime preceded result by 88 ms, so the inspector combined an old API snapshot with a
+  new result snapshot; this was a cross-file read race, not lost evidence
+- integrity boundary: 137 API terminal rows/journals, 726 attempt rows, 10 in-flight calls at stop, no
+  complete paired sample, preservation 0. No RS@10 or method comparison is eligible; missing remains null
+- retention: campaign is `failed_informative`, never resume/splice. Official prepare stopped as designed
+  at incomplete canonical endpoint n=0/10; no canonical record was fabricated. Credential scan over 1,251 files found
+  zero exact Key/Authorization/Cookie/private-key matches; private ZIP SHA-256
+  `ad3a56972def73ad550db32d4835a4802b14719ad758fb4d5fdf85df9a708407`
+
+## 2026-07-18 - Before Experiment: transport-v4 causal-snapshot smoke2 and paired10
+
+- experiments: `exp_20260718_hybridv8_transportv4_snapshotfix_smoke2`, then only after operational GO,
+  `exp_20260718_hybridv8_transportv4_snapshotfix_paired10`
+- plans: `docs/experiment_plans/exp_20260718_hybridv8_transportv4_snapshotfix_smoke2.md` and
+  `docs/experiment_plans/exp_20260718_hybridv8_transportv4_snapshotfix_paired10.md`
+- unique change: live inspector caches results before API/attempt/journal, the reverse of the fixed writer
+  publication order; schema, lineage, mapping, duplicate and half-commit checks remain unchanged
+- test evidence: a deterministic barrier captures an old API snapshot while a worker publishes two API
+  terminals and an atomic RT, proving the inspector returns a consistent old prefix; a second assertion
+  proves integrity failure latches before worker termination
+- plan review: new-context read-only review returned GO after fixing dataset/split provenance, runtime
+  identity, executable cost/recovery rules, causal claim boundaries and same-commit smoke lifecycle staging
+- fixed design: same model, transport-v4, seed42, task plans, distractor and alternating method order as the
+  stopped run; all samples exposed and both campaigns diagnostic-only
+- launch status: `NO-GO` until full zero-API regression/replay, new-context plan review, clean commit,
+  formal dry-run, 11-Key probe and final identity check pass
+- lifecycle staging: the paid smoke is the main campaign's same-commit preflight stage. If smoke is GO,
+  stop/verifier/strict-inspector/cost gates, ignored prepare and read-only review run before main;
+  only tracked finalize and After documentation are deferred until main ends so the hard same-commit
+  clean-tree gate remains satisfiable. A smoke NO-GO is postprocessed immediately.

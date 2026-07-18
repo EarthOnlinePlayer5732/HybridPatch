@@ -42,6 +42,11 @@
   matrix 72/72 均 PASS；含锁存后 transport backoff 零 POST、sample isolation、
   preservation global stop、audited resume 和 committed RT 零 POST。首次 API 前仍需
   独立计划审阅、clean commit、dry-run/runtime preflight 与 Key probe。
+- 首轮 v4 paired10 的 live inspector 在 API terminal 与 result 相隔 88 ms 的发布窗口
+  组合了旧 API snapshot 与新 result，保守触发全局停止；最终 API/ledger/journal/result
+  全部存在。dispatcher 现按 result→API→attempt/journal 的逆 publication 顺序缓存证据，
+  保留全部严格校验。确定性并发测试冻结该顺序，且全局 inspection error 仍在终止 worker
+  前落 durable stop latch；旧 campaign 保持 `failed_informative`，新提交使用新实验编号。
 
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 

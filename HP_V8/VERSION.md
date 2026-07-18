@@ -192,7 +192,7 @@ preflight 版为 `f9f63d4776ab7c39399256f2e16a15c3909ad0390c0ea34dd41494e655ec0d
 | `run_meta.py` | `94f37d069dd9` |
 | `requirements.txt` | `38ffe361be94` |
 | `verify_anchorpatch.py` | `310fd2ee8ed5` |
-| `paired_campaign_dispatch.py` | `5740ebe1e33a` |
+| `paired_campaign_dispatch.py` | `36c3fe3b51b9` |
 | `analyze.py` | `32178dc554c5` |
 
 ## 零 API 验证（2026-07-17）
@@ -265,6 +265,40 @@ tokens；Key 值未写入日志。
 两个 ZIP 均通过解压测试；对本机识别的 14 个 secret 值，精确命中为 0，
 启发式凭据标记为 0。smoke 是 operational evidence，不是方法效果实验；
 paired10 没有完整 endpoint，也未 finalize 为 canonical 结果 record。
+
+## 2026-07-18 transport-v4 因果快照修正
+
+首轮 v4 smoke `exp_20260718_hybridv8_transportv4_smoke2` 在提交
+`6f404de635cc97883736dbccb34c0358ec3f005f` 完成 16/16 行、verifier 8/8、
+preservation 0；随后同提交的 `exp_20260718_hybridv8_transportv4_paired10` 在
+124/400 行时严格报告 HP/json2 RT7 backward 无 API 映射并全局停止。最终 evidence
+实际包含该步唯一 API terminal row、`response_committed` ledger、journal 与 result；
+API 比 result 早约 88 ms 落盘。最终证据、当时错误与旧读取顺序支持 torn-snapshot
+解释，确定性并发 fault injection 建立因果。
+
+dispatcher 的 live inspection 现按固定 writer publication 链
+`ledger/journal → API → result/checkpoint` 的逆序先缓存 result，再读取 API、attempt 与
+journal。所有 schema、lineage、mapping、duplicate、partial/half-commit、checkpoint 和
+preservation 判定保持原样。另增强 global-integrity 测试，证明 durable stop latch 在 worker
+terminate/reconcile 前可读且终止失败后仍保留。transport wire、HTTP incomplete 分类、R2/I3、
+repair budget 与 revision 字符串仍为 `opencode_anthropic_sdk/4`；本次只修 dispatcher evidence
+snapshot，不创建新的方法版本。
+
+零 API 验证：85 个 tracked `src/**/*.py` 编译 PASS；HybridPatch executor 72/72、splitter
+byte-exact、HP transport/dispatcher 85/85、transport-core 47/47、analyzer 5/5、process tool
+9/9 全部 PASS。V4/V5/V6/V7/V8 归档分别只读复现 70/400/400/400/8/96/8/62 个 backward
+RS，全部 `HONESTY GATE: PASS`；用户固定 10 样本 initial runtime evaluator 均 score=1.0。
+零 API burden 报告仍为 400 rows、394 success、25 soft-overage union、1/399 path incompatible。
+
+失败 main 永久为 `failed_informative`，无完整 paired sample，不报告 RS@10。official prepare
+在 canonical endpoint n=0/10 处按设计停止，未伪造 record。1,251 个文件的
+credential scan 对 11 个本机 Key、Authorization、Cookie 与 private-key marker 命中均为 0；
+私有 ZIP SHA-256 为
+`ad3a56972def73ad550db32d4835a4802b14719ad758fb4d5fdf85df9a708407`。
+修正后的付费 smoke/main 已分别预注册为
+`exp_20260718_hybridv8_transportv4_snapshotfix_smoke2` 与
+`exp_20260718_hybridv8_transportv4_snapshotfix_paired10`；开始前仍需 clean commit、formal
+dry-run、计划审阅和 Key probe，旧目录不得 resume 或拼接。
 
 ## 运行方式
 

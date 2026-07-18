@@ -1138,6 +1138,18 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         elif _sha256(plan_path) != plan.get("sha256"):
             errors.append(f"task-plan hash drift: {sample}")
 
+    # Relay publication is causally ordered as attempt ledger/journal, then the
+    # terminal API row, then the committed result/checkpoint.  Read that chain
+    # in reverse publication order so a live inspection can observe either the
+    # old prefix or the new prefix, never an old API snapshot paired with a new
+    # result row.  Per-file locks alone cannot provide a cross-file snapshot.
+    committed_rows = {}
+    for sample in config["samples"]:
+        for method in config["method_set"]:
+            result_path = os.path.join(
+                out_dir, method, f"{sample}.jsonl")
+            committed_rows[(sample, method)] = _read_jsonl(result_path)
+
     api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
     api_keys = set()
     semantic_groups = {}
@@ -1705,8 +1717,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
 
     for sample in config["samples"]:
         for method in config["method_set"]:
-            result_path = os.path.join(out_dir, method, f"{sample}.jsonl")
-            rows = _read_jsonl(result_path)
+            rows = committed_rows[(sample, method)]
             seen = set()
             by_rt = {}
             for row in rows:

@@ -132,6 +132,12 @@ relay rows/checkpoint commit 与 stop latch 共用 ordering lock，stop 先落�
 metadata/exit 审计；若 terminate 后 lease 仍被持有，则保留原 active set。全局停止时
 最后才清空安全回收的 active set，避免把活 worker 人为变成 authorization drift。
 
+live inspector 必须按跨文件发布链的逆因果顺序读取证据：先缓存 committed result，
+再读取 API terminal row、attempt ledger 与 response journal。writer 的固定顺序是
+ledger/journal → API row → result/checkpoint；逆序读取保证审计器得到旧前缀或新前缀，
+不会把旧 API snapshot 与新 result 组合成伪 mapping failure。该规则只改变快照顺序，
+不放松任何 schema、lineage、duplicate、half-commit 或 result/API 映射校验。
+
 ## 7. Schema 与兼容性
 
 - API call：`anchorpatch.api_call/4`
