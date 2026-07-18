@@ -2281,6 +2281,11 @@ def _launch_under_lease(args, out_dir):
         )
         dry_active = {item["sample"] for item in dry_assignments}
         dry_complete = set(args.samples) - dry_active
+        # A new dry-run has no worker metadata yet, but the inspector still
+        # requires a well-formed active-set artifact before treating an open
+        # sample as launchable. Mirror the real launch preflight's explicit
+        # empty set; never invent worker identities during a zero-POST check.
+        _write_active_worker_set(out_dir, inspection_manifest, [])
         dry_inspection = inspect_campaign(
             out_dir, inspection_manifest,
             active_samples=dry_active,

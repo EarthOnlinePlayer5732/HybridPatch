@@ -1203,6 +1203,69 @@ class IntegrationContractTests(unittest.TestCase):
                 dispatch_rows[-1]["infrastructure_incomplete_samples"],
                 ["sample-a"])
 
+    def test_fresh_campaign_dry_run_writes_empty_active_set_and_passes(self):
+        def make_task_plans(out_dir, samples, *_args):
+            plans = {}
+            for sample in samples:
+                plan_path = os.path.join(
+                    out_dir, f"{sample}.task_plan.json")
+                utils_relay_plan.save_relay_task_plan(
+                    plan_path, ["target"])
+                plans[sample] = {
+                    "path": os.path.basename(plan_path),
+                    "sha256": paired_dispatch._sha256(plan_path),
+                    "forward_state_sequence": ["target"],
+                }
+            return plans
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            args = mock.Mock(
+                campaign_role="smoke", smoke_dir=None,
+                samples=["sample-a", "sample-b"],
+                key_labels=["KEY_01", "KEY_02"],
+                keys_file="unused.env", num_round_trips=1, seed=42,
+                dry_run=True, resume=False, notes="unit",
+            )
+            with mock.patch.object(
+                    paired_dispatch, "_validate_campaign_grid"), \
+                    mock.patch.object(
+                        paired_dispatch,
+                        "_require_formal_opencode_transport"), \
+                    mock.patch.object(
+                        paired_dispatch, "read_keys",
+                        return_value={"KEY_01": "redacted-a",
+                                      "KEY_02": "redacted-b"}), \
+                    mock.patch.object(
+                        paired_dispatch, "prepare_task_plans",
+                        side_effect=make_task_plans), \
+                    mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "code_fingerprint",
+                        return_value={"unit": "test"}):
+                result = paired_dispatch._launch_under_lease(args, out_dir)
+
+            self.assertEqual(result, 0)
+            active = paired_dispatch._read_json(
+                paired_dispatch._active_worker_set_path(out_dir))
+            self.assertEqual(active, {
+                "schema": "anchorpatch.active_worker_set/1",
+                "run_git_commit": "1" * 40,
+                "workers": {},
+            })
+            manifest = paired_dispatch._read_json(os.path.join(
+                out_dir, "dispatch_manifest.json"))
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")):
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest,
+                    active_samples={"sample-a", "sample-b"})
+            self.assertEqual(inspection["errors"], [])
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, "api_calls.jsonl")))
+
     def test_preservation_latch_keeps_failure_global_for_all_workers(self):
         with tempfile.TemporaryDirectory() as out_dir:
             self._write_infrastructure_fixture(out_dir)

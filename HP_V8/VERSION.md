@@ -138,17 +138,19 @@ transport-v3 归档继续只按其历史规范解释，旧
 
 ### Transport-v4 零 API 验证
 
-2026-07-18 在 Git Bash 中完成，未读取 Key、未调用 API：
+2026-07-18 在 Git Bash 中完成；实现回归未读取 Key，formal dry-run 仅加载本地 Key
+映射做零 API 校验且未输出 Key 值、未调用 provider：
 
 1. `HP_V8/src`、`transport/src`、`tools` 共 98 个 Python 文件编译到临时
    `PYTHONPYCACHEPREFIX`：PASS。
 2. `python -B ./src/test_hybrid_executor.py`：72/72 PASS；含 V1–V8 envelope matrix、
    V7 legacy range/budget、snapshot/body-ref/C2/partial parity。
 3. `python -B ./src/splitters.py`：全部 splitter byte-exact PASS。
-4. `python -B ./src/test_model_openai.py`：83/83 PASS；覆盖 HTTP-200 streaming
+4. `python -B ./src/test_model_openai.py`：84/84 PASS；覆盖 HTTP-200 streaming
    failure、delta/no-delta R2/I3、缺/乱序 terminal、空白 stop reason、transport/repair
    分离、multi-worker isolation、preservation global stop、stop-latch/backoff 零 POST、
-   active-set audit/CAS、只恢复 incomplete sample 与 committed RT 零 POST。
+   active-set audit/CAS、只恢复 incomplete sample、committed RT 零 POST，以及全新 campaign
+   dry-run 写入显式空 active-worker set 后的真实 inspector 路径。
 5. `PYTHONPATH=../HP_V8/src python -B ./src/test_model_openai.py`（`transport/`）：
    47/47 PASS。
 6. `analyze_protocol_burden.py`：400 rows、394 success、25 个历史成功软阈值并集
@@ -190,7 +192,7 @@ preflight 版为 `f9f63d4776ab7c39399256f2e16a15c3909ad0390c0ea34dd41494e655ec0d
 | `run_meta.py` | `94f37d069dd9` |
 | `requirements.txt` | `38ffe361be94` |
 | `verify_anchorpatch.py` | `310fd2ee8ed5` |
-| `paired_campaign_dispatch.py` | `fe69b5ad4489` |
+| `paired_campaign_dispatch.py` | `5740ebe1e33a` |
 | `analyze.py` | `32178dc554c5` |
 
 ## 零 API 验证（2026-07-17）

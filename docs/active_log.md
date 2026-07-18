@@ -517,12 +517,17 @@
 - implementation: `opencode_anthropic_sdk/4` classifies HTTP-200/incomplete terminal chains before ordinary status; per exact semantic call R2/I3; every HTTP attempt rechecks campaign guards; transport retry and HP repair retain separate call kinds, prompts and budgets
 - isolation/recovery: only four-source-evidenced retry exhaustion is sample-local; sibling workers continue; recovery uses exact `gNNN` lineage, one-shot four-field authorization, same fingerprint and continuous attempt index; committed RT creates no POST
 - global integrity: post-call and pre-commit Git/tree/task-plan/latch checks, latch-ordered result commit, preservation stop, semantic-root ownership, active-worker lease retention and provenance-audited CAS closure
-- tests: compile 98 files PASS; HybridPatch executor 72/72; HP transport/dispatcher 83/83; transport-core 47/47; splitter PASS; analyzer 5/5; process-experiment 9/9; burden replay 400 rows/394 successes
+- tests: compile 98 files PASS; HybridPatch executor 72/72; HP transport/dispatcher 84/84; transport-core 47/47; splitter PASS; analyzer 5/5; process-experiment 9/9; burden replay 400 rows/394 successes
 - readonly replay: V4 smoke 70, V5 dev20 400, V6 dev20 400, V7 dev20 400, V8 smoke 8 and V8 partial paired 96 backward RS PASS; frozen V3 dev20full retains its pre-existing `quantum4 RT9 0.9850→1.0000` verifier mismatch under both V3 and V8 verifier, so it is disclosed rather than rewritten
 - runtime preflight: fixed 10 samples all initial evaluator score 1.0; seed42/10RT task-plan references and preregistered hashes match
 - scope audit: no HP_V3–HP_V7, Baseline, data, records/exp archive, HP_V8 protocol/prompt/executor/gate, FullRewrite, evaluator or scoring changes; HP/transport `model_openai.py` byte-identical SHA-256 `cdfe85e9f48b81d16ff85857d51b97db09b559877675456708838959ff15fd93`
 - plan review: fresh-context read-only review returned plan-level GO after fixing cwd/dry-run commands,
   2RT hashes, verifier/review gates, explicit cost-stop policy, full resume templates and a fixed maximum
   of one audited recovery (`g001`) per failed semantic root
-- API status: still `NO-GO`; no key read or API call yet. Remaining gates are clean implementation
-  commit, formal dry-run and Key probe
+- formal dry-run finding: the first clean-commit smoke dry-run stopped before any provider call because a
+  new campaign had no active-worker-set artifact for the real inspector. The dry-run now mirrors launch
+  preflight by writing an explicit empty set; a non-mocked 84th regression test covers this path. The
+  zero-API partial directory was removed file-by-file before rerun.
+- credential/API status: the local Key inventory reported 11 expected nonempty labels without printing
+  values; the failed dry-run made zero provider calls. API remains `NO-GO` until the fix commit, repeated
+  formal dry-run and live Key probe pass.
