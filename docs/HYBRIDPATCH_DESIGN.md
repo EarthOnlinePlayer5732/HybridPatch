@@ -237,9 +237,9 @@ HybridPatch 方法层只处理“完整模型响应交给应用后如何解析�
 连接、流完整性、重发预算、journal 和 provider 错误属于 transport 层。两层必须
 分开计数，否则会把工程可靠性提升误报成方法能力。
 
-### 8.1 正式 OpenCode transport-v3
+### 8.1 冻结 OpenCode transport-v3（历史正式比较）
 
-正式同传输比较使用 `opencode_anthropic_sdk/3`：
+V7 历史正式同传输比较使用 `opencode_anthropic_sdk/3`：
 
 - `message_delta`、`message_stop` 和 final usage 缺一不可；
 - partial thinking/text 只进 raw audit，不进入上下文、repair prompt 或评分；
@@ -253,7 +253,20 @@ HybridPatch 方法层只处理“完整模型响应交给应用后如何解析�
 正式 HP/FR 比较必须使用相同 transport revision、兼容 fingerprint、同一新
 `out_dir` 和同一 task plan。旧 transport 的 FR 不能作为同传输 primary control。
 
-### 8.2 MiniMax 官方非流式路线
+### 8.2 活动 OpenCode transport-v4
+
+新实验使用 `opencode_anthropic_sdk/4`，不改方法层语义。它把 HTTP 200
+`Streaming response failed`、缺 `message_stop`、缺终结 usage 与 block 未正常
+闭合统一为 retryable `incomplete_stream`，并在普通 status-code 分类前判断。
+
+每个 exact semantic call 仍严格限制为 2 个 generation response slot 和 3 个
+pre-generation transient failure。基础设施耗尽后的人工恢复在同一逻辑 root 下创建
+新的 `gNNN` semantic call，并强绑定 parent、request fingerprint 与连续 attempt
+index；不在旧 semantic ID 内清零预算。paired campaign 只有在 sample outcome、
+run metadata、API row 和 attempt ledger 四证一致时才隔离单 sample，其他完整性错误
+仍全局停止。活动规范见 `transport/docs/API_TRANSPORT_V4.md`；v3 文档和归档保持冻结。
+
+### 8.3 MiniMax 官方非流式路线
 
 `minimax_official_nonstream/1` 是独立、互斥的诊断/基线来源。它按 baseline
 对齐政策接受完整 HTTP 200，包括 `finish_reason=abort`，不实现 v3 的 ledger 和
@@ -262,7 +275,7 @@ response journal。官方与 OpenCode revision 禁止混入同一实验目录。
 FR+Official 把完整官方轨迹与冻结 FR 组合成 post-hoc 敏感性视图；它不是
 same-transport method effect，也不覆盖 canonical V7 val40 结论。
 
-### 8.3 代码边界
+### 8.4 代码边界
 
 API/transport 语义只在 `transport/` 中开发并分配新 revision。验证后，需运行的
 版本快照按原字节同步并记录 fingerprint；冻结的 `HP_V3`–`HP_V7` 不接受后续回灌。
@@ -309,6 +322,7 @@ canonical statistic；partial 历史仍保留供核查。
 | v7 same-transport canonical38 | [human report](../HP_V7/records/exp_20260712_hybridv7val40_transportv3/report.md)；[machine summary](../HP_V7/records/exp_20260712_hybridv7val40_transportv3/summary.json)；[casebook](../HP_V7/records/exp_20260712_hybridv7val40_transportv3/casebook.jsonl)；[verification](../HP_V7/records/exp_20260712_hybridv7val40_transportv3/verification.txt) |
 | 冻结 FR / FR+Official | [Baseline index](../Baseline/EXPERIMENTS.md) |
 | transport-v3 规范与 smoke | [frozen spec](../transport/docs/API_TRANSPORT_FROZEN_V3.md)；FINDINGS §230 |
+| transport-v4 活动规范 | [active spec](../transport/docs/API_TRANSPORT_V4.md)；新实验必须使用独立 out_dir |
 
 `analysis/comparison.md` 不自动等于 canonical。V7 val40 的普通 comparison 包含
 两个基础设施失败样本的 partial rows；正式口径是 38 个完整配对样本的专用报告和

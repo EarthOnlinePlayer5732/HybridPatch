@@ -28,6 +28,21 @@
 - 模型语义：完整空、thinking-only、refusal 与非协议文本不做 transport retry；HP repair 仅对非空且已有协议信号的应用层失败开放一次。
 - 冻结证据：零 API 26/26、真实异常 fixture 回放、11-Key canary、双臂 smoke 结果复核 PASS 20/20。规范见 `docs/API_TRANSPORT_FROZEN_V3.md`。
 
+### `opencode_anthropic_sdk/4`（OpenCode transport-v4，活动）
+
+- 动机：MiniMax Anthropic SDK 会把 HTTP 200 的 `Streaming response failed` 暴露为 `APIStatusError`；v3 先看 status code，可能把不完整流当 fatal。旧 paired dispatcher 又会因单个 provider retry exhaustion 全局 fail-fast。
+- 分类：HTTP 200 streaming failure、缺 `message_stop`、缺终结事件 usage 和 block 状态机未正常闭合统一为 retryable `incomplete_stream`；该判断先于普通 status code。
+- 双预算：每个 exact semantic call 仍严格 R2/I3；预算按 delta/attempt 事件重算，累计字段只作一致性断言。
+- 恢复：逻辑 root 下使用 `g000`、`g001` 等新的 exact semantic call；恢复 generation 与 parent、fingerprint、连续 attempt index 强绑定，不在同一 ID 内重置预算。已提交 response journal 只本地 replay。
+- 隔离：只有 outcome、metadata、API row、attempt ledger 四证一致且明确耗尽 R2/I3，才把单 worker 标为 `infrastructure_incomplete`；其他 sample 继续。preservation、Git 漂移、重复/半提交、ledger 错配和本地/evaluator/shared-integrity 异常仍全局停止。
+- 兼容：只用于新 out_dir；v3 规范和归档保持冻结，不直接续跑或拼接。活动规范见 `docs/API_TRANSPORT_V4.md`。
+- 同步指纹：`transport/src/model_openai.py` 与 `HP_V8/src/model_openai.py` 原字节
+  SHA-256 均为 `cdfe85e9f48b81d16ff85857d51b97db09b559877675456708838959ff15fd93`。
+- 零 API 验证：HP 集成/故障注入 83/83、transport-core 47/47、V1–V8 envelope
+  matrix 72/72 均 PASS；含锁存后 transport backoff 零 POST、sample isolation、
+  preservation global stop、audited resume 和 committed RT 零 POST。首次 API 前仍需
+  独立计划审阅、clean commit、dry-run/runtime preflight 与 Key probe。
+
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 
 - 动机：为 FR baseline 忠实翻译上游 DELEGATE-52 的官方非流式 + 盲异常重试语义，与 OpenCode v3 公平性策略分线。
@@ -44,5 +59,5 @@
 1. API 修改只在 `transport/` 发生，并新增独立 revision；不得复用旧 revision 改语义。
 2. 先在隔离 fixture/测试中验证，再原字节拷贝到当前活跃 `HP_Vx/src/`；同步记录源/目标 SHA-1。
 3. 从活跃 `HP_Vx` 根运行完整测试和实验。`transport/` 不是完整方法运行根。
-4. OpenCode v3 与 official nonstream 两条线并存且互斥，不合并、不混目录。
+4. OpenCode v4、冻结 v3 与 official nonstream 各线并存且互斥，不合并、不混目录。
 5. 顶层 `.env` / `.env.frkeys` 不复制进 `transport/` 或 HP 版本。调用方显式注入环境；多 Key 工具显式传 `--keys_file ../.env.frkeys`。

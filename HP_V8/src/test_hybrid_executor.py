@@ -1084,6 +1084,23 @@ def test_v1_v7_bulk_unknown_scope_replay_is_unchanged():
                     (protocol, log.to_dict()))
 
 
+def test_v1_v8_envelope_replay_matrix():
+    source = {"out.txt": "alpha\n"}
+    for protocol in (
+        PROTOCOL_V1, PROTOCOL_V2, PROTOCOL_V3, PROTOCOL_V4,
+        PROTOCOL_V5, PROTOCOL_V6, PROTOCOL_V7, PROTOCOL_V8,
+    ):
+        envelope = env("local_patch", {"ops": [{
+            "op": "replace", "file": "out.txt",
+            "old_text": "alpha", "new_text": "beta",
+        }]}, protocol=protocol)
+        out, log = apply_hybrid(source, envelope, ["out.txt"])
+        assert_true(
+            out == {"out.txt": "beta\n"} and log.error is None,
+            (protocol, out, log.to_dict()),
+        )
+
+
 def test_v8_inherits_v7_execution_gate_and_partial_semantics():
     ctx = {"out.txt": "keep\nfoo bar\nkeep2\n"}
     ops = [
@@ -1472,6 +1489,7 @@ def main():
         test_v8_burden_at_threshold_is_not_exceeded,
         test_v7_legacy_missing_ranges_and_over_budget_still_execute,
         test_v1_v7_bulk_unknown_scope_replay_is_unchanged,
+        test_v1_v8_envelope_replay_matrix,
         test_v8_inherits_v7_execution_gate_and_partial_semantics,
         test_v8_v7_snapshot_body_ref_c2_and_partial_parity,
         test_v8_runner_and_verifier_choose_same_partial_repair_after_schema_error,

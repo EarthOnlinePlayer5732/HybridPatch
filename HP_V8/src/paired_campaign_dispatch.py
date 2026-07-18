@@ -1,10 +1,10 @@
-"""Fail-fast paired MiniMax campaign launcher for HP_V8.
+"""Integrity-fail-fast paired MiniMax campaign launcher for HP_V8.
 
 The dispatcher never prints key values.  It pre-generates and hashes every
 task plan, records a deterministic sample/key-label/method-order manifest,
-launches one process per sample, and stops all workers on identity drift,
-worker failure, preservation violations, duplicate/partial committed rounds,
-or an unmappable API ledger row.
+launches one process per sample, isolates only fully evidenced provider/transport
+budget exhaustion to that sample, and stops all workers on preservation or
+shared campaign-integrity failures.
 """
 
 import argparse
@@ -14,6 +14,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import time
@@ -31,12 +32,14 @@ from experiment_runner import _require_formal_opencode_transport
 from fr_baseline_dispatch import read_keys
 from run_meta import (
     _git_identity,
+    _validated_transport_ledger_state,
     append_jsonl_locked,
     code_fingerprint,
     interrupt_audited_running_invocations,
-    interrupt_running_invocations,
     read_campaign_stop_conditions,
+    read_sample_outcomes,
     read_run_metadata_snapshot,
+    record_campaign_stop_condition,
     write_json_atomic,
 )
 from utils_env import load_sample
@@ -48,6 +51,11 @@ from utils_relay_plan import (
 
 
 SCHEMA = "anchorpatch.paired_campaign_manifest/1"
+TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
+API_CALL_SCHEMA = "anchorpatch.api_call/4"
+API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
+API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
+TRANSPORT_RESUME_POLICY = "exact_payload_new_semantic_call/1"
 SAMPLES_ROOT = os.path.join(_ROOT, "data", "samples_delegate52")
 SMOKE_SAMPLES = ["treebank4", "obj3d2"]
 MAIN_SAMPLES = [
@@ -62,6 +70,190 @@ SMOKE_PROJECTED_COST_LIMIT_USD = 50.0
 def _is_exact_int(value):
     """Return true only for JSON integer values, never booleans."""
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _parse_semantic_call_id(value):
+    if not isinstance(value, str):
+        return None
+    parts = value.split("/")
+    if (len(parts) != 6 or not re.fullmatch(r"rt\d+", parts[2])
+            or not re.fullmatch(r"g\d{3,}", parts[5])):
+        return None
+    rt_index = int(parts[2][2:])
+    generation_index = int(parts[5][1:])
+    if (parts[2] != f"rt{rt_index:02d}"
+            or parts[5] != f"g{generation_index:03d}"):
+        return None
+    return {
+        "method": parts[0],
+        "sample": parts[1],
+        "rt_index": rt_index,
+        "direction": parts[3],
+        "call_kind": parts[4],
+        "semantic_root_id": "/".join(parts[:5]),
+        "semantic_call_id": value,
+        "generation_index": generation_index,
+    }
+
+
+def _canonical_resume_authorization(authorization):
+    """Return the lineage fields persisted by run_meta for one recovery."""
+    if authorization is None:
+        return None
+    return {
+        "parent_semantic_call_id": authorization[
+            "parent_semantic_call_id"],
+        "semantic_root_id": authorization["semantic_root_id"],
+        "semantic_call_id": authorization["semantic_call_id"],
+        "generation_index": authorization["generation_index"],
+        "request_fingerprint": authorization["request_fingerprint"],
+        "next_attempt_index": authorization["next_attempt_index"],
+    }
+
+
+def _validate_resume_authorization(authorization):
+    """Fail closed on a dispatch authorization that is not exact lineage."""
+    if not isinstance(authorization, dict):
+        raise RuntimeError("transport recovery authorization is missing")
+    parent = _parse_semantic_call_id(
+        authorization.get("parent_semantic_call_id"))
+    generation = authorization.get("generation_index")
+    next_attempt = authorization.get("next_attempt_index")
+    fingerprint = authorization.get("request_fingerprint")
+    if (parent is None
+            or authorization.get("semantic_root_id")
+            != parent["semantic_root_id"]
+            or not _is_exact_int(generation)
+            or generation != parent["generation_index"] + 1
+            or not isinstance(fingerprint, str) or not fingerprint
+            or not _is_exact_int(next_attempt) or next_attempt < 1):
+        raise RuntimeError("transport recovery authorization is invalid")
+    expected_exact = (
+        f"{parent['semantic_root_id']}/g{generation:03d}"
+    )
+    if authorization.get("semantic_call_id") != expected_exact:
+        raise RuntimeError(
+            "transport recovery authorization exact semantic ID is invalid"
+        )
+    return parent
+
+
+def _validated_attempt_lineage(
+        attempt_rows, semantic_root_id, *, allow_open_attempt=False):
+    """Validate one root's exact generations and global HTTP attempt order."""
+    groups = {}
+    prior_generation = None
+    prior_row = None
+    for row in attempt_rows:
+        identity = _parse_semantic_call_id(row.get("semantic_call_id"))
+        if identity is None or identity["semantic_root_id"] != semantic_root_id:
+            continue
+        if (row.get("schema") != API_ATTEMPT_SCHEMA
+                or row.get("semantic_root_id") != semantic_root_id
+                or row.get("generation_index")
+                != identity["generation_index"]
+                or row.get("step_id")
+                != "/".join(semantic_root_id.split("/")[:4])):
+            raise RuntimeError("attempt ledger semantic lineage is invalid")
+        generation = identity["generation_index"]
+        if prior_generation is None:
+            if generation != 0:
+                raise RuntimeError("semantic lineage does not begin at g000")
+        elif generation < prior_generation or generation > prior_generation + 1:
+            raise RuntimeError("semantic lineage generation order is invalid")
+        elif generation == prior_generation + 1 and (
+                row.get("event") != "semantic_request"
+                or (prior_row or {}).get("event") != "call_failed"):
+            raise RuntimeError(
+                "semantic lineage advances before its parent is terminal")
+        groups.setdefault(identity["generation_index"], []).append(row)
+        prior_generation = generation
+        prior_row = row
+    if not groups:
+        raise RuntimeError("attempt ledger semantic lineage is missing")
+    generations = sorted(groups)
+    if generations != list(range(len(generations))):
+        raise RuntimeError("semantic lineage generation sequence has a gap")
+
+    lineage_fingerprint = None
+    committed_seen = False
+    all_attempt_indexes = []
+    validated = {}
+    previous_exact_id = None
+    for generation_index in generations:
+        records = groups[generation_index]
+        exact_id = f"{semantic_root_id}/g{generation_index:03d}"
+        if any(row.get("semantic_call_id") != exact_id for row in records):
+            raise RuntimeError("semantic lineage generation identity is invalid")
+        expected_parent = previous_exact_id
+        if any(row.get("parent_semantic_call_id") != expected_parent
+               for row in records):
+            raise RuntimeError("semantic lineage parent chain is invalid")
+        state = _validated_transport_ledger_state(
+            records, semantic_call_id=exact_id,
+            allow_open_attempt=(
+                allow_open_attempt and generation_index == generations[-1]
+            ),
+        )
+        fingerprints = state.get("request_fingerprints") or []
+        if len(fingerprints) != 1:
+            raise RuntimeError("semantic lineage request fingerprint is missing")
+        fingerprint = fingerprints[0]
+        if lineage_fingerprint is None:
+            lineage_fingerprint = fingerprint
+        elif fingerprint != lineage_fingerprint:
+            raise RuntimeError(
+                "semantic lineage request fingerprint is inconsistent"
+            )
+        attempt_indexes = [
+            row["attempt_index"] for row in records
+            if row.get("event") == "attempt_start"
+        ]
+        all_attempt_indexes.extend(attempt_indexes)
+        committed = any(
+            row.get("event") == "response_committed" for row in records
+        )
+        if committed_seen:
+            raise RuntimeError(
+                "semantic lineage continues after a committed response"
+            )
+        if committed:
+            committed_seen = True
+        elif generation_index < generations[-1]:
+            terminal = state.get("terminal_failure") or {}
+            if (terminal.get("status") != "provider_failure"
+                    or not state.get("call_failed")
+                    or state.get("last_attempt_status")
+                    != "retryable_error"
+                    or not state.get("retry_budget_exhausted")):
+                raise RuntimeError(
+                    "semantic lineage advances from a non-exhausted parent"
+                )
+        validated[generation_index] = {
+            "semantic_call_id": exact_id,
+            "parent_semantic_call_id": expected_parent,
+            "state": state,
+            "records": records,
+            "committed": committed,
+        }
+        previous_exact_id = exact_id
+
+    if (len(all_attempt_indexes) != len(set(all_attempt_indexes))
+            or all_attempt_indexes != sorted(all_attempt_indexes)
+            or (all_attempt_indexes
+                and all_attempt_indexes
+                != list(range(1, max(all_attempt_indexes) + 1)))):
+        raise RuntimeError(
+            "semantic lineage global attempt indexes are duplicated or gapped"
+        )
+    max_attempt_index = max(all_attempt_indexes, default=0)
+    return {
+        "semantic_root_id": semantic_root_id,
+        "request_fingerprint": lineage_fingerprint,
+        "generations": validated,
+        "max_attempt_index": max_attempt_index,
+        "next_attempt_index": max_attempt_index + 1,
+    }
 
 
 def method_order(index):
@@ -112,7 +304,8 @@ def _read_jsonl(path):
         # fragment (large raw responses included) for permanent corruption.
         portalocker.lock(handle, portalocker.LOCK_SH)
         try:
-            for line_number, line in enumerate(handle, 1):
+            for line_number, line in enumerate(
+                    handle.read().splitlines(), 1):
                 if not line.strip():
                     continue
                 try:
@@ -129,6 +322,379 @@ def _read_jsonl(path):
         finally:
             portalocker.unlock(handle)
     return records
+
+
+def _latest_sample_outcomes(out_dir, expected_samples=None):
+    latest = {}
+    expected = set(expected_samples or [])
+    for index, record in enumerate(read_sample_outcomes(out_dir), 1):
+        sample = record.get("sample")
+        status = record.get("status")
+        if (not isinstance(sample, str) or not sample
+                or status not in {"finished", "infrastructure_incomplete"}):
+            raise RuntimeError(f"invalid sample outcome row {index}")
+        if expected and sample not in expected:
+            raise RuntimeError(
+                f"sample outcome row {index} is outside campaign: {sample}")
+        try:
+            created_at = datetime.fromisoformat(record.get("created_at") or "")
+        except ValueError as exc:
+            raise RuntimeError(
+                f"sample outcome row {index} has invalid timestamp") from exc
+        if created_at.tzinfo is None:
+            raise RuntimeError(
+                f"sample outcome row {index} timestamp lacks timezone")
+        prior = latest.get(sample)
+        if prior and prior.get("status") == "finished":
+            raise RuntimeError(
+                f"sample outcome appears after finished state: {sample}")
+        latest[sample] = record
+    return latest
+
+
+def _actual_sample_progress(out_dir, sample, methods):
+    progress = {}
+    for method in methods:
+        result_path = os.path.join(out_dir, method, f"{sample}.jsonl")
+        checkpoint_path = os.path.join(
+            out_dir, method, f"{sample}.ckpt.json")
+        rows = _read_jsonl(result_path)
+        committed = set()
+        for row in rows:
+            key = (row.get("round_trip_num"),
+                   row.get("round_trip_direction"))
+            if (row.get("sample_id") != sample
+                    or row.get("method") != method
+                    or key in committed):
+                raise RuntimeError(
+                    f"invalid committed progress for outcome: {method}/{sample}")
+            committed.add(key)
+        completed = 0
+        if os.path.isfile(checkpoint_path):
+            checkpoint = _read_json(checkpoint_path)
+            completed = checkpoint.get("completed_round_trips")
+            if not _is_exact_int(completed) or completed < 0:
+                raise RuntimeError(
+                    f"invalid checkpoint for outcome: {method}/{sample}")
+        elif rows:
+            raise RuntimeError(
+                f"missing checkpoint for outcome: {method}/{sample}")
+        expected = {
+            (rt, direction)
+            for rt in range(1, completed + 1)
+            for direction in ("forward", "backward")
+        }
+        if committed != expected:
+            raise RuntimeError(
+                f"partial or non-prefix progress for outcome: {method}/{sample}")
+        progress[method] = {
+            "completed_round_trips": completed,
+            "committed_rows": len(rows),
+        }
+    return progress
+
+
+def _verified_infrastructure_incomplete(out_dir, sample, item):
+    """Return the exact failure evidence or fail closed.
+
+    A non-zero worker exit is sample-local only when four append-only sources
+    agree: sample outcome, run metadata, API call row, and attempt ledger.
+    """
+    if read_campaign_stop_conditions(out_dir):
+        raise RuntimeError(
+            "campaign-wide stop latch forbids sample-local isolation")
+    latest = _latest_sample_outcomes(out_dir)
+    outcome = latest.get(sample)
+    if (not isinstance(outcome, dict)
+            or outcome.get("status") != "infrastructure_incomplete"):
+        raise RuntimeError(
+            f"worker {sample} failed without infrastructure outcome")
+    worker_id = item["worker_launch_id"]
+    process = item.get("process")
+    worker_pid = (
+        process.pid if process is not None else item.get("worker_pid")
+    )
+    if (outcome.get("worker_launch_id") != worker_id
+            or outcome.get("worker_pid") != worker_pid
+            or outcome.get("methods") != item.get("methods")
+            or outcome.get("classification") != "provider/API failure"):
+        raise RuntimeError(
+            f"worker {sample} infrastructure outcome provenance mismatch")
+    if _worker_lease_is_held(out_dir, sample):
+        raise RuntimeError(
+            f"worker {sample} lease remains held after infrastructure exit")
+    semantic_call_id = outcome.get("semantic_call_id")
+    semantic_root_id = outcome.get("semantic_root_id")
+    generation_index = outcome.get("generation_index")
+    parent_semantic_call_id = outcome.get("parent_semantic_call_id")
+    request_fingerprint = outcome.get("request_fingerprint")
+    next_attempt_index = outcome.get("next_attempt_index")
+    request_id = outcome.get("request_id")
+    invocation_id = outcome.get("invocation_id")
+    if not all(isinstance(value, str) and value for value in (
+            semantic_call_id, semantic_root_id, request_fingerprint,
+            request_id, invocation_id)):
+        raise RuntimeError(
+            f"worker {sample} infrastructure outcome identity is incomplete")
+    semantic_identity = _parse_semantic_call_id(semantic_call_id)
+    parent_identity = _parse_semantic_call_id(parent_semantic_call_id)
+    if (semantic_identity is None
+            or semantic_identity["semantic_root_id"] != semantic_root_id
+            or semantic_identity["generation_index"] != generation_index
+            or (generation_index == 0 and parent_semantic_call_id is not None)
+            or (generation_index > 0
+                and (parent_identity is None
+                     or parent_identity["semantic_root_id"] != semantic_root_id
+                     or parent_identity["generation_index"]
+                     != generation_index - 1))
+            or not _is_exact_int(next_attempt_index)
+            or next_attempt_index < 1):
+        raise RuntimeError(
+            f"worker {sample} infrastructure outcome lineage is invalid")
+    actual_progress = _actual_sample_progress(
+        out_dir, sample, item.get("methods") or [])
+    if outcome.get("checkpoint_progress") != actual_progress:
+        raise RuntimeError(
+            f"worker {sample} infrastructure checkpoint evidence drift")
+    target_round_trips = item.get("target_round_trips")
+    failure_method = outcome.get("method")
+    failure_rt = outcome.get("rt_index")
+    methods = item.get("methods") or []
+    if (failure_method not in methods or not _is_exact_int(failure_rt)
+            or failure_rt < 1
+            or (_is_exact_int(target_round_trips)
+                and failure_rt > target_round_trips)
+            or semantic_identity["method"] != failure_method
+            or semantic_identity["sample"] != sample
+            or semantic_identity["rt_index"] != failure_rt
+            or semantic_identity["direction"] != outcome.get("direction")
+            or semantic_identity["call_kind"] != outcome.get("call_kind")):
+        raise RuntimeError(
+            f"worker {sample} infrastructure failed-step identity is invalid")
+    if _is_exact_int(target_round_trips):
+        failed_index = methods.index(failure_method)
+        for index, method in enumerate(methods):
+            committed_rt = actual_progress[method]["completed_round_trips"]
+            expected_rt = (
+                target_round_trips if index < failed_index
+                else failure_rt - 1 if index == failed_index else 0
+            )
+            if committed_rt != expected_rt:
+                raise RuntimeError(
+                    f"worker {sample} method-order/checkpoint mismatch")
+
+    metadata = [
+        record for record in read_run_metadata_snapshot(out_dir)
+        if record.get("invocation_id") == invocation_id
+    ]
+    if (len(metadata) != 1
+            or metadata[0].get("status") != "infrastructure_incomplete"
+            or metadata[0].get("worker_launch_id") != worker_id
+            or metadata[0].get("worker_pid") != worker_pid
+            or metadata[0].get("samples") != [sample]):
+        raise RuntimeError(
+            f"worker {sample} infrastructure run metadata mismatch")
+    expected_metadata_resume = None
+    if generation_index > 0:
+        expected_metadata_resume = _canonical_resume_authorization({
+            "parent_semantic_call_id": parent_semantic_call_id,
+            "semantic_root_id": semantic_root_id,
+            "generation_index": generation_index,
+        })
+    if (metadata[0].get("transport_resume_authorization")
+            != expected_metadata_resume):
+        raise RuntimeError(
+            f"worker {sample} infrastructure resume metadata mismatch")
+
+    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    api_matches = [
+        (index, row) for index, row in enumerate(api_rows, 1)
+        if row.get("request_id") == request_id
+        and row.get("semantic_call_id") == semantic_call_id
+    ]
+    if len(api_matches) != 1:
+        raise RuntimeError(
+            f"worker {sample} infrastructure API evidence is not unique")
+    api_index, api_row = api_matches[0]
+    if (api_row.get("schema") != API_CALL_SCHEMA
+            or api_row.get("transport_revision") != TRANSPORT_REVISION
+            or api_row.get("transport_resume_policy")
+            != TRANSPORT_RESUME_POLICY
+            or api_row.get("sample") != sample
+            or api_row.get("method") != outcome.get("method")
+            or api_row.get("rt_index") != outcome.get("rt_index")
+            or api_row.get("direction") != outcome.get("direction")
+            or api_row.get("call_kind") != outcome.get("call_kind")
+            or api_row.get("error_type") != outcome.get("error_type")
+            or api_row.get("worker_launch_id") != worker_id
+            or api_row.get("worker_pid") != worker_pid
+            or api_row.get("classification") != "provider/API failure"
+            or api_row.get("count_as_method_failure") is not False
+            or api_row.get("provider_called") is not True
+            or api_row.get("response_replayed") is not False
+            or api_row.get("semantic_root_id") != semantic_root_id
+            or api_row.get("generation_index") != generation_index
+            or api_row.get("parent_semantic_call_id")
+            != parent_semantic_call_id
+            or api_row.get("request_fingerprint") != request_fingerprint
+            or api_row.get("transport_recovery_index") != generation_index):
+        raise RuntimeError(
+            f"worker {sample} infrastructure API provenance mismatch")
+    journal_digest = hashlib.sha256(
+        semantic_call_id.encode("utf-8")).hexdigest()[:24]
+    if os.path.exists(os.path.join(
+            out_dir, "api_journal", f"{journal_digest}.response.json")):
+        raise RuntimeError(
+            f"worker {sample} failed semantic call has a response journal")
+    response_slots = api_row.get("response_slots_used")
+    transient_failures = api_row.get("transient_failure_count")
+    http_attempts_used = api_row.get("http_attempts_used")
+    if (outcome.get("response_slots_used") != response_slots
+            or outcome.get("transient_failure_count") != transient_failures
+            or outcome.get("http_attempts_used")
+            != http_attempts_used
+            or outcome.get("transport_recovery_index") != generation_index
+            or not _is_exact_int(http_attempts_used)
+            or http_attempts_used < 1
+            or http_attempts_used + 1 != next_attempt_index):
+        raise RuntimeError(
+            f"worker {sample} infrastructure outcome budget mismatch")
+    exhausted = (
+        response_slots == api_row.get("max_response_slots") == 2
+        or transient_failures == api_row.get("max_transient_failures") == 3
+    )
+    if not exhausted:
+        raise RuntimeError(
+            f"worker {sample} exited before a transport budget was exhausted")
+
+    ledger = _read_jsonl(os.path.join(
+        out_dir, "api_attempt_ledger.jsonl"))
+    lineage = _validated_attempt_lineage(ledger, semantic_root_id)
+    if (lineage["request_fingerprint"] != request_fingerprint
+            or lineage["next_attempt_index"] != next_attempt_index
+            or generation_index != max(lineage["generations"])
+            or generation_index not in lineage["generations"]
+            or lineage["generations"][generation_index][
+                "semantic_call_id"] != semantic_call_id
+            or lineage["generations"][generation_index][
+                "parent_semantic_call_id"] != parent_semantic_call_id):
+        raise RuntimeError(
+            f"worker {sample} infrastructure attempt lineage mismatch")
+    failed_state = lineage["generations"][generation_index]["state"]
+    if (not failed_state.get("call_failed")
+            or failed_state.get("last_attempt_status")
+            != "retryable_error"
+            or not failed_state.get("retry_budget_exhausted")
+            or failed_state.get("open_attempt_index") is not None):
+        raise RuntimeError(
+            f"worker {sample} did not end in exact R2/I3 retry exhaustion")
+    ledger_matches = [
+        (index, row) for index, row in enumerate(ledger, 1)
+        if row.get("schema") == API_ATTEMPT_SCHEMA
+        and row.get("event") == "call_failed"
+        and row.get("semantic_call_id") == semantic_call_id
+        and row.get("call_id") == request_id
+    ]
+    if len(ledger_matches) != 1:
+        raise RuntimeError(
+            f"worker {sample} infrastructure attempt evidence is not unique")
+    ledger_index, ledger_row = ledger_matches[0]
+    if (ledger_row.get("status") != "provider_failure"
+            or ledger_row.get("worker_launch_id") != worker_id
+            or ledger_row.get("error_type") != api_row.get("error_type")
+            or ledger_row.get("request_fingerprint")
+            != api_row.get("request_fingerprint")
+            or ledger_row.get("semantic_root_id") != semantic_root_id
+            or ledger_row.get("generation_index") != generation_index
+            or ledger_row.get("parent_semantic_call_id")
+            != parent_semantic_call_id
+            or ledger_row.get("response_slots_used") != response_slots
+            or ledger_row.get("transient_failure_count")
+            != transient_failures
+            or ledger_row.get("http_attempts_used")
+            != api_row.get("http_attempts_used")):
+        raise RuntimeError(
+            f"worker {sample} infrastructure budget evidence mismatch")
+    return {
+        "sample_outcome_created_at": outcome.get("created_at"),
+        "invocation_id": invocation_id,
+        "semantic_root_id": semantic_root_id,
+        "semantic_call_id": semantic_call_id,
+        "generation_index": generation_index,
+        "parent_semantic_call_id": parent_semantic_call_id,
+        "request_id": request_id,
+        "request_fingerprint": request_fingerprint,
+        "next_attempt_index": next_attempt_index,
+        "api_row": api_index,
+        "attempt_ledger_row": ledger_index,
+        "checkpoint_progress": actual_progress,
+    }
+
+
+def _select_invocation_assignments(out_dir, assignments, *, resume,
+                                   target_round_trips):
+    """Select all samples for a new campaign, only incomplete ones on resume."""
+    if not resume:
+        if read_sample_outcomes(out_dir):
+            raise RuntimeError(
+                "new campaign directory already contains sample outcomes")
+        return list(assignments), {}
+    latest = _latest_sample_outcomes(
+        out_dir, [item["sample"] for item in assignments])
+    missing = [
+        item["sample"] for item in assignments
+        if item["sample"] not in latest
+    ]
+    if missing:
+        raise RuntimeError(
+            f"resume is limited to explicitly incomplete samples; "
+            f"missing outcomes: {missing}")
+    selected = []
+    authorizations = {}
+    for item in assignments:
+        sample = item["sample"]
+        outcome = latest[sample]
+        if outcome["status"] == "finished":
+            progress = _actual_sample_progress(
+                out_dir, sample, item["methods"])
+            expected = {
+                method: {
+                    "completed_round_trips": target_round_trips,
+                    "committed_rows": 2 * target_round_trips,
+                }
+                for method in item["methods"]
+            }
+            if (progress != expected
+                    or outcome.get("checkpoint_progress") != expected):
+                raise RuntimeError(
+                    f"finished sample evidence is incomplete: {sample}")
+            continue
+        evidence = _verified_infrastructure_incomplete(
+            out_dir, sample, {
+                "worker_launch_id": outcome.get("worker_launch_id"),
+                "worker_pid": outcome.get("worker_pid"),
+                "methods": item["methods"],
+                "target_round_trips": target_round_trips,
+            })
+        prior_generation = evidence.get("generation_index")
+        if not _is_exact_int(prior_generation) or prior_generation < 0:
+            raise RuntimeError(
+                f"invalid semantic generation for incomplete sample: {sample}")
+        next_generation = prior_generation + 1
+        selected.append(item)
+        authorizations[sample] = {
+            "parent_semantic_call_id": evidence["semantic_call_id"],
+            "semantic_root_id": evidence["semantic_root_id"],
+            "semantic_call_id": (
+                f"{evidence['semantic_root_id']}/g{next_generation:03d}"
+            ),
+            "generation_index": next_generation,
+            "request_fingerprint": evidence["request_fingerprint"],
+            "next_attempt_index": evidence["next_attempt_index"],
+            "prior_worker_launch_id": outcome.get("worker_launch_id"),
+            "prior_invocation_id": evidence["invocation_id"],
+        }
+    return selected, authorizations
 
 
 def _worker_lease_path(out_dir, sample):
@@ -268,6 +834,17 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                 raise RuntimeError(
                     f"worker task-plan handshake mismatch: {sample}"
                 )
+            expected_resume = item.get("resume_authorization")
+            metadata_resume = matches[0].get(
+                "transport_resume_authorization")
+            if expected_resume is not None:
+                _validate_resume_authorization(expected_resume)
+            expected_metadata_resume = _canonical_resume_authorization(
+                expected_resume
+            )
+            if metadata_resume != expected_metadata_resume:
+                raise RuntimeError(
+                    f"worker transport-resume handshake mismatch: {sample}")
             ready_by_sample[sample] = ready
         if len(ready_by_sample) == len(running):
             break
@@ -295,6 +872,8 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                 "event": "worker_authorized",
                 "created_at": datetime.now().astimezone().isoformat(
                     timespec="seconds"),
+                "transport_resume_authorization": item.get(
+                    "resume_authorization"),
                 **ack,
             },
         )
@@ -427,7 +1006,8 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
             "distractor": True,
             "opencode_transport": "anthropic_sdk_v2",
             "minimax_transport": "opencode",
-            "transport_revision": "opencode_anthropic_sdk/3",
+            "transport_revision": TRANSPORT_REVISION,
+            "transport_resume_policy": TRANSPORT_RESUME_POLICY,
             "stop_on_preservation_violation": True,
         },
         "assignments": assignments,
@@ -482,6 +1062,18 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         else set(required_complete_samples or [])
     )
     active_samples = set(active_samples or [])
+    active_worker_rows = {}
+    try:
+        active_payload = _read_json(_active_worker_set_path(out_dir))
+        if active_payload.get("schema") != "anchorpatch.active_worker_set/1":
+            raise RuntimeError("active worker set schema is invalid")
+        active_worker_rows = active_payload.get("workers") or {}
+        if not isinstance(active_worker_rows, dict):
+            raise RuntimeError("active worker set workers are invalid")
+    except (OSError, ValueError, RuntimeError):
+        if active_samples:
+            errors.append("active worker set is missing or invalid")
+        active_worker_rows = {}
 
     try:
         stop_records = read_campaign_stop_conditions(out_dir)
@@ -549,6 +1141,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
     api_keys = set()
     semantic_groups = {}
+    semantic_root_groups = {}
+    api_rows_by_worker = {}
     for index, row in enumerate(api_rows, 1):
         sample = row.get("sample")
         method = row.get("method")
@@ -560,9 +1154,75 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             errors.append(f"unmappable API ledger row {index}")
         else:
             api_keys.add((sample, method, rt, direction))
+            call_kind = row.get("call_kind")
+            allowed_kinds = (
+                {"hybridpatch_primary", "hybridpatch_repair"}
+                if method == "hybridpatch" else {"fullrewrite_primary"}
+            )
+            if call_kind not in allowed_kinds:
+                errors.append(
+                    f"unexpected call_kind at API row {index}: {call_kind!r}"
+                )
+            if row.get("schema") != API_CALL_SCHEMA:
+                errors.append(f"API call schema mismatch at row {index}")
+            if row.get("transport_revision") != TRANSPORT_REVISION:
+                errors.append(f"transport revision mismatch at API row {index}")
+            if row.get("transport_resume_policy") != TRANSPORT_RESUME_POLICY:
+                errors.append(
+                    f"transport resume policy mismatch at API row {index}")
+            if row.get("max_response_slots") != 2:
+                errors.append(f"response-slot policy mismatch at API row {index}")
+            slots_used = row.get("response_slots_used")
+            if not _is_exact_int(slots_used) or not 0 <= slots_used <= 2:
+                errors.append(f"response-slot overrun at API row {index}")
+            if row.get("max_transient_failures") != 3:
+                errors.append(f"transient policy mismatch at API row {index}")
+            transient_used = row.get("transient_failure_count")
+            if (not _is_exact_int(transient_used)
+                    or not 0 <= transient_used <= 3):
+                errors.append(f"transient budget overrun at API row {index}")
+            semantic_call_id = row.get("semantic_call_id")
+            identity = _parse_semantic_call_id(semantic_call_id)
+            if (identity is None
+                    or identity["sample"] != sample
+                    or identity["method"] != method
+                    or identity["rt_index"] != rt
+                    or identity["direction"] != direction
+                    or identity["call_kind"] != call_kind
+                    or row.get("semantic_root_id")
+                    != identity["semantic_root_id"]
+                    or row.get("generation_index")
+                    != identity["generation_index"]
+                    or row.get("transport_recovery_index")
+                    != identity["generation_index"]
+                    or (identity["generation_index"] == 0
+                        and row.get("parent_semantic_call_id") is not None)
+                    or (identity["generation_index"] > 0
+                        and _parse_semantic_call_id(
+                            row.get("parent_semantic_call_id")) is None)):
+                errors.append(
+                    f"invalid exact semantic lineage at API row {index}")
+                identity = None
+            elif (not isinstance(row.get("request_fingerprint"), str)
+                  or not row.get("request_fingerprint")):
+                errors.append(
+                    f"missing request fingerprint at API row {index}")
+            if not isinstance(row.get("provider_called"), bool):
+                errors.append(f"invalid provider_called at API row {index}")
+            elif identity is not None:
+                semantic_groups.setdefault(semantic_call_id, []).append(
+                    (index, row)
+                )
+                semantic_root_groups.setdefault(
+                    identity["semantic_root_id"], []
+                ).append((index, row))
+
             if formal_manifest:
                 worker_id = row.get("worker_launch_id")
                 worker_pid = row.get("worker_pid")
+                if isinstance(worker_id, str) and worker_id:
+                    api_rows_by_worker.setdefault(worker_id, []).append(
+                        (index, row))
                 launch = launches_by_worker.get(worker_id)
                 authorization = authorizations_by_worker.get(worker_id)
                 worker_metadata = metadata_by_worker.get(worker_id) or []
@@ -585,100 +1245,448 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                     errors.append(
                         f"API worker provenance mismatch at row {index}"
                     )
-            call_kind = row.get("call_kind")
-            allowed_kinds = (
-                {"hybridpatch_primary", "hybridpatch_repair"}
-                if method == "hybridpatch" else {"fullrewrite_primary"}
-            )
-            if call_kind not in allowed_kinds:
+                if identity is not None:
+                    dispatch_resume = authorization.get(
+                        "transport_resume_authorization"
+                    ) if isinstance(authorization, dict) else None
+                    metadata_resume = (
+                        worker_metadata[0].get(
+                            "transport_resume_authorization")
+                        if len(worker_metadata) == 1 else None
+                    )
+                    resume_valid = True
+                    if dispatch_resume is None:
+                        if metadata_resume is not None:
+                            errors.append(
+                                f"recovery metadata without dispatch authorization "
+                                f"at API row {index}"
+                            )
+                            resume_valid = False
+                    else:
+                        try:
+                            _validate_resume_authorization(dispatch_resume)
+                        except RuntimeError:
+                            errors.append(
+                                f"invalid recovery authorization at API row {index}"
+                            )
+                            resume_valid = False
+                        else:
+                            if metadata_resume != _canonical_resume_authorization(
+                                    dispatch_resume):
+                                errors.append(
+                                    f"recovery metadata mismatch at API row {index}"
+                                )
+                                resume_valid = False
+                    if identity["generation_index"] > 0:
+                        if (not resume_valid or not isinstance(
+                                dispatch_resume, dict)
+                                or dispatch_resume.get("semantic_call_id")
+                                    != semantic_call_id
+                                or dispatch_resume.get(
+                                    "parent_semantic_call_id")
+                                    != row.get("parent_semantic_call_id")
+                                    or dispatch_resume.get("semantic_root_id")
+                                    != identity["semantic_root_id"]
+                                or dispatch_resume.get("generation_index")
+                                    != identity["generation_index"]
+                                or dispatch_resume.get("request_fingerprint")
+                                    != row.get("request_fingerprint")):
+                                errors.append(
+                                    f"API recovery authorization mismatch at row {index}"
+                                )
+
+    if formal_manifest:
+        # A recovery worker can legitimately replay earlier g000 journals
+        # before it reaches the authorized failed call (for example, replaying
+        # an uncommitted forward before recovering backward), and it continues
+        # with ordinary g000 calls after recovery.  The authorization therefore
+        # applies to exactly one row, not to every row produced by the worker.
+        # Before that exact row appears, only zero-POST journal replay is legal.
+        for worker_id, authorization in authorizations_by_worker.items():
+            resume = authorization.get("transport_resume_authorization")
+            if resume is None:
+                continue
+            try:
+                parent = _validate_resume_authorization(resume)
+            except RuntimeError:
                 errors.append(
-                    f"unexpected call_kind at API row {index}: {call_kind!r}"
+                    f"invalid worker recovery authorization: {worker_id}")
+                continue
+            worker_rows = api_rows_by_worker.get(worker_id) or []
+            exact_uses = [
+                (index, row) for index, row in worker_rows
+                if row.get("semantic_call_id") == resume["semantic_call_id"]
+            ]
+            if len(exact_uses) > 1:
+                errors.append(
+                    f"recovery authorization used more than once: {worker_id}"
                 )
-            if row.get("transport_revision") != "opencode_anthropic_sdk/3":
-                errors.append(f"transport revision mismatch at API row {index}")
-            if row.get("max_response_slots") != 2:
-                errors.append(f"response-slot policy mismatch at API row {index}")
-            slots_used = row.get("response_slots_used")
-            if not _is_exact_int(slots_used) or not 0 <= slots_used <= 2:
-                errors.append(f"response-slot overrun at API row {index}")
-            if row.get("max_transient_failures") != 3:
-                errors.append(f"transient policy mismatch at API row {index}")
-            transient_used = row.get("transient_failure_count")
-            if (not _is_exact_int(transient_used)
-                    or not 0 <= transient_used <= 3):
-                errors.append(f"transient budget overrun at API row {index}")
-            semantic_call_id = row.get("semantic_call_id")
-            if not isinstance(semantic_call_id, str) or not semantic_call_id:
-                errors.append(f"missing semantic_call_id at API row {index}")
-            elif not isinstance(row.get("provider_called"), bool):
-                errors.append(f"invalid provider_called at API row {index}")
-            else:
-                semantic_groups.setdefault(semantic_call_id, []).append(
-                    (index, row)
+            exact_index = exact_uses[0][0] if exact_uses else None
+            for index, row in worker_rows:
+                if exact_index is not None and index >= exact_index:
+                    break
+                if (row.get("provider_called") is not False
+                        or row.get("response_replayed") is not True
+                        or row.get("semantic_root_id")
+                        == resume["semantic_root_id"]):
+                    errors.append(
+                        "provider call preceded recovery authorization use at "
+                        f"API row {index}"
+                    )
+            worker_active = (
+                active_worker_rows.get(worker_id)
+                == {"sample": parent["sample"]}
+                and worker_id not in exits_by_worker
+            )
+            if not worker_active and len(exact_uses) != 1:
+                errors.append(
+                    f"recovery authorization was not consumed: {worker_id}"
                 )
+
+    attempt_rows = _read_jsonl(os.path.join(
+        out_dir, "api_attempt_ledger.jsonl"))
+    attempt_groups = {}
+    attempt_root_ids = set()
+    allowed_attempt_events = {
+        "semantic_request", "attempt_start", "generation_progress",
+        "attempt_end", "attempt_budget", "response_committed",
+        "call_failed",
+    }
+    for index, row in enumerate(attempt_rows, 1):
+        semantic_call_id = row.get("semantic_call_id")
+        identity = _parse_semantic_call_id(semantic_call_id)
+        event = row.get("event")
+        worker_id = row.get("worker_launch_id")
+        if row.get("schema") != API_ATTEMPT_SCHEMA:
+            errors.append(f"attempt schema mismatch at ledger row {index}")
+        if (identity is None
+                or identity["sample"] not in expected_samples
+                or identity["method"] not in expected_methods
+                or not 1 <= identity["rt_index"] <= target_rt
+                or identity["direction"] not in {"forward", "backward"}):
+            errors.append(f"unmappable attempt ledger row {index}")
+            continue
+        if (row.get("semantic_root_id") != identity["semantic_root_id"]
+                or row.get("generation_index")
+                != identity["generation_index"]
+                or (identity["generation_index"] == 0
+                    and row.get("parent_semantic_call_id") is not None)
+                or (identity["generation_index"] > 0
+                    and _parse_semantic_call_id(
+                        row.get("parent_semantic_call_id")) is None)):
+            errors.append(f"attempt lineage mismatch at ledger row {index}")
+        allowed_kinds = (
+            {"hybridpatch_primary", "hybridpatch_repair"}
+            if identity["method"] == "hybridpatch"
+            else {"fullrewrite_primary"}
+        )
+        if identity["call_kind"] not in allowed_kinds:
+            errors.append(f"invalid call kind at attempt ledger row {index}")
+        if event not in allowed_attempt_events:
+            errors.append(f"unknown attempt event at ledger row {index}")
+        launch = launches_by_worker.get(worker_id)
+        if (not isinstance(worker_id, str) or not worker_id
+                or not isinstance(launch, dict)
+                or launch.get("sample") != identity["sample"]):
+            errors.append(f"attempt worker provenance mismatch at row {index}")
+        attempt_index = row.get("attempt_index")
+        if event in {
+                "attempt_start", "generation_progress", "attempt_end",
+                "attempt_budget"} and (
+                not _is_exact_int(attempt_index) or attempt_index < 1):
+            errors.append(f"invalid attempt index at ledger row {index}")
+        if event == "attempt_start" and (
+                row.get("attempt_kind") not in {
+                    (
+                        "transport_initial"
+                        if identity["generation_index"] == 0
+                        else "transport_recovery_initial"
+                    ),
+                    (
+                        "transport_retry"
+                        if identity["generation_index"] == 0
+                        else "transport_recovery_retry"
+                    ),
+                }
+                or row.get("call_kind") != identity["call_kind"]):
+            errors.append(f"attempt kind/call kind mismatch at row {index}")
+        attempt_groups.setdefault(semantic_call_id, []).append((index, row))
+        attempt_root_ids.add(identity["semantic_root_id"])
+
+    for semantic_call_id, group in attempt_groups.items():
+        identity = _parse_semantic_call_id(semantic_call_id) or {}
+        if (semantic_call_id not in semantic_groups
+                and identity.get("sample") not in active_samples):
+            errors.append(
+                f"attempt ledger has no mapped API call: {semantic_call_id}")
+
+    validated_attempt_lineages = {}
+    for semantic_root_id in sorted(attempt_root_ids):
+        try:
+            root_rows = [
+                row for row in attempt_rows
+                if row.get("semantic_root_id") == semantic_root_id
+            ]
+            root_identity = _parse_semantic_call_id(
+                (root_rows[-1] if root_rows else {}).get("semantic_call_id")
+            ) or {}
+            tail_worker = (
+                root_rows[-1].get("worker_launch_id") if root_rows else None
+            )
+            allow_open_attempt = bool(
+                root_identity.get("sample") in active_samples
+                and active_worker_rows.get(tail_worker)
+                == {"sample": root_identity.get("sample")}
+                and tail_worker not in exits_by_worker
+            )
+            validated_attempt_lineages[semantic_root_id] = (
+                _validated_attempt_lineage(
+                    attempt_rows, semantic_root_id,
+                    allow_open_attempt=allow_open_attempt,
+                )
+            )
+        except RuntimeError as exc:
+            errors.append(
+                f"invalid attempt lineage {semantic_root_id}: {exc}"
+            )
 
     calls_by_step = {}
     provider_call_rows = 0
-    for semantic_call_id, group in semantic_groups.items():
+    for semantic_root_id, root_group in semantic_root_groups.items():
         signatures = {
             (
                 row.get("sample"), row.get("method"), row.get("rt_index"),
                 row.get("direction"), row.get("call_kind"),
             )
-            for _index, row in group
+            for _index, row in root_group
         }
         if len(signatures) != 1:
             errors.append(
-                f"semantic-call identity drift: {semantic_call_id}"
+                f"semantic-root identity drift: {semantic_root_id}"
             )
             continue
         sample, method, rt, direction, call_kind = next(iter(signatures))
         step = (sample, method, rt, direction)
         calls_by_step.setdefault(step, []).append(
-            (call_kind, semantic_call_id)
+            (call_kind, semantic_root_id)
         )
-        provider_rows = [
-            (index, row) for index, row in group
-            if row.get("provider_called") is True
-        ]
-        replay_rows = [
-            (index, row) for index, row in group
-            if row.get("provider_called") is False
-        ]
-        provider_call_rows += len(provider_rows)
-        if len(provider_rows) > 1:
+        lineage = validated_attempt_lineages.get(semantic_root_id)
+        if lineage is None:
             errors.append(
-                f"duplicate provider POST for semantic call: {semantic_call_id}"
+                f"semantic root has no valid attempt lineage: {semantic_root_id}"
             )
-        for index, row in provider_rows:
-            if row.get("response_replayed") or row.get("replayed_from_call_id"):
-                errors.append(
-                    f"provider row has replay markers at API row {index}"
-                )
-        if replay_rows:
-            digest = hashlib.sha256(
-                semantic_call_id.encode("utf-8")
-            ).hexdigest()[:24]
-            journal_path = os.path.join(
-                out_dir, "api_journal", f"{digest}.response.json"
+            continue
+        root_fingerprints = {
+            row.get("request_fingerprint") for _index, row in root_group
+        }
+        if root_fingerprints != {lineage["request_fingerprint"]}:
+            errors.append(
+                f"provider request fingerprint drift: {semantic_root_id}"
             )
-            journal = _read_json(journal_path) if os.path.isfile(
-                journal_path) else None
-            if (not isinstance(journal, dict)
-                    or journal.get("semantic_call_id") != semantic_call_id
-                    or not isinstance(journal.get("call_id"), str)
-                    or not journal.get("call_id")):
+
+        root_exact_ids = sorted({
+            row.get("semantic_call_id") for _index, row in root_group
+        })
+        for semantic_call_id in root_exact_ids:
+            group = semantic_groups.get(semantic_call_id) or []
+            identity = _parse_semantic_call_id(semantic_call_id) or {}
+            generation_index = identity.get("generation_index")
+            generation = (lineage.get("generations") or {}).get(
+                generation_index
+            )
+            if generation is None:
                 errors.append(
-                    f"missing/mismatched response journal: {semantic_call_id}"
+                    f"API generation has no attempt lineage: {semantic_call_id}"
                 )
-            else:
-                journal_call_id = journal["call_id"]
-                for index, row in replay_rows:
-                    if (not row.get("response_replayed")
-                            or row.get("replayed_from_call_id") != journal_call_id):
+                continue
+            provider_rows = [
+                (index, row) for index, row in group
+                if row.get("provider_called") is True
+            ]
+            replay_rows = [
+                (index, row) for index, row in group
+                if row.get("provider_called") is False
+                and row.get("response_replayed") is True
+            ]
+            non_provider_failures = [
+                (index, row) for index, row in group
+                if row.get("provider_called") is False
+                and row.get("response_replayed") is not True
+            ]
+            provider_call_rows += len(provider_rows)
+            if len(provider_rows) > 1:
+                errors.append(
+                    f"duplicate provider semantic generation: {semantic_call_id}"
+                )
+            if (generation_index < max(lineage["generations"])
+                    and (len(provider_rows) != 1
+                         or provider_rows[0][1].get("classification")
+                         != "provider/API failure"
+                         or provider_rows[0][1].get(
+                             "count_as_method_failure") is not False)):
+                errors.append(
+                    "non-terminal recovery generation is not "
+                    f"infrastructure-only: {semantic_call_id}"
+                )
+            if non_provider_failures:
+                errors.append(
+                    f"non-provider semantic failure row: {semantic_call_id}"
+                )
+            for index, row in provider_rows:
+                if row.get("response_replayed") or row.get(
+                        "replayed_from_call_id"):
+                    errors.append(
+                        f"provider row has replay markers at API row {index}"
+                    )
+                event_name = (
+                    "call_failed"
+                    if row.get("classification") == "provider/API failure"
+                    else "response_committed"
+                )
+                matching_events = [
+                    attempt for _attempt_index, attempt
+                    in attempt_groups.get(semantic_call_id, [])
+                    if attempt.get("event") == event_name
+                    and attempt.get("call_id") == row.get("request_id")
+                    and attempt.get("request_fingerprint")
+                    == row.get("request_fingerprint")
+                    and attempt.get("generation_index") == generation_index
+                    and attempt.get("parent_semantic_call_id")
+                    == row.get("parent_semantic_call_id")
+                ]
+                if len(matching_events) != 1:
+                    errors.append(
+                        f"API/attempt terminal evidence mismatch at row {index}"
+                    )
+                if (row.get("response_slots_used")
+                        != generation["state"].get("response_slots_used")
+                        or row.get("transient_failure_count")
+                        != generation["state"].get(
+                            "transient_failure_count")
+                        or row.get("http_attempts_used")
+                        != generation["state"].get("http_attempts_used")):
+                    errors.append(
+                        f"API/attempt budget mismatch at row {index}"
+                    )
+                if generation_index > 0 and formal_manifest:
+                    authorization = authorizations_by_worker.get(
+                        row.get("worker_launch_id"), {}
+                    ).get("transport_resume_authorization")
+                    starts = [
+                        attempt.get("attempt_index")
+                        for attempt in generation["records"]
+                        if attempt.get("event") == "attempt_start"
+                    ]
+                    if (not starts or not isinstance(authorization, dict)
+                            or authorization.get("next_attempt_index")
+                            != min(starts)):
                         errors.append(
-                            f"invalid response replay chain at API row {index}"
+                            f"API recovery next-attempt mismatch at row {index}"
                         )
+                    parent_rows = semantic_groups.get(
+                        generation["parent_semantic_call_id"], []
+                    )
+                    parent_failures = [
+                        parent_row for _parent_index, parent_row in parent_rows
+                        if parent_row.get("provider_called") is True
+                        and parent_row.get("classification")
+                        == "provider/API failure"
+                    ]
+                    if (len(parent_failures) != 1
+                            or not isinstance(authorization, dict)
+                            or authorization.get("prior_worker_launch_id")
+                            != parent_failures[0].get("worker_launch_id")
+                            or authorization.get("prior_invocation_id")
+                            not in {
+                                metadata_row.get("invocation_id")
+                                for metadata_row in metadata_by_worker.get(
+                                    parent_failures[0].get(
+                                        "worker_launch_id"), []
+                                )
+                                if metadata_row.get("status")
+                                == "infrastructure_incomplete"
+                            }):
+                        errors.append(
+                            f"API recovery parent provenance mismatch at row {index}"
+                        )
+            if generation["state"].get("response_committed") or replay_rows:
+                digest = hashlib.sha256(
+                    semantic_call_id.encode("utf-8")
+                ).hexdigest()[:24]
+                journal_path = os.path.join(
+                    out_dir, "api_journal", f"{digest}.response.json"
+                )
+                journal = _read_json(journal_path) if os.path.isfile(
+                    journal_path) else None
+                result = (
+                    journal.get("result")
+                    if isinstance(journal, dict) else None
+                )
+                committed_events = [
+                    attempt for _attempt_index, attempt
+                    in attempt_groups.get(semantic_call_id, [])
+                    if attempt.get("event") == "response_committed"
+                ]
+                if (not isinstance(journal, dict)
+                        or journal.get("schema")
+                        != API_RESPONSE_JOURNAL_SCHEMA
+                        or journal.get("semantic_call_id") != semantic_call_id
+                        or journal.get("semantic_root_id") != semantic_root_id
+                        or journal.get("generation_index") != generation_index
+                        or journal.get("parent_semantic_call_id")
+                        != generation["parent_semantic_call_id"]
+                        or not isinstance(journal.get("call_id"), str)
+                        or not journal.get("call_id")
+                        or journal.get("request_fingerprint")
+                        != lineage["request_fingerprint"]
+                        or len(committed_events) != 1
+                        or journal.get("call_id")
+                        != committed_events[0].get("call_id")
+                        or not isinstance(result, dict)
+                        or result.get("semantic_call_id")
+                        != semantic_call_id
+                        or result.get("semantic_root_id")
+                        != semantic_root_id
+                        or result.get("generation_index")
+                        != generation_index
+                        or result.get("parent_semantic_call_id")
+                        != generation["parent_semantic_call_id"]
+                        or result.get("transport_revision")
+                        != TRANSPORT_REVISION
+                        or result.get("transport_resume_policy")
+                        != TRANSPORT_RESUME_POLICY
+                        or result.get("call_kind")
+                        != identity.get("call_kind")
+                        or result.get("stream_complete") is not True
+                        or not isinstance(result.get("stop_reason"), str)
+                        or not result.get("stop_reason").strip()
+                        or not isinstance(result.get("message"), str)
+                        or result.get("input_tokens") is None
+                        or result.get("output_tokens") is None
+                        or result.get("max_response_slots") != 2
+                        or result.get("max_transient_failures") != 3
+                        or result.get("response_slots_used")
+                        != generation["state"].get("response_slots_used")
+                        or result.get("transient_failure_count")
+                        != generation["state"].get(
+                            "transient_failure_count")
+                        or result.get("http_attempts_used")
+                        != generation["state"].get("http_attempts_used")
+                        or len(provider_rows) != 1
+                        or provider_rows[0][1].get("request_id")
+                        != journal.get("call_id")):
+                    errors.append(
+                        f"missing/mismatched response journal: {semantic_call_id}"
+                    )
+                else:
+                    journal_call_id = journal["call_id"]
+                    for index, row in replay_rows:
+                        if (not row.get("response_replayed")
+                                or row.get("replayed_from_call_id")
+                                != journal_call_id):
+                            errors.append(
+                                f"invalid response replay chain at API row {index}"
+                            )
 
     for step, semantic_calls in calls_by_step.items():
         method = step[1]
@@ -837,6 +1845,12 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     if preservation:
         errors.append(f"preservation_violations={preservation}")
 
+    try:
+        latest_outcomes = _latest_sample_outcomes(
+            out_dir, expected_samples)
+    except RuntimeError as exc:
+        latest_outcomes = {}
+        errors.append(str(exc))
     latest_by_sample = {}
     for record in metadata:
         for sample in record.get("samples") or []:
@@ -854,6 +1868,14 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         if (registered_plan != expected_registration
                 and sample not in active_samples):
             errors.append(f"run_metadata task-plan mismatch: {sample}")
+        outcome = latest_outcomes.get(sample)
+        if (record.get("status") in {
+                "finished", "infrastructure_incomplete"}
+                and (not isinstance(outcome, dict)
+                     or outcome.get("status") != record.get("status")
+                     or outcome.get("invocation_id")
+                     != record.get("invocation_id"))):
+            errors.append(f"sample outcome/run metadata mismatch: {sample}")
     if completion_samples:
         missing_metadata = completion_samples - set(latest_by_sample)
         if missing_metadata:
@@ -939,6 +1961,7 @@ def _campaign_evidence_digest(out_dir, manifest):
             "dispatch_manifest.json", "api_calls.jsonl",
             "api_attempt_ledger.jsonl", "run_metadata.jsonl",
             "dispatch_log.jsonl",
+            "sample_outcomes.jsonl",
         )
     }
     for plan in (manifest.get("task_plans") or {}).values():
@@ -993,7 +2016,8 @@ def evaluate_smoke_cost_gate(smoke_dir, main_out_dir):
             "distractor": True,
             "opencode_transport": "anthropic_sdk_v2",
             "minimax_transport": "opencode",
-            "transport_revision": "opencode_anthropic_sdk/3",
+            "transport_revision": TRANSPORT_REVISION,
+            "transport_resume_policy": TRANSPORT_RESUME_POLICY,
             "stop_on_preservation_violation": True,
         }
         if any(config.get(key) != value
@@ -1119,21 +2143,24 @@ def _terminate_workers(running):
         raise RuntimeError("; ".join(errors))
 
 
-def _append_worker_exit(sample, item, returncode, dispatch_log):
+def _append_worker_exit(sample, item, returncode, dispatch_log, *,
+                        disposition=None, evidence=None):
     if item.get("exit_recorded"):
         return
-    append_jsonl_locked(
-        dispatch_log,
-        {
-            "event": "worker_exit", "sample": sample,
-            "key_label": item["key_label"],
-            "worker_launch_id": item["worker_launch_id"],
-            "pid": item["process"].pid,
-            "returncode": returncode,
-            "created_at": datetime.now().astimezone().isoformat(
-                timespec="seconds"),
-        },
-    )
+    record = {
+        "event": "worker_exit", "sample": sample,
+        "key_label": item["key_label"],
+        "worker_launch_id": item["worker_launch_id"],
+        "pid": item["process"].pid,
+        "returncode": returncode,
+        "disposition": disposition or (
+            "finished" if returncode == 0 else "campaign_fatal"),
+        "created_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+    }
+    if evidence is not None:
+        record["evidence"] = evidence
+    append_jsonl_locked(dispatch_log, record)
     item["exit_recorded"] = True
 
 
@@ -1165,25 +2192,46 @@ def _stop_and_reconcile_workers(out_dir, running, dispatch_log=None):
                         f"{sample}: {exc}"
                     )
     try:
-        result["closed_invocations"] = interrupt_running_invocations(
-            out_dir,
-            status="interrupted_by_dispatcher",
-            worker_launch_ids={
-                item["worker_launch_id"] for item in running.values()
-            },
+        audited = _audit_running_invocation_provenance(out_dir)
+        result["audited_invocations"] = audited
+        result["closed_invocations"] = (
+            interrupt_audited_running_invocations(
+                out_dir,
+                status="interrupted_by_dispatcher",
+                audited=audited,
+            )
         )
     except BaseException as exc:
         result["metadata_error"] = str(exc)
     return result
 
 
-def _record_worker_exit(running, sample, item, returncode, dispatch_log):
-    """Keep failed workers in ``running`` until metadata reconciliation."""
+def _record_worker_exit(out_dir, running, sample, item, returncode,
+                        dispatch_log):
+    """Remove a finished or strictly evidenced infrastructure-only worker."""
     item["log"].close()
-    _append_worker_exit(sample, item, returncode, dispatch_log)
-    if returncode != 0:
-        raise RuntimeError(f"worker {sample} exited with {returncode}")
+    if returncode == 0:
+        _append_worker_exit(
+            sample, item, returncode, dispatch_log,
+            disposition="finished")
+        del running[sample]
+        return "finished"
+    try:
+        evidence = _verified_infrastructure_incomplete(
+            out_dir, sample, item)
+    except BaseException as exc:
+        _append_worker_exit(
+            sample, item, returncode, dispatch_log,
+            disposition="campaign_fatal",
+            evidence={"verification_error": str(exc)},
+        )
+        raise RuntimeError(
+            f"worker {sample} exited with {returncode}: {exc}") from exc
+    _append_worker_exit(
+        sample, item, returncode, dispatch_log,
+        disposition="infrastructure_incomplete", evidence=evidence)
     del running[sample]
+    return "infrastructure_incomplete"
 
 
 def _launch_under_lease(args, out_dir):
@@ -1226,9 +2274,17 @@ def _launch_under_lease(args, out_dir):
             flush=True,
         )
     if args.dry_run:
+        dry_assignments, _dry_authorizations = (
+            _select_invocation_assignments(
+                out_dir, assignments, resume=args.resume,
+                target_round_trips=args.num_round_trips)
+        )
+        dry_active = {item["sample"] for item in dry_assignments}
+        dry_complete = set(args.samples) - dry_active
         dry_inspection = inspect_campaign(
             out_dir, inspection_manifest,
-            active_samples=set(args.samples),
+            active_samples=dry_active,
+            required_complete_samples=dry_complete,
         )
         if dry_inspection["errors"]:
             raise RuntimeError(
@@ -1241,18 +2297,16 @@ def _launch_under_lease(args, out_dir):
     os.makedirs(dispatch_logs, exist_ok=True)
     dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
     running = {}
+    launch_assignments = list(assignments)
+    resume_authorizations = {}
+    incomplete_samples = set()
+    completed_samples = set()
     try:
-        _write_active_worker_set(out_dir, inspection_manifest, [])
+        # Never revoke a prior worker's authorization before proving its
+        # process lease is free. A live orphan must remain globally visible
+        # and block resume rather than being converted into authorization
+        # drift by the new dispatcher.
         _assert_worker_leases_free(out_dir, args.samples)
-        preflight = inspect_campaign(
-            out_dir, inspection_manifest,
-            active_samples=set(args.samples),
-        )
-        if preflight["errors"]:
-            raise RuntimeError(
-                "campaign preflight failed before worker launch: "
-                + "; ".join(preflight["errors"])
-            )
         existing_metadata = read_run_metadata_snapshot(out_dir)
         if existing_metadata and not args.resume:
             raise RuntimeError(
@@ -1295,6 +2349,26 @@ def _launch_under_lease(args, out_dir):
                         "reason": args.resume_reason,
                     },
                 )
+        _write_active_worker_set(out_dir, inspection_manifest, [])
+        preflight = inspect_campaign(
+            out_dir, inspection_manifest,
+            active_samples=set(args.samples),
+        )
+        if preflight["errors"]:
+            raise RuntimeError(
+                "campaign preflight failed before worker launch: "
+                + "; ".join(preflight["errors"])
+            )
+        launch_assignments, resume_authorizations = (
+            _select_invocation_assignments(
+                out_dir, assignments, resume=args.resume,
+                target_round_trips=args.num_round_trips)
+        )
+        completed_samples = {
+            item["sample"] for item in assignments
+            if item not in launch_assignments
+        }
+        if args.resume:
             append_jsonl_locked(
                 dispatch_log,
                 {
@@ -1305,11 +2379,15 @@ def _launch_under_lease(args, out_dir):
                     ),
                     "audited_stale_invocations": audited_stale,
                     "closed_stale_invocations": stale,
-                    "assignments": assignments,
+                    "launch_samples": [
+                        item["sample"] for item in launch_assignments
+                    ],
+                    "skipped_finished_samples": sorted(completed_samples),
+                    "transport_authorizations": resume_authorizations,
                 },
             )
         launch_specs = {}
-        for item in assignments:
+        for item in launch_assignments:
             sample = item["sample"]
             worker_id = f"paired-{sample}-{uuid.uuid4().hex[:12]}"
             ready_path, ack_path = _worker_barrier_paths(
@@ -1322,7 +2400,7 @@ def _launch_under_lease(args, out_dir):
             }
         _write_active_worker_set(
             out_dir, inspection_manifest, launch_specs.values())
-        for item in assignments:
+        for item in launch_assignments:
             sample = item["sample"]
             label = item["key_label"]
             launch_spec = launch_specs[sample]
@@ -1369,6 +2447,29 @@ def _launch_under_lease(args, out_dir):
                     os.path.join(out_dir, task_plans[sample]["path"])
                 ),
             )
+            environment.pop(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID", None)
+            environment.pop(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX", None)
+            environment.pop(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT", None)
+            environment.pop(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX", None)
+            authorization = resume_authorizations.get(sample)
+            if authorization is not None:
+                _validate_resume_authorization(authorization)
+                environment[
+                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID"
+                ] = authorization["parent_semantic_call_id"]
+                environment[
+                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX"
+                ] = str(authorization["generation_index"])
+                environment[
+                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT"
+                ] = authorization["request_fingerprint"]
+                environment[
+                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX"
+                ] = str(authorization["next_attempt_index"])
             append_jsonl_locked(
                 dispatch_log,
                 {
@@ -1385,9 +2486,13 @@ def _launch_under_lease(args, out_dir):
                 stdout=log_handle, stderr=subprocess.STDOUT,
             )
             running[sample] = {
+                "sample": sample,
                 "process": process,
                 "log": log_handle,
                 "key_label": label,
+                "methods": list(item["methods"]),
+                "target_round_trips": args.num_round_trips,
+                "resume_authorization": authorization,
                 "worker_launch_id": worker_id,
                 "ready_path": ready_path,
                 "ack_path": ack_path,
@@ -1403,10 +2508,11 @@ def _launch_under_lease(args, out_dir):
                 },
             )
 
-        _authorize_workers(
-            out_dir, running, task_plans, dispatch_log,
-            args.start_timeout,
-        )
+        if running:
+            _authorize_workers(
+                out_dir, running, task_plans, dispatch_log,
+                args.start_timeout,
+            )
         last_report = 0.0
         while running:
             time.sleep(args.poll_interval)
@@ -1420,8 +2526,15 @@ def _launch_under_lease(args, out_dir):
                 returncode = item["process"].poll()
                 if returncode is None:
                     continue
-                _record_worker_exit(
-                    running, sample, item, returncode, dispatch_log)
+                disposition = _record_worker_exit(
+                    out_dir, running, sample, item, returncode,
+                    dispatch_log)
+                _write_active_worker_set(
+                    out_dir, inspection_manifest, running.values())
+                if disposition == "infrastructure_incomplete":
+                    incomplete_samples.add(sample)
+                    continue
+                completed_samples.add(sample)
                 sample_inspection = inspect_campaign(
                     out_dir, inspection_manifest,
                     active_samples=set(running),
@@ -1440,6 +2553,29 @@ def _launch_under_lease(args, out_dir):
                 last_report = time.time()
 
         _write_active_worker_set(out_dir, inspection_manifest, [])
+        if incomplete_samples:
+            inspection = inspect_campaign(
+                out_dir, inspection_manifest,
+                required_complete_samples=completed_samples)
+            if inspection["errors"]:
+                raise RuntimeError("; ".join(inspection["errors"]))
+            append_jsonl_locked(
+                dispatch_log,
+                {
+                    "event": "campaign_incomplete",
+                    "infrastructure_incomplete_samples": sorted(
+                        incomplete_samples),
+                    "completed_samples": sorted(completed_samples),
+                    "api_calls": inspection["api_calls"],
+                    "preservation_violations": 0,
+                },
+            )
+            print(
+                "RESULT INCOMPLETE infrastructure_samples="
+                + ",".join(sorted(incomplete_samples)),
+                file=sys.stderr, flush=True,
+            )
+            return 2
         inspection = inspect_campaign(
             out_dir, inspection_manifest, require_complete=True)
         if inspection["errors"]:
@@ -1460,11 +2596,30 @@ def _launch_under_lease(args, out_dir):
         return 0
     except BaseException as exc:
         try:
-            _write_active_worker_set(out_dir, inspection_manifest, [])
+            record_campaign_stop_condition(
+                out_dir, "dispatcher_integrity_failure",
+                error_type=type(exc).__name__, error=str(exc),
+            )
         except BaseException:
             pass
         reconciliation = _stop_and_reconcile_workers(
             out_dir, running, dispatch_log)
+        safe_to_revoke = (
+            reconciliation.get("lease_error") is None
+            and reconciliation.get("metadata_error") is None
+            and not reconciliation.get("exit_record_errors")
+        )
+        if safe_to_revoke:
+            try:
+                _write_active_worker_set(out_dir, inspection_manifest, [])
+            except BaseException as active_error:
+                reconciliation["active_set_error"] = str(active_error)
+        else:
+            # A worker that still owns its sample lease must retain its active
+            # authorization until an audited later reconciliation proves it
+            # stopped.  Revoking it here would create artificial provenance
+            # drift while an in-flight call is still unwinding.
+            reconciliation["active_set_retained"] = sorted(running)
         append_jsonl_locked(
             dispatch_log,
             {

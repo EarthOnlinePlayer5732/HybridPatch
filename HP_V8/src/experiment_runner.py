@@ -42,8 +42,10 @@ from run_meta import (RunLogger, dump_step_docs, append_run_metadata,
                       ApiCallRecorder, record_model_content_anomaly,
                       append_relay_rows_and_checkpoint, write_json_atomic,
                       enforce_active_worker_authorization,
+                      enforce_campaign_runtime_guards,
                       read_campaign_stop_conditions,
-                      record_campaign_stop_condition)
+                      record_campaign_stop_condition,
+                      record_sample_outcome)
 from hybrid_prompt import (build_hybrid_prompt, build_hybrid_repair_prompt,
                            classify_operation_family, extract_hybrid_json)
 from hybrid_executor import apply_hybrid
@@ -139,6 +141,17 @@ def _record_preservation_stop(out_dir, method, sample_id, rt_num,
     return True
 
 
+def _enforce_post_call_campaign_guard(out_dir, sample_id):
+    """Prevent an in-flight response from committing after a global stop.
+
+    The provider call has its own pre-call guard, but a sibling can set the
+    durable latch while that call is in flight.  Recheck both the latch and
+    active-worker authorization before local evaluation; the final relay
+    commit repeats the latch check under the campaign metadata lock.
+    """
+    enforce_campaign_runtime_guards(out_dir, sample_id)
+
+
 def _require_formal_dispatch_environment(out_dir, samples):
     """Prevent an unleased standalone runner from joining a paired campaign."""
     manifest_path = os.path.join(
@@ -195,6 +208,12 @@ def _read_committed_rounds(jsonl_path):
     return by_rt, complete, duplicates, partial
 
 
+def _tuple_tree(value):
+    if isinstance(value, list):
+        return tuple(_tuple_tree(item) for item in value)
+    return value
+
+
 def _reconcile_checkpoint_from_jsonl(jsonl_path, ckpt_path, start_rt, current_context,
                                      rid_chain, state_chain, id2state, initial_state,
                                      distractor, include_distractor, log):
@@ -240,7 +259,8 @@ def _reconcile_checkpoint_from_jsonl(jsonl_path, ckpt_path, start_rt, current_co
         state_chain = list(bwd.get("state_chain") or state_chain)
 
     ckpt = {"completed_round_trips": complete, "current_context": current_context,
-            "rid_chain": rid_chain, "state_chain": state_chain}
+            "rid_chain": rid_chain, "state_chain": state_chain,
+            "context_shuffle_random_state": random.getstate()}
     write_json_atomic(ckpt_path, ckpt)
     return complete, current_context, rid_chain, state_chain
 
@@ -462,10 +482,15 @@ def _has_hybrid_protocol_signal(raw):
     """
     text = "" if raw is None else str(raw)
     lowered = text.lower()
-    return any(marker in lowered for marker in (
-        "```json", '"protocol"', '"protocol_rev"', '"ops"',
-        '"operation"', "[file bodies]", "<anchorpatch", "{",
-    ))
+    return (
+        any(marker in lowered for marker in (
+            "hybridpatch/", '"protocol_rev"', "[file bodies]", "<anchorpatch",
+        ))
+        or re.search(
+            r'"route"\s*:\s*"(?:local_patch|bulk_patch|dsl_rules|bounded_rewrite)"',
+            lowered,
+        ) is not None
+    )
 
 
 def _attempt_hybrid_repair(errors, model=None, max_tokens=None, generate_fn=None,
@@ -850,11 +875,14 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
 
     # init / resume
     if os.path.exists(ckpt_path):
-        ck = json.load(open(ckpt_path, encoding="utf-8"))
+        with open(ckpt_path, encoding="utf-8") as ckpt_file:
+            ck = json.load(ckpt_file)
         start_rt = ck["completed_round_trips"]
         current_context = ck["current_context"]
         rid_chain = ck["rid_chain"]
         state_chain = ck["state_chain"]
+        if ck.get("context_shuffle_random_state") is not None:
+            random.setstate(_tuple_tree(ck["context_shuffle_random_state"]))
         if ck.get("stopped_early"):
             log.line(f"[{method}/{sample_id}] already stopped early at RT{start_rt} "
                      f"({ck.get('stop_reason')}) — nothing to resume")
@@ -892,6 +920,11 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
         except Exception as e:
             if api_recorder and not getattr(e, "_anchorpatch_api_recorded", False):
                 api_recorder.record_runner_exception(e)
+            log.close()
+            raise
+        try:
+            _enforce_post_call_campaign_guard(out_dir, sample_id)
+        except Exception:
             log.close()
             raise
         fwd_changed = (gen_real != in_real)
@@ -937,6 +970,11 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
                 api_recorder.record_runner_exception(e)
             log.close()
             raise
+        try:
+            _enforce_post_call_campaign_guard(out_dir, sample_id)
+        except Exception:
+            log.close()
+            raise
         bwd_changed = (gen_real != in_real)
         with log.capture("eval"):
             evaluation = _evaluate(domain, sample_id, gen_real, initial_state, list(initial_state["context"]))
@@ -971,12 +1009,28 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
                      or (bwd_rs is not None and bwd_rs <= 1e-9))
 
         # ----- atomic commit: both rows + checkpoint -----
+        # Repeat immutable identity checks after evaluation and immediately
+        # before the latch-ordered commit.  This catches Git/task-plan drift
+        # that appeared while either provider call was in flight.
+        try:
+            enforce_campaign_runtime_guards(out_dir, sample_id)
+        except Exception:
+            log.close()
+            raise
         ckpt = {"completed_round_trips": rt_num, "current_context": current_context,
-                "rid_chain": rid_chain, "state_chain": state_chain}
+                "rid_chain": rid_chain, "state_chain": state_chain,
+                "context_shuffle_random_state": random.getstate()}
         if stop_on_collapse and collapsed:
             ckpt["stopped_early"] = True
             ckpt["stop_reason"] = f"backward_RS_collapsed_to_0_at_RT{rt_num}"
-        commit = append_relay_rows_and_checkpoint(jsonl_path, ckpt_path, pending_rows, ckpt)
+        try:
+            commit = append_relay_rows_and_checkpoint(
+                jsonl_path, ckpt_path, pending_rows, ckpt,
+                campaign_out_dir=out_dir,
+            )
+        except Exception:
+            log.close()
+            raise
         if commit.get("status") != "appended":
             log.line(f"[{method}/{sample_id}] duplicate committed row keys detected at RT{rt_num}: "
                      f"{commit.get('overlap_keys')} — stopping duplicate runner without appending")
@@ -1026,6 +1080,29 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
 
     log.close()
     return jsonl_path
+
+
+def _sample_checkpoint_progress(out_dir, sample_id, methods):
+    progress = {}
+    for method in methods:
+        ckpt_path = os.path.join(out_dir, method, f"{sample_id}.ckpt.json")
+        result_path = os.path.join(out_dir, method, f"{sample_id}.jsonl")
+        completed = 0
+        if os.path.isfile(ckpt_path):
+            with open(ckpt_path, encoding="utf-8") as handle:
+                checkpoint = json.load(handle)
+            value = checkpoint.get("completed_round_trips")
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                completed = value
+        committed_rows = 0
+        if os.path.isfile(result_path):
+            with open(result_path, encoding="utf-8") as handle:
+                committed_rows = sum(1 for line in handle if line.strip())
+        progress[method] = {
+            "completed_round_trips": completed,
+            "committed_rows": committed_rows,
+        }
+    return progress
 
 
 def main():
@@ -1098,6 +1175,56 @@ def main():
                     ),
                 )
         finish_status = "finished"
+        if len(args.sample) == 1:
+            record_sample_outcome(
+                args.out_dir, args.sample[0], "finished",
+                invocation_id=run_metadata["invocation_id"],
+                methods=list(args.methods),
+                checkpoint_progress=_sample_checkpoint_progress(
+                    args.out_dir, args.sample[0], args.methods),
+            )
+    except Exception as exc:
+        if (getattr(exc, "_anchorpatch_failure_class", None)
+                == "infrastructure_incomplete" and len(args.sample) == 1):
+            finish_status = "infrastructure_incomplete"
+            api_record = getattr(exc, "_anchorpatch_api_record", None) or {}
+            record_sample_outcome(
+                args.out_dir, args.sample[0], "infrastructure_incomplete",
+                invocation_id=run_metadata["invocation_id"],
+                methods=list(args.methods),
+                method=api_record.get("method"),
+                rt_index=api_record.get("rt_index"),
+                direction=api_record.get("direction"),
+                call_kind=api_record.get("call_kind"),
+                semantic_root_id=api_record.get("semantic_root_id"),
+                semantic_call_id=api_record.get("semantic_call_id"),
+                generation_index=api_record.get("generation_index"),
+                parent_semantic_call_id=api_record.get(
+                    "parent_semantic_call_id"),
+                request_fingerprint=api_record.get("request_fingerprint"),
+                request_id=api_record.get("request_id"),
+                error_type=api_record.get("error_type"),
+                classification=api_record.get("classification"),
+                response_slots_used=api_record.get("response_slots_used"),
+                transient_failure_count=api_record.get(
+                    "transient_failure_count"),
+                http_attempts_used=api_record.get("http_attempts_used"),
+                next_attempt_index=(
+                    api_record.get("http_attempts_used") + 1
+                    if isinstance(api_record.get("http_attempts_used"), int)
+                    else None
+                ),
+                transport_recovery_index=api_record.get(
+                    "transport_recovery_index"),
+                checkpoint_progress=_sample_checkpoint_progress(
+                    args.out_dir, args.sample[0], args.methods),
+                evidence={
+                    "api_calls": "api_calls.jsonl",
+                    "attempt_ledger": "api_attempt_ledger.jsonl",
+                    "run_metadata": "run_metadata.jsonl",
+                },
+            )
+        raise
     finally:
         finish_run_metadata(
             args.out_dir, run_metadata["invocation_id"], status=finish_status)

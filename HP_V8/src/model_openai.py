@@ -36,7 +36,8 @@ _MINIMAX_MAX_RESPONSE_SLOTS = 2
 _MINIMAX_MAX_TRANSIENT_FAILURES = 3
 _OPENCODE_TRANSPORT_SDK = "anthropic_sdk_v2"
 _OPENCODE_TRANSPORT_LEGACY = "urllib_v1"
-_OPENCODE_TRANSPORT_REVISION = "opencode_anthropic_sdk/3"
+_OPENCODE_TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
+_OPENCODE_TRANSPORT_RESUME_POLICY = "exact_payload_new_semantic_call/1"
 # MiniMax official OpenAI-compatible endpoint (docs/Minimax_OPENAI.md), selected
 # ONLY via MINIMAX_TRANSPORT=official_nonstream. Own transport revision with
 # baseline-aligned semantics: blocking non-streaming create(), blanket-exception
@@ -226,6 +227,7 @@ def minimax_runtime_config(max_tokens=None, thinking_mode="adaptive"):
             "max_response_slots": None,
             "max_response_retries": None,
             "max_transient_failures": None,
+            "transport_resume_policy": None,
         }
     sdk_version = getattr(anthropic, "__version__", None) if anthropic else None
     transport = _opencode_transport()
@@ -244,6 +246,7 @@ def minimax_runtime_config(max_tokens=None, thinking_mode="adaptive"):
         "max_response_slots": _MINIMAX_MAX_RESPONSE_SLOTS,
         "max_response_retries": _MINIMAX_MAX_RESPONSE_SLOTS - 1,
         "max_transient_failures": _MINIMAX_MAX_TRANSIENT_FAILURES,
+        "transport_resume_policy": _OPENCODE_TRANSPORT_RESUME_POLICY,
     }
 
 
@@ -337,14 +340,14 @@ def _normalize_anthropic_response(resp):
     text = _anthropic_text(resp)
     stop_reason = resp.get("stop_reason")
     truncated_reasons = {"max_tokens", "model_context_window_exceeded"}
-    if text:
+    if stop_reason == "refusal":
+        response_classification = "model_refusal"
+    elif text:
         response_classification = (
             "text_truncated" if stop_reason in truncated_reasons else "normal"
         )
     elif stop_reason in truncated_reasons:
         response_classification = "thinking_budget_exhausted"
-    elif stop_reason == "refusal":
-        response_classification = "model_refusal"
     else:
         response_classification = "model_empty"
     return {
@@ -374,8 +377,12 @@ def _emit_transport_event(sink, payload):
         return
     try:
         sink(payload)
-    except Exception:
+    except Exception as exc:
         if getattr(sink, "_anchorpatch_critical", False):
+            try:
+                exc._anchorpatch_transport_observability_failure = True
+            except Exception:
+                pass
             raise
         # Observability must not turn a valid model call into a method failure.
         pass
@@ -467,10 +474,70 @@ def _transport_status_code(exc):
     return int(match.group(1)) if match else None
 
 
-def _transport_error_type(exc):
-    code = _transport_status_code(exc)
+def _is_generation_delta_type(delta_type):
+    """Whether an Anthropic content delta proves generation has started."""
+    value = str(delta_type or "")
+    if value in {"thinking_delta", "text_delta", "input_json_delta"}:
+        return True
+    # Future content-producing Anthropic deltas consume a response slot too.
+    # A signature authenticates thinking already emitted; it is not generation.
+    return value.endswith("_delta") and value != "signature_delta"
+
+
+def _stream_event_seen(attempt):
+    attempt = attempt or {}
+    return bool(
+        attempt.get("message_start_seen")
+        or attempt.get("message_delta_seen")
+        or attempt.get("message_stop_seen")
+        or attempt.get("generation_delta_seen")
+        or int(attempt.get("content_blocks_started") or 0)
+        or int(attempt.get("content_blocks_stopped") or 0)
+    )
+
+
+def _is_incomplete_stream_exception(exc, attempt=None):
+    """Classify every HTTP-200/observed-stream terminal-chain failure first."""
+    if getattr(exc, "_anchorpatch_transport_observability_failure", False):
+        return False
     if isinstance(exc, _IncompleteStreamError):
+        return True
+
+    prior = getattr(exc, "_opencode_attempt", None)
+    state = attempt if attempt is not None else prior
+    code = _transport_status_code(exc)
+    message = str(exc).lower()
+    is_sdk_status_error = (
+        type(exc).__name__ == "APIStatusError"
+        or (
+            anthropic is not None
+            and getattr(anthropic, "APIStatusError", None) is not None
+            and isinstance(exc, anthropic.APIStatusError)
+        )
+    )
+    if (is_sdk_status_error and code == 200
+            and "streaming response failed" in message):
+        return True
+
+    if _stream_event_seen(state):
+        state = state or {}
+        if not state.get("message_stop_seen"):
+            return True
+        if not state.get("final_usage_seen"):
+            return True
+        if state.get("terminal_sequence_valid") is False:
+            return True
+        started = int(state.get("content_blocks_started") or 0)
+        stopped = int(state.get("content_blocks_stopped") or 0)
+        if started != stopped or state.get("content_blocks_balanced") is False:
+            return True
+    return False
+
+
+def _transport_error_type(exc, attempt=None):
+    if _is_incomplete_stream_exception(exc, attempt):
         return "incomplete_stream"
+    code = _transport_status_code(exc)
     if code == 429:
         return "rate_limit"
     if code in (401, 403):
@@ -488,8 +555,8 @@ def _transport_error_type(exc):
     return name
 
 
-def _is_retryable_opencode_error(exc):
-    if isinstance(exc, _IncompleteStreamError):
+def _is_retryable_opencode_error(exc, attempt=None):
+    if _is_incomplete_stream_exception(exc, attempt):
         return True
     code = _transport_status_code(exc)
     if code is not None:
@@ -544,6 +611,7 @@ def _attempt_from_exception(exc, attempt_index, elapsed_ms):
         "content_blocks_started": 0,
         "content_blocks_stopped": 0,
         "content_blocks_balanced": False,
+        "terminal_sequence_valid": False,
     }
 
 
@@ -639,7 +707,9 @@ def _call_opencode_messages_urllib_v1(
 def _call_opencode_anthropic_sdk(
         messages, model, max_tokens, temperature, timeout, is_json,
         thinking_mode="adaptive", call_kind="primary", raw_event_sink=None,
-        attempt_index=1, client_factory=None, transport_control=None):
+        attempt_index=1, semantic_attempt_index=None,
+        transport_generation_index=0, client_factory=None,
+        transport_control=None):
     key = os.environ.get("OPENCODE_API_KEY") or os.environ.get("OPENCODE_GO_API_KEY")
     assert key, "Set OPENCODE_API_KEY for minimax-m3 via OpenCode Go"
     if Anthropic is None and client_factory is None:
@@ -667,6 +737,10 @@ def _call_opencode_anthropic_sdk(
     started = time.time()
     attempt = {
         "attempt_index": attempt_index,
+        "semantic_attempt_index": (
+            semantic_attempt_index
+            if semantic_attempt_index is not None else attempt_index
+        ),
         "status": "in_progress",
         "http_status": None,
         "error_type": None,
@@ -690,12 +764,27 @@ def _call_opencode_anthropic_sdk(
     _emit_transport_event(raw_event_sink, {
         "record_type": "attempt_start", "attempt_index": attempt_index,
         "transport": _OPENCODE_TRANSPORT_SDK, "call_kind": call_kind,
+        "semantic_call_kind": call_kind,
+        "attempt_kind": (
+            ("transport_recovery_initial"
+             if (semantic_attempt_index or attempt_index) == 1
+             else "transport_recovery_retry")
+            if transport_generation_index > 0 else
+            ("transport_initial"
+             if (semantic_attempt_index or attempt_index) == 1
+             else "transport_retry")
+        ),
+        "generation_index": transport_generation_index,
         "transport_revision": _OPENCODE_TRANSPORT_REVISION,
         "request_url": _opencode_messages_url(), "request_body": body,
     })
     client = None
     started_blocks = set()
     stopped_blocks = set()
+    open_blocks = set()
+    block_sequence_valid = True
+    terminal_phase = "before_message_start"
+    terminal_sequence_valid = True
     try:
         factory = client_factory or Anthropic
         client = factory(
@@ -732,14 +821,41 @@ def _call_opencode_anthropic_sdk(
                         "event": event_dict,
                     })
                 if event_type == "message_start":
-                    attempt["message_start_seen"] = True
+                    if terminal_phase != "before_message_start":
+                        terminal_sequence_valid = False
+                    else:
+                        terminal_phase = "content"
+                        attempt["message_start_seen"] = True
                 elif event_type == "content_block_start":
-                    started_blocks.add(event_dict.get("index", len(started_blocks)))
+                    if terminal_phase != "content":
+                        terminal_sequence_valid = False
+                    index = event_dict.get("index")
+                    if (not isinstance(index, int) or isinstance(index, bool)
+                            or index in started_blocks or index in open_blocks):
+                        block_sequence_valid = False
+                    else:
+                        started_blocks.add(index)
+                        open_blocks.add(index)
                 elif event_type == "content_block_stop":
-                    stopped_blocks.add(event_dict.get("index", len(stopped_blocks)))
+                    if terminal_phase != "content":
+                        terminal_sequence_valid = False
+                    index = event_dict.get("index")
+                    if (not isinstance(index, int) or isinstance(index, bool)
+                            or index not in open_blocks
+                            or index in stopped_blocks):
+                        block_sequence_valid = False
+                    else:
+                        open_blocks.remove(index)
+                        stopped_blocks.add(index)
                 elif event_type == "content_block_delta":
+                    if terminal_phase != "content":
+                        terminal_sequence_valid = False
+                    index = event_dict.get("index")
+                    if (not isinstance(index, int) or isinstance(index, bool)
+                            or index not in open_blocks):
+                        block_sequence_valid = False
                     delta_type = str((event_dict.get("delta") or {}).get("type") or "")
-                    if delta_type in {"thinking_delta", "text_delta", "input_json_delta"}:
+                    if _is_generation_delta_type(delta_type):
                         attempt["generation_delta_seen"] = True
                     if delta_type == "thinking_delta":
                         attempt["thinking_delta_seen"] = True
@@ -748,9 +864,24 @@ def _call_opencode_anthropic_sdk(
                     elif delta_type == "input_json_delta":
                         attempt["tool_delta_seen"] = True
                 elif event_type == "message_delta":
-                    attempt["message_delta_seen"] = True
+                    if (terminal_phase != "content" or open_blocks
+                            or attempt["message_delta_seen"]):
+                        terminal_sequence_valid = False
+                    else:
+                        terminal_phase = "message_delta"
+                        attempt["message_delta_seen"] = True
+                    terminal_usage = event_dict.get("usage")
+                    attempt["final_usage_seen"] = (
+                        isinstance(terminal_usage, dict)
+                        and terminal_usage.get("output_tokens") is not None
+                    )
                 elif event_type == "message_stop":
-                    attempt["message_stop_seen"] = True
+                    if (terminal_phase != "message_delta"
+                            or attempt["message_stop_seen"]):
+                        terminal_sequence_valid = False
+                    else:
+                        terminal_phase = "stopped"
+                        attempt["message_stop_seen"] = True
             final_message = _as_plain_dict(stream.get_final_message())
 
         usage = final_message.get("usage") or {}
@@ -758,19 +889,31 @@ def _call_opencode_anthropic_sdk(
         attempt["content_blocks_stopped"] = len(stopped_blocks)
         # "Every started block was stopped" is vacuously true for a valid
         # complete empty message, whose content array can contain no blocks.
-        attempt["content_blocks_balanced"] = started_blocks == stopped_blocks
+        attempt["content_blocks_balanced"] = (
+            block_sequence_valid
+            and not open_blocks
+            and started_blocks == stopped_blocks
+        )
+        attempt["terminal_sequence_valid"] = (
+            terminal_sequence_valid and terminal_phase == "stopped"
+        )
         attempt["stop_reason"] = final_message.get("stop_reason")
-        attempt["final_usage_seen"] = (
+        final_message_usage_complete = (
             usage.get("input_tokens") is not None
             and usage.get("output_tokens") is not None
         )
+        attempt["final_usage_seen"] = (
+            attempt["final_usage_seen"] and final_message_usage_complete
+        )
         if not (
             attempt["message_start_seen"]
+            and attempt["terminal_sequence_valid"]
             and attempt["content_blocks_balanced"]
             and attempt["message_delta_seen"]
             and attempt["message_stop_seen"]
             and attempt["final_usage_seen"]
-            and attempt["stop_reason"] is not None
+            and isinstance(attempt["stop_reason"], str)
+            and bool(attempt["stop_reason"].strip())
         ):
             raise _IncompleteStreamError(
                 "OpenCode SDK stream ended before the complete Anthropic terminal chain"
@@ -797,10 +940,23 @@ def _call_opencode_anthropic_sdk(
         out["transport_revision"] = _OPENCODE_TRANSPORT_REVISION
         return out
     except Exception as exc:
+        attempt["content_blocks_started"] = len(started_blocks)
+        attempt["content_blocks_stopped"] = len(stopped_blocks)
+        attempt["content_blocks_balanced"] = (
+            block_sequence_valid
+            and not open_blocks
+            and started_blocks == stopped_blocks
+        )
+        attempt["terminal_sequence_valid"] = (
+            terminal_sequence_valid and terminal_phase == "stopped"
+        )
         attempt.update({
-            "status": "retryable_error" if _is_retryable_opencode_error(exc) else "fatal_error",
+            "status": (
+                "retryable_error"
+                if _is_retryable_opencode_error(exc, attempt) else "fatal_error"
+            ),
             "http_status": _transport_status_code(exc),
-            "error_type": _transport_error_type(exc),
+            "error_type": _transport_error_type(exc, attempt),
             "error_message": str(exc)[:1000],
             "elapsed_ms": int((time.time() - started) * 1000),
             "stream_complete": False,
@@ -827,7 +983,8 @@ def _call_opencode_anthropic_sdk(
 def _call_opencode_messages(
         messages, model, max_tokens, temperature, timeout, is_json,
         thinking_mode="adaptive", call_kind="primary", raw_event_sink=None,
-        attempt_index=1, transport_control=None):
+        attempt_index=1, semantic_attempt_index=None,
+        transport_generation_index=0, transport_control=None):
     if _opencode_transport() == _OPENCODE_TRANSPORT_LEGACY:
         return _call_opencode_messages_urllib_v1(
             messages, model, max_tokens, temperature, timeout, is_json,
@@ -837,6 +994,8 @@ def _call_opencode_messages(
         messages, model, max_tokens, temperature, timeout, is_json,
         thinking_mode=thinking_mode, call_kind=call_kind,
         raw_event_sink=raw_event_sink, attempt_index=attempt_index,
+        semantic_attempt_index=semantic_attempt_index,
+        transport_generation_index=transport_generation_index,
         transport_control=transport_control)
 
 
@@ -1059,7 +1218,15 @@ class OpenAI_Model:
         hard_to = max(timeout or 0, _MINIMAX_HARD_TIMEOUT) if is_minimax else None
         # Socket timeout matches the watchdog so a slow extended-thinking call is
         # not cut off before the gateway responds.
-        eff_timeout = hard_to if is_minimax else timeout
+        # Let the SDK's socket timeout fire before the outer watchdog.  This
+        # leaves a grace window in which the POST is known closed and can be
+        # classified as an ordinary pre-generation transient instead of an
+        # ambiguous in-flight request.
+        eff_timeout = (
+            max(1, hard_to - min(30, max(1, hard_to * 0.05)))
+            if is_minimax and not is_minimax_official
+            else (hard_to if is_minimax else timeout)
+        )
         if is_minimax_official:
             client = self._minimax_official_client()
         else:
@@ -1112,11 +1279,22 @@ class OpenAI_Model:
                         event = payload.get("event") or {}
                         if event.get("type") == "content_block_delta":
                             delta_type = str((event.get("delta") or {}).get("type") or "")
-                            if delta_type in {"thinking_delta", "text_delta", "input_json_delta"}:
+                            if _is_generation_delta_type(delta_type):
                                 live_progress["generation_delta_seen"] = True
                     _emit_transport_event(_raw_event_sink, payload)
 
+                # Preserve the recorder's fail-closed contract through this
+                # nested progress wrapper.  Otherwise a ledger/fsync error or
+                # per-attempt campaign guard exception is silently swallowed
+                # by the outer best-effort event emitter and a POST proceeds.
+                _attempt_event_sink._anchorpatch_critical = bool(
+                    getattr(_raw_event_sink, "_anchorpatch_critical", False)
+                )
+
                 def _do_minimax_call(_attempt_index=attempt_index):
+                    semantic_attempt_index = (
+                        response_slots_used + transient_failure_count + 1
+                    )
                     return _call_opencode_messages(
                         messages, resolved, effective_max_tokens,
                         effective_temperature, eff_timeout, is_json,
@@ -1124,6 +1302,10 @@ class OpenAI_Model:
                         call_kind=call_kind,
                         raw_event_sink=_attempt_event_sink,
                         attempt_index=_attempt_index,
+                        semantic_attempt_index=semantic_attempt_index,
+                        transport_generation_index=int(
+                            retry_state.get("generation_index") or 0
+                        ),
                         transport_control=transport_control,
                     )
 
@@ -1163,19 +1345,27 @@ class OpenAI_Model:
                         int((time.time() - attempt_started) * 1000),
                     )
                     rec["generation_delta_seen"] = bool(live_progress["generation_delta_seen"])
-                    rec["status"] = "fatal_error"
+                    rec["status"] = "retryable_error"
                     rec["error_type"] = "watchdog_ambiguous_inflight"
-                    rec["budget_class"] = (
-                        "response_slot" if rec["generation_delta_seen"]
-                        else "ambiguous_inflight"
-                    )
                     if rec["generation_delta_seen"]:
                         response_slots_used += 1
+                        rec["budget_class"] = "response_slot"
                         rec["response_slot_index"] = response_slots_used
+                    else:
+                        transient_failure_count += 1
+                        rec["budget_class"] = "transient_failure"
+                        rec["transient_failure_index"] = transient_failure_count
                     rec["transient_failure_count"] = transient_failure_count
                     transport_attempts.append(rec)
                     _emit_transport_event(_raw_event_sink, {
                         "record_type": "attempt_end", "attempt": rec,
+                    })
+                    _emit_transport_event(_raw_event_sink, {
+                        "record_type": "attempt_budget",
+                        "attempt_index": attempt_index,
+                        "budget_class": rec["budget_class"],
+                        "response_slots_used": response_slots_used,
+                        "transient_failure_count": transient_failure_count,
                     })
                     import sys as _sys
                     print(
@@ -1183,12 +1373,14 @@ class OpenAI_Model:
                         f"after {hard_to}s (HTTP attempt {attempt_index})",
                         file=_sys.stderr, flush=True,
                     )
-                    raise OpenCodeTransportError(
+                    ambiguous = OpenCodeTransportError(
                         "OpenCode MiniMax-M3 watchdog expired while the prior POST "
                         "could still be in flight; refusing an overlapping retry",
                         attempts=transport_attempts,
                         last_error=last_err,
-                    ) from exc
+                    )
+                    ambiguous._anchorpatch_transport_observability_failure = True
+                    raise ambiguous from exc
                 except Exception as exc:
                     last_err = exc
                     last_error_type = _transport_error_type(exc)
@@ -1385,6 +1577,10 @@ class OpenAI_Model:
             "provider": provider_label,
             "transport": transport_label,
             "transport_revision": transport_revision_label,
+            "transport_resume_policy": (
+                _OPENCODE_TRANSPORT_RESUME_POLICY
+                if is_minimax and not is_minimax_official else None
+            ),
             "base_url": base_url_label,
             "request_url": request_url_label,
             "anthropic_sdk_version": (

@@ -98,23 +98,99 @@ run metadata 升级为 `anchorpatch.run_metadata/3`，在锁内记录并复用 c
 
 正式 paired 分析以每个样本 exact final backward `RS@K` 为单位，输出 `sample_level_final_endpoint.json`；sample×RT 轨迹只作 descriptive，不进入 canonical iid 推断。
 
+## Transport-v4 与 paired campaign 故障隔离（2026-07-18）
+
+本轮不改变 `hybridpatch/8` 方法协议、提示、执行器、validation gate、preservation、
+FullRewrite、evaluator 或 scoring。新实验改用 `opencode_anthropic_sdk/4`；冻结
+transport-v3 归档继续只按其历史规范解释，旧
+`exp_20260717_hybridv8_softbudget_paired10` 保持 `failed_informative`，不得续跑或拼接。
+
+- 流完整性判断先于普通 HTTP 状态：Anthropic `APIStatusError(status=200,
+  "Streaming response failed")`、缺 `message_stop`、缺终结 usage、block 未闭合或
+  terminal 事件重复/乱序统一归为 retryable `incomplete_stream`。
+- 每个 exact semantic call 固定两个生成 response slot 与三个生成前 transient
+  failure；出现实际生成 delta 的中断消耗 response slot，无生成 delta 的 retryable
+  失败消耗 transient failure。总 HTTP attempt 不硬限为两个。
+- transport retry 保持完全相同 prompt/参数/fingerprint；HybridPatch repair 仍只由
+  合格的完整模型内容协议/执行错误触发，使用独立 `call_kind`、semantic root 和 R2/I3。
+- 恢复 lineage 使用 `semantic_root_id/gNNN`。dispatcher 四字段授权 parent 的下一
+  generation、同 request fingerprint 和连续全局 attempt index；授权一次性消费。
+  恢复前允许零 POST journal replay 未提交的 forward/primary，恢复后普通新 root
+  不受旧授权阻塞。
+- semantic-root 独占锁覆盖 preflight、provider 调用、journal/raw、attempt terminal
+  与 API terminal row；recorder 内 journal 已落盘而 ledger terminal 未落盘的 window
+  可确定性本地 replay，身份不一致则在 POST 前 fail closed。若 formal worker 已在
+  response commit 后、API terminal row 前退出，仍作为半提交 API evidence 全局停止，
+  不伪装成 sample-local provider exhaustion。
+- 只有 outcome、run metadata、API row、attempt ledger 四证一致且确实耗尽 R2/I3
+  的 worker 才标为 `infrastructure_incomplete`；未完成 endpoint 保持 missing/null，
+  其他 sample 继续。preservation、Git/tree 漂移、重复或半提交 RT、ledger 无法映射、
+  非 retryable provider 错误、本地/runner/evaluator/shared-integrity 错误仍全局停止。
+- provider 返回后与 relay commit 前都会复核 latch、active worker、Git/tree 和 task-plan；
+  result rows/checkpoint commit 与 stop latch 使用同一 ordering lock。全局回收只有在
+  sample lease 已释放且 metadata/exit provenance 可审计时才撤销 active set。
+- audited resume 只创建 latest incomplete sample 的 worker，从 checkpoint 第一个未提交
+  RT 开始；已提交 RT 不产生新 provider POST，旧 failure/ledger/raw 全部 append-only。
+
+活动 transport 规范见 `transport/docs/API_TRANSPORT_V4.md`。本轮新的 smoke 与 paired10
+均为 `diagnostic_only`，必须在独立计划审阅、全部零 API gate、干净提交与 Key probe
+通过后方可启动；任何不完整 main 不产生完整 10 样本方法效果结论。
+
+### Transport-v4 零 API 验证
+
+2026-07-18 在 Git Bash 中完成，未读取 Key、未调用 API：
+
+1. `HP_V8/src`、`transport/src`、`tools` 共 98 个 Python 文件编译到临时
+   `PYTHONPYCACHEPREFIX`：PASS。
+2. `python -B ./src/test_hybrid_executor.py`：72/72 PASS；含 V1–V8 envelope matrix、
+   V7 legacy range/budget、snapshot/body-ref/C2/partial parity。
+3. `python -B ./src/splitters.py`：全部 splitter byte-exact PASS。
+4. `python -B ./src/test_model_openai.py`：83/83 PASS；覆盖 HTTP-200 streaming
+   failure、delta/no-delta R2/I3、缺/乱序 terminal、空白 stop reason、transport/repair
+   分离、multi-worker isolation、preservation global stop、stop-latch/backoff 零 POST、
+   active-set audit/CAS、只恢复 incomplete sample 与 committed RT 零 POST。
+5. `PYTHONPATH=../HP_V8/src python -B ./src/test_model_openai.py`（`transport/`）：
+   47/47 PASS。
+6. `analyze_protocol_burden.py`：400 rows、394 success、25 个历史成功软阈值并集
+   超限形态、路径不兼容 1/399；仅分析/telemetry，不影响执行。
+7. `test_analyze.py`：5/5 PASS；`tools/test_process_experiment.py`：9/9 PASS。
+8. V8 verifier 只读 replay：V4 smoke 70、V5 dev20 400、V6 dev20 400、V7 dev20
+   400、V8 smoke 8、V8 failed-informative partial 96 个 backward RS 均 PASS。
+   冻结 V3 dev20full 由其自身 V3 verifier 与 V8 verifier 都稳定报告同一历史 mismatch：
+   `quantum4 RT9 stored=0.9850, recomputed=1.0000`；因此不把 V3 归档写成 PASS，也不
+   修改冻结证据。V1–V8 executor matrix 仍全部通过，说明本轮 transport 变更没有改变
+   envelope replay 分支。
+9. 用户固定 10 样本 initial runtime evaluator 均 `score=1.0`；seed42/10RT task plan
+   状态引用与预注册 SHA-256 全部匹配。
+10. 范围审计：HP_V3–HP_V7、Baseline、data、records/exp archives、HP_V8 prompt、
+    protocol schema、executor、gate、FullRewrite、evaluator 与 scoring 无 diff。
+11. 新上下文只读实验计划审阅在补齐 cwd/dry-run、2RT task-plan SHA、smoke verifier 与
+    独立结果审阅门、费用停止规则、完整 resume 模板及每 root 最多一次 `g001` 恢复后，
+    返回 plan-level GO；API 仍等待 clean commit、formal dry-run 与 Key probe。
+
+`HP_V8/src/model_openai.py` 与 `transport/src/model_openai.py` 原字节相同，SHA-256
+均为 `cdfe85e9f48b81d16ff85857d51b97db09b559877675456708838959ff15fd93`。
+HP runner 扩展版 `run_meta.py` SHA-256 为
+`d73c5da525b49fb9776b1e155f0dae12147832695b85fef7c43cc211b1bca45c`；transport
+preflight 版为 `f9f63d4776ab7c39399256f2e16a15c3909ad0390c0ea34dd41494e655ec0da5`。
+
 ## 当前 14 项指纹
 
 | 文件 | SHA-1 前 12 位 |
 |---|---|
 | `patch_schema.py` | `ba8a9eb35f06` |
 | `splitters.py` | `690b1981879f` |
-| `experiment_runner.py` | `f8da9aa77112` |
+| `experiment_runner.py` | `519d7382e097` |
 | `hybrid_schema.py` | `272b74dec9bc` |
 | `hybrid_index.py` | `e772551601bc` |
 | `hybrid_prompt.py` | `3fd2b4717260` |
 | `hybrid_executor.py` | `e796e08e2648` |
 | `hybrid_gate.py` | `255c4299b755` |
-| `model_openai.py` | `0839fc1ed6ea` |
-| `run_meta.py` | `a7c1ccd83723` |
+| `model_openai.py` | `5f2fac4da655` |
+| `run_meta.py` | `94f37d069dd9` |
 | `requirements.txt` | `38ffe361be94` |
 | `verify_anchorpatch.py` | `310fd2ee8ed5` |
-| `paired_campaign_dispatch.py` | `035f13bc161b` |
+| `paired_campaign_dispatch.py` | `fe69b5ad4489` |
 | `analyze.py` | `32178dc554c5` |
 
 ## 零 API 验证（2026-07-17）

@@ -4,10 +4,12 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime
 from unittest import mock
 
+import httpx
 import portalocker
 import hashlib
 
@@ -41,7 +43,11 @@ def _events(include_delta=True, include_stop=True, content=None):
             {"type": "content_block_stop", "index": index},
         ])
     if include_delta:
-        events.append({"type": "message_delta", "delta": {"stop_reason": "end_turn"}})
+        events.append({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn"},
+            "usage": {"output_tokens": 4},
+        })
     if include_stop:
         events.append({"type": "message_stop"})
     return events
@@ -95,9 +101,14 @@ def _archived_events(case):
         if counts.get("content_block_stop", 0) >= 2:
             events.append({"type": "content_block_stop", "index": index})
     if counts.get("message_delta"):
+        usage = case.get("usage") or {}
         events.append({
             "type": "message_delta",
             "delta": {"stop_reason": case.get("stop_reason")},
+            "usage": (
+                {"output_tokens": usage.get("output_tokens")}
+                if usage.get("output_tokens") is not None else {}
+            ),
         })
     if counts.get("message_stop"):
         events.append({"type": "message_stop"})
@@ -127,7 +138,10 @@ class _FakeStream:
         return None
 
     def __iter__(self):
-        return iter(self.events)
+        for event in self.events:
+            if isinstance(event, BaseException):
+                raise event
+            yield event
 
     def get_final_message(self):
         return self.final_message
@@ -175,7 +189,7 @@ def _successful_normalized(text="Hello", stop_reason="end_turn"):
             "content_blocks_balanced": True,
         },
         "transport": "anthropic_sdk_v2",
-        "transport_revision": "opencode_anthropic_sdk/3",
+        "transport_revision": "opencode_anthropic_sdk/4",
         "_raw_request_body": {},
         "_raw_stream_events": [],
     })
@@ -223,6 +237,9 @@ class OpenCodeTransportTests(unittest.TestCase):
         self.assertEqual(config["request_url"], "https://opencode.ai/zen/go/v1/messages")
         self.assertEqual(config["effective_max_tokens"], 131072)
         self.assertEqual(config["thinking_mode"], "adaptive")
+        self.assertEqual(
+            config["transport_resume_policy"],
+            "exact_payload_new_semantic_call/1")
         self.assertEqual(model_openai._effective_minimax_max_tokens(16), 16)
         self.assertEqual(model_openai._effective_minimax_max_tokens(131072), 131072)
         with self.assertRaises(ValueError):
@@ -248,8 +265,43 @@ class OpenCodeTransportTests(unittest.TestCase):
         self.assertEqual(body["temperature"], 1.0)
         self.assertEqual(body["max_tokens"], 131072)
         self.assertTrue(captures["closed"])
-        self.assertTrue(any(row["record_type"] == "attempt_start" for row in transport_log))
+        start = next(
+            row for row in transport_log
+            if row["record_type"] == "attempt_start")
+        self.assertEqual(start["call_kind"], "key_probe")
+        self.assertEqual(start["semantic_call_kind"], "key_probe")
+        self.assertEqual(start["attempt_kind"], "transport_initial")
         self.assertTrue(any(row["record_type"] == "attempt_end" for row in transport_log))
+
+        repair_log = []
+        repair_factory = _client_factory(
+            _events(content=[{"type": "text", "text": "repair"}]),
+            _message([{"type": "text", "text": "repair"}]), {})
+        model_openai._call_opencode_anthropic_sdk(
+            [{"role": "user", "content": "Repair"}], "minimax-m3",
+            16, 1.0, 30, False, call_kind="hybridpatch_repair",
+            raw_event_sink=repair_log.append, attempt_index=1,
+            client_factory=repair_factory)
+        repair_start = next(
+            row for row in repair_log
+            if row["record_type"] == "attempt_start")
+        self.assertEqual(repair_start["call_kind"], "hybridpatch_repair")
+        self.assertEqual(repair_start["attempt_kind"], "transport_initial")
+
+        retry_log = []
+        retry_factory = _client_factory(
+            _events(content=[{"type": "text", "text": "retry"}]),
+            _message([{"type": "text", "text": "retry"}]), {})
+        model_openai._call_opencode_anthropic_sdk(
+            [{"role": "user", "content": "Hello"}], "minimax-m3",
+            16, 1.0, 30, False, call_kind="key_probe",
+            raw_event_sink=retry_log.append, attempt_index=2,
+            client_factory=retry_factory)
+        retry_start = next(
+            row for row in retry_log
+            if row["record_type"] == "attempt_start")
+        self.assertEqual(retry_start["call_kind"], "key_probe")
+        self.assertEqual(retry_start["attempt_kind"], "transport_retry")
 
     def test_eof_partial_text_is_incomplete_and_not_returned(self):
         captures = {}
@@ -275,6 +327,7 @@ class OpenCodeTransportTests(unittest.TestCase):
                 _events(include_delta=False, include_stop=False,
                         content=[{"type": "thinking", "thinking": "unfinished"}]),
                 _message([{"type": "thinking", "thinking": "unfinished"}]),
+                "message_stop_seen",
             ),
             (
                 _events(content=[{"type": "text", "text": "looks complete"}]),
@@ -282,16 +335,115 @@ class OpenCodeTransportTests(unittest.TestCase):
                     [{"type": "text", "text": "looks complete"}],
                     usage={"input_tokens": 5, "output_tokens": None},
                 ),
+                "final_usage_seen",
             ),
         ]
-        for events, final_message in cases:
+        for events, final_message, missing_field in cases:
             with self.subTest(events=[event["type"] for event in events]):
                 factory = _client_factory(events, final_message, {})
-                with self.assertRaises(model_openai._IncompleteStreamError):
+                with self.assertRaises(
+                        model_openai._IncompleteStreamError) as caught:
                     model_openai._call_opencode_anthropic_sdk(
                         [{"role": "user", "content": "Hello"}], "minimax-m3",
                         16, 1.0, 30, False, client_factory=factory,
                     )
+                attempt = caught.exception._opencode_attempt
+                self.assertEqual(attempt["error_type"], "incomplete_stream")
+                self.assertEqual(attempt["status"], "retryable_error")
+                self.assertFalse(attempt[missing_field])
+                self.assertTrue(
+                    model_openai._is_retryable_opencode_error(
+                        caught.exception))
+
+    def test_terminal_event_usage_and_block_sequence_are_required(self):
+        content = [{"type": "text", "text": "looks complete"}]
+        missing_usage_events = _events(content=content)
+        next(
+            event for event in missing_usage_events
+            if event["type"] == "message_delta"
+        ).pop("usage")
+        duplicate_start_events = _events(content=content)
+        duplicate_start_events.insert(2, {
+            "type": "content_block_start", "index": 0,
+            "content_block": content[0],
+        })
+        duplicate_message_stop = _events(content=content)
+        duplicate_message_stop.append({"type": "message_stop"})
+        out_of_order_terminal = _events(content=content)
+        out_of_order_terminal[-2:] = list(
+            reversed(out_of_order_terminal[-2:]))
+        for events, expected_field in (
+                (missing_usage_events, "final_usage_seen"),
+                (duplicate_start_events, "content_blocks_balanced"),
+                (duplicate_message_stop, "terminal_sequence_valid"),
+                (out_of_order_terminal, "terminal_sequence_valid")):
+            with self.subTest(expected_field=expected_field):
+                factory = _client_factory(events, _message(content), {})
+                with self.assertRaises(
+                        model_openai._IncompleteStreamError) as caught:
+                    model_openai._call_opencode_anthropic_sdk(
+                        [{"role": "user", "content": "Hello"}],
+                        "minimax-m3", 16, 1.0, 30, False,
+                        client_factory=factory,
+                    )
+                attempt = caught.exception._opencode_attempt
+                self.assertFalse(attempt[expected_field])
+                self.assertEqual(attempt["error_type"], "incomplete_stream")
+                self.assertEqual(attempt["status"], "retryable_error")
+
+    def test_blank_final_stop_reason_is_incomplete_stream(self):
+        content = [{"type": "text", "text": "looks complete"}]
+        for stop_reason in ("", " \t "):
+            with self.subTest(stop_reason=repr(stop_reason)):
+                factory = _client_factory(
+                    _events(content=content),
+                    _message(content, stop_reason=stop_reason), {})
+                with self.assertRaises(
+                        model_openai._IncompleteStreamError) as caught:
+                    model_openai._call_opencode_anthropic_sdk(
+                        [{"role": "user", "content": "Hello"}],
+                        "minimax-m3", 16, 1.0, 30, False,
+                        client_factory=factory)
+                attempt = caught.exception._opencode_attempt
+                self.assertEqual(attempt["stop_reason"], stop_reason)
+                self.assertEqual(attempt["error_type"], "incomplete_stream")
+                self.assertEqual(attempt["status"], "retryable_error")
+
+    def test_watchdog_without_delta_consumes_transient_and_never_overlaps(self):
+        class TimedOutFuture:
+            def __init__(self):
+                self.cancelled = False
+
+            def result(self, timeout=None):
+                raise model_openai.concurrent.futures.TimeoutError()
+
+            def cancel(self):
+                self.cancelled = True
+                return True
+
+        future = TimedOutFuture()
+        pool = mock.Mock()
+        pool.submit.return_value = future
+        with mock.patch.object(model_openai, "_WATCHDOG_POOL", pool), \
+                mock.patch.object(
+                    model_openai, "_call_opencode_messages") as provider:
+            with self.assertRaises(
+                    model_openai.OpenCodeTransportError) as caught:
+                model_openai.OpenAI_Model().generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="minimax-m3", return_metadata=True,
+                )
+        attempts = caught.exception.transport_attempts
+        self.assertEqual(len(attempts), 1)
+        self.assertFalse(attempts[0]["generation_delta_seen"])
+        self.assertEqual(attempts[0]["budget_class"], "transient_failure")
+        self.assertEqual(attempts[0]["transient_failure_count"], 1)
+        self.assertEqual(pool.submit.call_count, 1)
+        provider.assert_not_called()
+        self.assertTrue(future.cancelled)
+        self.assertTrue(getattr(
+            caught.exception,
+            "_anchorpatch_transport_observability_failure", False))
 
     def test_complete_response_classification_matrix(self):
         cases = [
@@ -316,7 +468,7 @@ class OpenCodeTransportTests(unittest.TestCase):
                 "stream_complete": True, "generation_delta_seen": True,
             },
             "transport": "anthropic_sdk_v2",
-            "transport_revision": "opencode_anthropic_sdk/3",
+            "transport_revision": "opencode_anthropic_sdk/4",
         })
         with mock.patch.object(
             model_openai, "_call_opencode_messages", return_value=response
@@ -463,12 +615,99 @@ class OpenCodeTransportTests(unittest.TestCase):
                 )
         self.assertEqual(call.call_count, 3)
 
+    def test_api_connection_failure_before_delta_consumes_transient_only(self):
+        exc = model_openai.anthropic.APIConnectionError(
+            message="connection reset",
+            request=httpx.Request(
+                "POST", "https://opencode.invalid/v1/messages"),
+        )
+        success = _successful_normalized()
+        success["_transport_attempt"]["attempt_index"] = 2
+        with mock.patch.object(
+            model_openai, "_call_opencode_messages", side_effect=[exc, success]
+        ) as call, mock.patch.object(model_openai.time, "sleep"):
+            out = model_openai.OpenAI_Model().generate(
+                [{"role": "user", "content": "Hello"}],
+                model="minimax-m3", return_metadata=True,
+            )
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(out["response_slots_used"], 1)
+        self.assertEqual(out["transient_failure_count"], 1)
+        self.assertFalse(
+            out["transport_attempts"][0]["generation_delta_seen"])
+
     def test_incomplete_chunked_read_is_retryable(self):
         exc = RuntimeError(
             "peer closed connection without sending complete message body "
             "(incomplete chunked read)"
         )
         self.assertTrue(model_openai._is_retryable_opencode_error(exc))
+
+    def test_anthropic_status_200_streaming_failure_is_incomplete_and_retryable(self):
+        response = httpx.Response(
+            200, request=httpx.Request(
+                "POST", "https://opencode.invalid/v1/messages")
+        )
+        exc = model_openai.anthropic.APIStatusError(
+            "Streaming response failed", response=response,
+            body={"type": "api_error",
+                  "message": "Streaming response failed"},
+        )
+        self.assertEqual(model_openai._transport_status_code(exc), 200)
+        self.assertTrue(model_openai._is_incomplete_stream_exception(exc))
+        self.assertEqual(
+            model_openai._transport_error_type(exc), "incomplete_stream")
+        self.assertTrue(model_openai._is_retryable_opencode_error(exc))
+        exc._opencode_attempt = {
+            "attempt_index": 1, "status": "retryable_error",
+            "http_status": 200, "error_type": "incomplete_stream",
+            "stream_complete": False, "message_start_seen": True,
+            "message_stop_seen": False, "final_usage_seen": False,
+            "generation_delta_seen": True, "thinking_delta_seen": True,
+            "content_blocks_started": 1, "content_blocks_stopped": 0,
+            "content_blocks_balanced": False,
+        }
+        success = _successful_normalized()
+        success["_transport_attempt"]["attempt_index"] = 2
+        with mock.patch.object(
+            model_openai, "_call_opencode_messages", side_effect=[exc, success]
+        ) as call, mock.patch.object(model_openai.time, "sleep"):
+            out = model_openai.OpenAI_Model().generate(
+                [{"role": "user", "content": "Hello"}],
+                model="minimax-m3", return_metadata=True,
+            )
+        self.assertEqual(call.call_count, 2)
+        self.assertEqual(out["response_slots_used"], 2)
+        self.assertEqual(
+            out["transport_attempts"][0]["error_type"],
+            "incomplete_stream")
+
+        stream_exc = model_openai.anthropic.APIStatusError(
+            "Streaming response failed", response=response,
+            body={"type": "api_error",
+                  "message": "Streaming response failed"},
+        )
+        events = [
+            {"type": "message_start"},
+            {"type": "content_block_start", "index": 0,
+             "content_block": {"type": "thinking", "thinking": ""}},
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "thinking_delta",
+                       "thinking": "partial"}},
+            stream_exc,
+        ]
+        factory = _client_factory(events, _message([]), {})
+        with self.assertRaises(
+                model_openai.anthropic.APIStatusError) as caught:
+            model_openai._call_opencode_anthropic_sdk(
+                [{"role": "user", "content": "Hello"}], "minimax-m3",
+                16, 1.0, 30, False, client_factory=factory,
+            )
+        attempt = caught.exception._opencode_attempt
+        self.assertEqual(attempt["error_type"], "incomplete_stream")
+        self.assertEqual(attempt["status"], "retryable_error")
+        self.assertTrue(attempt["generation_delta_seen"])
+        self.assertFalse(attempt["content_blocks_balanced"])
 
     def test_convenience_snapshots_are_not_written_to_transport_log(self):
         content = [{"type": "thinking", "thinking": "x"},
@@ -508,6 +747,622 @@ class OpenCodeTransportTests(unittest.TestCase):
 
 
 class IntegrationContractTests(unittest.TestCase):
+    @staticmethod
+    def _failed_attempt_end_fields(*, generation_delta_seen=True,
+                                   error_type="incomplete_stream"):
+        return {
+            "status": "retryable_error",
+            "error_type": error_type,
+            "stream_complete": False,
+            "message_stop_seen": False,
+            "final_usage_seen": False,
+            "generation_delta_seen": generation_delta_seen,
+            "content_blocks_started": 1 if generation_delta_seen else 0,
+            "content_blocks_stopped": 0,
+            "content_blocks_balanced": not generation_delta_seen,
+            "terminal_sequence_valid": False,
+        }
+
+    @staticmethod
+    def _successful_attempt_end_fields():
+        return {
+            "status": "success",
+            "stream_complete": True,
+            "stop_reason": "end_turn",
+            "message_stop_seen": True,
+            "final_usage_seen": True,
+            "generation_delta_seen": True,
+            "content_blocks_started": 1,
+            "content_blocks_stopped": 1,
+            "content_blocks_balanced": True,
+            "terminal_sequence_valid": True,
+        }
+
+    def _append_exhausted_response_generation(
+            self, recorder, semantic_call_id, call_id,
+            request_fingerprint, attempt_indices):
+        generation = int(semantic_call_id.rsplit("/g", 1)[1])
+        recorder._append_ledger(
+            semantic_call_id, "semantic_request", call_id=call_id,
+            call_kind="hybridpatch_primary",
+            request_fingerprint=request_fingerprint)
+
+        for local_index, attempt_index in enumerate(attempt_indices, 1):
+            recorder._append_ledger(
+                semantic_call_id, "attempt_start",
+                attempt_index=attempt_index, call_id=call_id,
+                call_kind="hybridpatch_primary",
+                attempt_kind=(
+                    "transport_initial"
+                    if generation == 0 and local_index == 1
+                    else "transport_retry"
+                    if generation == 0
+                    else "transport_recovery_initial"
+                    if local_index == 1
+                    else "transport_recovery_retry"),
+                request_fingerprint=request_fingerprint)
+            recorder._append_ledger(
+                semantic_call_id, "generation_progress",
+                attempt_index=attempt_index, call_id=call_id,
+                delta_type="text_delta")
+            recorder._append_ledger(
+                semantic_call_id, "attempt_end",
+                attempt_index=attempt_index, call_id=call_id,
+                **self._failed_attempt_end_fields())
+            recorder._append_ledger(
+                semantic_call_id, "attempt_budget",
+                attempt_index=attempt_index, call_id=call_id,
+                budget_class="response_slot",
+                response_slots_used=local_index,
+                transient_failure_count=0)
+        recorder._append_ledger(
+            semantic_call_id, "call_failed", call_id=call_id,
+            status="provider_failure", error_type="incomplete_stream",
+            response_slots_used=len(attempt_indices),
+            transient_failure_count=0,
+            http_attempts_used=attempt_indices[-1],
+            attempt_index=attempt_indices[-1],
+            request_fingerprint=request_fingerprint)
+
+    @staticmethod
+    def _write_active_inspection_fixture(
+            out_dir, *, sample="sample", method="hybridpatch",
+            worker_id="worker-a"):
+        plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+        utils_relay_plan.save_relay_task_plan(plan_path, ["target"])
+        manifest = {
+            "schema": paired_dispatch.SCHEMA,
+            "run_git_commit": "1" * 40,
+            "config": {
+                "samples": [sample],
+                "method_set": [method],
+                "num_round_trips": 1,
+            },
+            "task_plans": {
+                sample: {
+                    "path": os.path.basename(plan_path),
+                    "sha256": paired_dispatch._sha256(plan_path),
+                    "forward_state_sequence": ["target"],
+                },
+            },
+        }
+        run_meta.append_jsonl_locked(
+            os.path.join(out_dir, "dispatch_log.jsonl"), {
+                "event": "launch", "worker_launch_id": worker_id,
+                "sample": sample, "pid": os.getpid(),
+            })
+        paired_dispatch._write_active_worker_set(
+            out_dir, manifest, [{
+                "worker_launch_id": worker_id, "sample": sample,
+            }])
+        return manifest
+
+    def _write_infrastructure_fixture(
+            self, out_dir, sample="sample-a", worker_id="worker-a",
+            worker_pid=101, methods=None):
+        methods = list(methods or ["hybridpatch", "fullrewrite"])
+        step_id = f"hybridpatch/{sample}/rt01/forward"
+        semantic_root = f"{step_id}/hybridpatch_primary"
+        semantic = f"{semantic_root}/g000"
+        request_id = f"failed-{sample}"
+        fingerprint = f"fingerprint-{sample}"
+        invocation = f"invocation-{sample}"
+        api_row = {
+            "schema": "anchorpatch.api_call/4",
+            "sample": sample, "method": "hybridpatch",
+            "rt_index": 1, "direction": "forward",
+            "call_kind": "hybridpatch_primary",
+            "step_id": step_id,
+            "semantic_root_id": semantic_root,
+            "semantic_call_id": semantic, "request_id": request_id,
+            "generation_index": 0,
+            "parent_semantic_call_id": None,
+            "worker_launch_id": worker_id, "worker_pid": worker_pid,
+            "provider_called": True, "response_replayed": False,
+            "replayed_from_call_id": None,
+            "transport_revision": "opencode_anthropic_sdk/4",
+            "transport_resume_policy": (
+                "exact_payload_new_semantic_call/1"),
+            "transport_recovery_index": 0,
+            "request_fingerprint": fingerprint,
+            "classification": "provider/API failure",
+            "count_as_method_failure": False,
+            "error_type": "incomplete_stream",
+            "max_response_slots": 2, "response_slots_used": 2,
+            "max_transient_failures": 3,
+            "transient_failure_count": 0,
+            "http_attempts_used": 2,
+        }
+        run_meta.append_jsonl_locked(
+            os.path.join(out_dir, "api_calls.jsonl"), api_row)
+        for event, fields in (
+            ("semantic_request", {
+                "call_id": request_id, "call_kind": "hybridpatch_primary",
+                "request_fingerprint": fingerprint,
+            }),
+            ("attempt_start", {
+                "call_id": request_id, "attempt_index": 1,
+                "call_kind": "hybridpatch_primary",
+                "attempt_kind": "transport_initial",
+                "request_fingerprint": fingerprint,
+            }),
+            ("generation_progress", {
+                "call_id": request_id, "attempt_index": 1,
+                "delta_type": "text_delta",
+            }),
+            ("attempt_end", {
+                "call_id": request_id, "attempt_index": 1,
+                **self._failed_attempt_end_fields(),
+            }),
+            ("attempt_budget", {
+                "call_id": request_id, "attempt_index": 1,
+                "budget_class": "response_slot",
+                "response_slots_used": 1,
+                "transient_failure_count": 0,
+            }),
+            ("attempt_start", {
+                "call_id": request_id, "attempt_index": 2,
+                "call_kind": "hybridpatch_primary",
+                "attempt_kind": "transport_retry",
+                "request_fingerprint": fingerprint,
+            }),
+            ("generation_progress", {
+                "call_id": request_id, "attempt_index": 2,
+                "delta_type": "text_delta",
+            }),
+            ("attempt_end", {
+                "call_id": request_id, "attempt_index": 2,
+                **self._failed_attempt_end_fields(),
+            }),
+            ("attempt_budget", {
+                "call_id": request_id, "attempt_index": 2,
+                "budget_class": "response_slot",
+                "response_slots_used": 2,
+                "transient_failure_count": 0,
+            }),
+            ("call_failed", {
+                "call_id": request_id, "attempt_index": 2,
+                "status": "provider_failure",
+                "error_type": "incomplete_stream",
+                "response_slots_used": 2,
+                "transient_failure_count": 0,
+                "http_attempts_used": 2,
+                "request_fingerprint": fingerprint,
+            }),
+        ):
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"), {
+                    "schema": "anchorpatch.api_attempt/4",
+                    "step_id": step_id,
+                    "semantic_root_id": semantic_root,
+                    "semantic_call_id": semantic,
+                    "generation_index": 0,
+                    "parent_semantic_call_id": None,
+                    "worker_launch_id": worker_id,
+                    "event": event, **fields,
+                })
+        run_meta.append_jsonl_locked(
+            os.path.join(out_dir, "run_metadata.jsonl"), {
+                "schema": "anchorpatch.run_metadata/3",
+                "invocation_id": invocation,
+                "worker_launch_id": worker_id, "worker_pid": worker_pid,
+                "samples": [sample], "status": "infrastructure_incomplete",
+                "transport_resume_authorization": None,
+            })
+        progress = {
+            method: {"completed_round_trips": 0, "committed_rows": 0}
+            for method in methods
+        }
+        run_meta.append_jsonl_locked(
+            os.path.join(out_dir, "sample_outcomes.jsonl"), {
+                "schema": "anchorpatch.sample_outcome/1",
+                "created_at": "2026-07-18T00:00:00+08:00",
+                "sample": sample, "status": "infrastructure_incomplete",
+                "worker_launch_id": worker_id, "worker_pid": worker_pid,
+                "invocation_id": invocation, "methods": methods,
+                "method": "hybridpatch", "rt_index": 1,
+                "direction": "forward",
+                "call_kind": "hybridpatch_primary",
+                "semantic_root_id": semantic_root,
+                "semantic_call_id": semantic, "request_id": request_id,
+                "generation_index": 0,
+                "parent_semantic_call_id": None,
+                "request_fingerprint": fingerprint,
+                "error_type": "incomplete_stream",
+                "classification": "provider/API failure",
+                "response_slots_used": 2,
+                "transient_failure_count": 0,
+                "http_attempts_used": 2,
+                "next_attempt_index": 3,
+                "transport_recovery_index": 0,
+                "checkpoint_progress": progress,
+            })
+        return {
+            "semantic_root_id": semantic_root,
+            "semantic_call_id": semantic,
+            "generation_index": 0,
+            "request_fingerprint": fingerprint,
+            "next_attempt_index": 3,
+            "progress": progress,
+        }
+
+    def _write_finished_fixture(self, out_dir, sample, methods):
+        progress = {}
+        for method in methods:
+            method_dir = os.path.join(out_dir, method)
+            os.makedirs(method_dir, exist_ok=True)
+            rows = []
+            for direction in ("forward", "backward"):
+                rows.append({
+                    "sample_id": sample, "method": method,
+                    "round_trip_num": 1,
+                    "round_trip_direction": direction,
+                })
+            with open(
+                os.path.join(method_dir, f"{sample}.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+            run_meta.write_json_atomic(
+                os.path.join(method_dir, f"{sample}.ckpt.json"),
+                {"completed_round_trips": 1})
+            progress[method] = {
+                "completed_round_trips": 1, "committed_rows": 2}
+        run_meta.append_jsonl_locked(
+            os.path.join(out_dir, "sample_outcomes.jsonl"), {
+                "schema": "anchorpatch.sample_outcome/1",
+                "created_at": "2026-07-18T00:00:01+08:00",
+                "sample": sample, "status": "finished",
+                "worker_launch_id": f"worker-{sample}",
+                "worker_pid": 202,
+                "invocation_id": f"invocation-{sample}",
+                "methods": list(methods),
+                "checkpoint_progress": progress,
+            })
+
+    def test_transport_exhaustion_isolates_one_worker_and_sibling_completes(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._write_infrastructure_fixture(out_dir)
+            failed_process = mock.Mock(pid=101)
+            failed_process.poll.return_value = 7
+            sibling_process = mock.Mock(pid=202)
+            sibling_process.poll.return_value = None
+            running = {
+                "sample-a": {
+                    "sample": "sample-a", "process": failed_process,
+                    "log": mock.Mock(), "key_label": "KEY_01",
+                    "worker_launch_id": "worker-a",
+                    "methods": ["hybridpatch", "fullrewrite"],
+                    "target_round_trips": 1, "exit_recorded": False,
+                },
+                "sample-b": {
+                    "sample": "sample-b", "process": sibling_process,
+                    "log": mock.Mock(), "key_label": "KEY_02",
+                    "worker_launch_id": "worker-b",
+                    "methods": ["fullrewrite", "hybridpatch"],
+                    "target_round_trips": 1, "exit_recorded": False,
+                },
+            }
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            disposition = paired_dispatch._record_worker_exit(
+                out_dir, running, "sample-a", running["sample-a"], 7,
+                dispatch_log)
+            self.assertEqual(disposition, "infrastructure_incomplete")
+            self.assertNotIn("sample-a", running)
+            self.assertIn("sample-b", running)
+            self.assertIsNone(sibling_process.poll())
+
+            sibling_process.poll.return_value = 0
+            disposition = paired_dispatch._record_worker_exit(
+                out_dir, running, "sample-b", running["sample-b"], 0,
+                dispatch_log)
+            self.assertEqual(disposition, "finished")
+            self.assertEqual(running, {})
+            exit_rows = run_meta._read_jsonl_records_with_retry(dispatch_log)
+            self.assertEqual(
+                [row["disposition"] for row in exit_rows],
+                ["infrastructure_incomplete", "finished"])
+            self.assertEqual(
+                paired_dispatch.read_campaign_stop_conditions(out_dir), [])
+
+    def test_launch_poll_isolates_exhausted_worker_and_keeps_sibling_running(self):
+        class FakeProcess:
+            def __init__(self, pid, poll_sequence):
+                self.pid = pid
+                self._poll_sequence = list(poll_sequence)
+                self.returncode = None
+
+            def poll(self):
+                if self._poll_sequence:
+                    self.returncode = self._poll_sequence.pop(0)
+                return self.returncode
+
+        def make_task_plans(out_dir, samples, *_args):
+            plans = {}
+            for sample in samples:
+                plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+                utils_relay_plan.save_relay_task_plan(plan_path, ["target"])
+                plans[sample] = {
+                    "path": os.path.basename(plan_path),
+                    "sha256": paired_dispatch._sha256(plan_path),
+                    "forward_state_sequence": ["target"],
+                }
+            return plans
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            args = mock.Mock(
+                campaign_role="smoke",
+                smoke_dir=None,
+                samples=["sample-a", "sample-b"],
+                key_labels=["KEY_01", "KEY_02"],
+                keys_file="unused.env",
+                num_round_trips=1,
+                seed=42,
+                dry_run=False,
+                resume=False,
+                start_timeout=0.1,
+                poll_interval=0,
+                progress_interval=9999,
+                notes="unit",
+            )
+            active_snapshots = []
+            real_write_active = paired_dispatch._write_active_worker_set
+
+            def capture_active(active_out_dir, manifest, workers):
+                record = real_write_active(active_out_dir, manifest, workers)
+                active_snapshots.append(sorted(
+                    item["sample"] for item in record["workers"].values()))
+                return record
+
+            processes = {}
+
+            def fake_popen(command, **_kwargs):
+                sample = command[command.index("--sample") + 1]
+                process = (
+                    FakeProcess(101, [7])
+                    if sample == "sample-a"
+                    else FakeProcess(202, [None, 0])
+                )
+                processes[sample] = process
+                return process
+
+            with mock.patch.object(
+                    paired_dispatch, "_validate_campaign_grid"), \
+                    mock.patch.object(
+                        paired_dispatch, "_require_formal_opencode_transport"), \
+                    mock.patch.object(
+                        paired_dispatch, "read_keys",
+                        return_value={"KEY_01": "redacted-a",
+                                      "KEY_02": "redacted-b"}), \
+                    mock.patch.object(
+                        paired_dispatch, "prepare_task_plans",
+                        side_effect=make_task_plans), \
+                    mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "code_fingerprint",
+                        return_value={"unit": "test"}), \
+                    mock.patch.object(
+                        paired_dispatch, "inspect_campaign",
+                        return_value={"errors": [], "api_calls": 2,
+                                      "preservation_violations": 0}), \
+                    mock.patch.object(
+                        paired_dispatch, "_authorize_workers"), \
+                    mock.patch.object(
+                        paired_dispatch, "_verified_infrastructure_incomplete",
+                        return_value={"semantic_call_id": "failed-call",
+                                      "transport_recovery_index": 0}), \
+                    mock.patch.object(
+                        paired_dispatch.subprocess, "Popen",
+                        side_effect=fake_popen), \
+                    mock.patch.object(
+                        paired_dispatch.time, "sleep"), \
+                    mock.patch.object(
+                        paired_dispatch, "_write_active_worker_set",
+                        side_effect=capture_active):
+                result = paired_dispatch._launch_under_lease(args, out_dir)
+
+            self.assertEqual(result, 2)
+            self.assertEqual(set(processes), {"sample-a", "sample-b"})
+            self.assertIn(["sample-a", "sample-b"], active_snapshots)
+            self.assertIn(["sample-b"], active_snapshots)
+            self.assertEqual(active_snapshots[-1], [])
+            self.assertEqual(
+                paired_dispatch.read_campaign_stop_conditions(out_dir), [])
+            dispatch_rows = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "dispatch_log.jsonl"))
+            self.assertEqual(
+                [row.get("disposition") for row in dispatch_rows
+                 if row.get("event") == "worker_exit"],
+                ["infrastructure_incomplete", "finished"])
+            self.assertEqual(
+                dispatch_rows[-1]["event"], "campaign_incomplete")
+            self.assertEqual(
+                dispatch_rows[-1]["infrastructure_incomplete_samples"],
+                ["sample-a"])
+
+    def test_preservation_latch_keeps_failure_global_for_all_workers(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._write_infrastructure_fixture(out_dir)
+            run_meta.record_campaign_stop_condition(
+                out_dir, "preservation_violation",
+                preservation_violations=1)
+            running = {}
+            for sample, worker, pid in (
+                    ("sample-a", "worker-a", 101),
+                    ("sample-b", "worker-b", 202)):
+                process = mock.Mock(pid=pid)
+                process.poll.return_value = 7 if sample == "sample-a" else None
+                running[sample] = {
+                    "sample": sample, "process": process,
+                    "log": mock.Mock(), "key_label": f"KEY_{pid}",
+                    "worker_launch_id": worker,
+                    "methods": ["hybridpatch", "fullrewrite"],
+                    "target_round_trips": 1, "exit_recorded": False,
+                }
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            with self.assertRaisesRegex(
+                    RuntimeError, "campaign-wide stop latch"):
+                paired_dispatch._record_worker_exit(
+                    out_dir, running, "sample-a", running["sample-a"], 7,
+                    dispatch_log)
+            self.assertEqual(set(running), {"sample-a", "sample-b"})
+            with mock.patch.object(
+                    paired_dispatch, "_terminate_workers") as terminate, \
+                    mock.patch.object(
+                        paired_dispatch, "_assert_worker_leases_free"), \
+                    mock.patch.object(
+                        paired_dispatch,
+                        "_audit_running_invocation_provenance",
+                        return_value=[]), \
+                    mock.patch.object(
+                        paired_dispatch,
+                        "interrupt_audited_running_invocations",
+                        return_value=[]):
+                paired_dispatch._stop_and_reconcile_workers(out_dir, running)
+            terminate.assert_called_once_with(running)
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir)[0][
+                    "condition"], "preservation_violation")
+
+    def test_run_relay_resume_skips_committed_round_trip_without_provider_post(self):
+        class DummyDomain:
+            samples_folder = None
+
+        states = {
+            "initial": {
+                "context": ["a.txt"],
+                "solution_folder": "solution",
+                "prompts": [{"target_state": "target", "prompt": "forward"}],
+            },
+            "target": {
+                "context": ["a.txt"],
+                "solution_folder": "solution",
+                "prompts": [{"target_state": "initial", "prompt": "backward"}],
+            },
+        }
+        sample = {"start_state": "initial", "sample_type": "dummy"}
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            method_dir = os.path.join(out_dir, "hybridpatch")
+            os.makedirs(method_dir, exist_ok=True)
+            utils_relay_plan.save_relay_task_plan(
+                os.path.join(out_dir, "sample.task_plan.json"),
+                ["target"],
+            )
+            with open(
+                os.path.join(method_dir, "sample.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                for direction in ("forward", "backward"):
+                    handle.write(json.dumps({
+                        "sample_id": "sample",
+                        "method": "hybridpatch",
+                        "round_trip_num": 1,
+                        "round_trip_direction": direction,
+                    }) + "\n")
+            run_meta.write_json_atomic(
+                os.path.join(method_dir, "sample.ckpt.json"),
+                {
+                    "completed_round_trips": 1,
+                    "current_context": {"a.txt": "already committed"},
+                    "rid_chain": ["rid-forward", "rid-backward"],
+                    "state_chain": ["initial", "target", "initial"],
+                    "context_shuffle_random_state": None,
+                },
+            )
+            provider_post = mock.Mock(
+                side_effect=AssertionError("provider must not be called"))
+            with mock.patch.object(
+                    experiment_runner, "_require_formal_opencode_transport"), \
+                    mock.patch.object(
+                        experiment_runner, "load_sample",
+                        return_value=(sample, out_dir, states)), \
+                    mock.patch.object(
+                        experiment_runner, "get_domain",
+                        return_value=DummyDomain()), \
+                    mock.patch.object(
+                        experiment_runner, "load_distractor_context",
+                        return_value={}), \
+                    mock.patch.object(
+                        experiment_runner, "register_task_plan",
+                        return_value={"sha256": "a" * 64,
+                                      "round_trips": 1}), \
+                    mock.patch.object(
+                        experiment_runner, "_edit_step",
+                        side_effect=AssertionError(
+                            "committed RT must not be regenerated")) as edit_step:
+                result_path = experiment_runner.run_relay(
+                    "hybridpatch", "sample", num_round_trips=1,
+                    include_distractor=True, out_dir=out_dir,
+                    model="offline-test-model", max_tokens=16,
+                    generate_fn=provider_post, printing=False,
+                )
+
+            self.assertEqual(
+                result_path,
+                os.path.join(method_dir, "sample.jsonl"))
+            provider_post.assert_not_called()
+            edit_step.assert_not_called()
+
+    def test_resume_selects_only_incomplete_sample_and_skips_committed_sample(self):
+        methods_a = ["hybridpatch", "fullrewrite"]
+        methods_b = ["fullrewrite", "hybridpatch"]
+        with tempfile.TemporaryDirectory() as out_dir:
+            evidence = self._write_infrastructure_fixture(
+                out_dir, methods=methods_a)
+            self._write_finished_fixture(out_dir, "sample-b", methods_b)
+            assignments = [
+                {"sample": "sample-a", "methods": methods_a},
+                {"sample": "sample-b", "methods": methods_b},
+            ]
+            selected, authorizations = (
+                paired_dispatch._select_invocation_assignments(
+                    out_dir, assignments, resume=True,
+                    target_round_trips=1))
+            self.assertEqual(
+                [item["sample"] for item in selected], ["sample-a"])
+            self.assertEqual(
+                authorizations["sample-a"]["parent_semantic_call_id"],
+                evidence["semantic_call_id"])
+            self.assertEqual(
+                authorizations["sample-a"]["semantic_root_id"],
+                evidence["semantic_root_id"])
+            self.assertEqual(
+                authorizations["sample-a"]["generation_index"], 1)
+            self.assertEqual(
+                authorizations["sample-a"]["semantic_call_id"],
+                f"{evidence['semantic_root_id']}/g001")
+            self.assertEqual(
+                authorizations["sample-a"]["next_attempt_index"], 3)
+            provider_post = mock.Mock()
+            for item in selected:
+                if item["sample"] == "sample-b":
+                    provider_post(item["sample"])
+            provider_post.assert_not_called()
+
     def test_paired_dispatch_preflight_allows_missing_new_checkpoints(self):
         with tempfile.TemporaryDirectory() as out_dir:
             plan_path = os.path.join(out_dir, "sample.task_plan.json")
@@ -532,6 +1387,8 @@ class IntegrationContractTests(unittest.TestCase):
                 paired_dispatch, "_git_identity",
                 return_value=("1" * 40, "clean"),
             ):
+                paired_dispatch._write_active_worker_set(
+                    out_dir, manifest, [])
                 preflight = paired_dispatch.inspect_campaign(
                     out_dir, manifest, active_samples={"sample"})
                 completion = paired_dispatch.inspect_campaign(
@@ -542,6 +1399,709 @@ class IntegrationContractTests(unittest.TestCase):
                 "incomplete task" in error
                 for error in completion["errors"]
             ))
+
+    def test_dispatch_inspection_allows_only_proven_active_open_attempt(self):
+        def build_fixture(out_dir, *, ledger_worker="worker-a",
+                          active_worker="worker-a", include_launch=True):
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["state_a"])
+            manifest = {
+                "schema": paired_dispatch.SCHEMA,
+                "run_git_commit": "1" * 40,
+                "config": {
+                    "samples": ["sample"],
+                    "method_set": ["hybridpatch"],
+                    "num_round_trips": 1,
+                },
+                "task_plans": {
+                    "sample": {
+                        "path": "sample.task_plan.json",
+                        "sha256": paired_dispatch._sha256(plan_path),
+                        "forward_state_sequence": ["state_a"],
+                    },
+                },
+            }
+            paired_dispatch.write_json_atomic(
+                paired_dispatch._active_worker_set_path(out_dir), {
+                    "schema": "anchorpatch.active_worker_set/1",
+                    "run_git_commit": "1" * 40,
+                    "workers": {
+                        active_worker: {"sample": "sample"},
+                    },
+                })
+            if include_launch:
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "dispatch_log.jsonl"), {
+                        "event": "launch",
+                        "worker_launch_id": "worker-a",
+                        "sample": "sample", "pid": 101,
+                    })
+            semantic_root = (
+                "hybridpatch/sample/rt01/forward/hybridpatch_primary")
+            semantic = f"{semantic_root}/g000"
+            for event, fields in (
+                ("semantic_request", {
+                    "call_id": "live-call",
+                    "call_kind": "hybridpatch_primary",
+                    "request_fingerprint": "live-fingerprint",
+                }),
+                ("attempt_start", {
+                    "call_id": "live-call", "attempt_index": 1,
+                    "call_kind": "hybridpatch_primary",
+                    "attempt_kind": "transport_initial",
+                    "request_fingerprint": "live-fingerprint",
+                }),
+            ):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "api_attempt_ledger.jsonl"), {
+                        "schema": "anchorpatch.api_attempt/4",
+                        "step_id": "hybridpatch/sample/rt01/forward",
+                        "semantic_root_id": semantic_root,
+                        "semantic_call_id": semantic,
+                        "generation_index": 0,
+                        "parent_semantic_call_id": None,
+                        "worker_launch_id": ledger_worker,
+                        "event": event,
+                        **fields,
+                    })
+            return manifest
+
+        with mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")):
+            with tempfile.TemporaryDirectory() as out_dir:
+                manifest = build_fixture(out_dir)
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, active_samples={"sample"})
+                self.assertEqual(inspection["errors"], [])
+
+            with tempfile.TemporaryDirectory() as out_dir:
+                manifest = build_fixture(out_dir)
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, active_samples=set())
+                self.assertTrue(any(
+                    "unclosed HTTP attempt" in error
+                    for error in inspection["errors"]), inspection["errors"])
+
+            with tempfile.TemporaryDirectory() as out_dir:
+                manifest = build_fixture(
+                    out_dir, ledger_worker="worker-b",
+                    active_worker="worker-b")
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, active_samples={"sample"})
+                self.assertTrue(any(
+                    "attempt worker provenance mismatch" in error
+                    for error in inspection["errors"]), inspection["errors"])
+
+    def test_failure_terminal_ledger_precedes_api_row_during_active_poll(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {
+                "OPENCODE_API_KEY": "unit-test-key",
+                "ANCHORPATCH_WORKER_LAUNCH_ID": "worker-a",
+            }, clear=False,
+        ):
+            manifest = self._write_active_inspection_fixture(out_dir)
+
+            def exhausted_generate(*_args, **kwargs):
+                attempts = []
+                for attempt_index in (1, 2):
+                    kwargs["_raw_event_sink"]({
+                        "record_type": "attempt_start",
+                        "attempt_index": attempt_index,
+                        "attempt_kind": (
+                            "transport_initial" if attempt_index == 1
+                            else "transport_retry"),
+                    })
+                    kwargs["_raw_event_sink"]({
+                        "record_type": "sdk_stream_event",
+                        "attempt_index": attempt_index,
+                        "event": {"type": "content_block_delta",
+                                  "delta": {"type": "text_delta"}},
+                    })
+                    attempt = {
+                        "attempt_index": attempt_index,
+                        **self._failed_attempt_end_fields(),
+                    }
+                    kwargs["_raw_event_sink"]({
+                        "record_type": "attempt_end",
+                        "attempt": attempt,
+                    })
+                    kwargs["_raw_event_sink"]({
+                        "record_type": "attempt_budget",
+                        "attempt_index": attempt_index,
+                        "budget_class": "response_slot",
+                        "response_slots_used": attempt_index,
+                        "transient_failure_count": 0,
+                    })
+                    attempts.append(attempt)
+                raise model_openai.OpenCodeTransportError(
+                    "response slots exhausted", attempts=attempts,
+                    last_error=model_openai._IncompleteStreamError(
+                        "incomplete_stream"))
+
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "minimax-m3", exhausted_generate)
+            recorder.set_step(1, "forward", "target")
+            original_write = recorder._write_record
+            write_entered = threading.Event()
+            allow_write = threading.Event()
+            worker_errors = []
+
+            def blocked_write(record):
+                write_entered.set()
+                if not allow_write.wait(5):
+                    raise RuntimeError("unit-test write barrier timed out")
+                original_write(record)
+
+            recorder._write_record = blocked_write
+
+            def run_failure():
+                try:
+                    with mock.patch.object(
+                            run_meta, "_enforce_pre_call_campaign_guards"):
+                        recorder.generate(
+                            [{"role": "user", "content": "Hello"}],
+                            model="minimax-m3",
+                            call_kind="hybridpatch_primary")
+                except BaseException as exc:
+                    worker_errors.append(exc)
+
+            worker = threading.Thread(target=run_failure, daemon=True)
+            worker.start()
+            self.assertTrue(write_entered.wait(5), worker_errors)
+            try:
+                ledger = run_meta._read_jsonl_records_with_retry(
+                    os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+                self.assertEqual(ledger[-1]["event"], "call_failed")
+                self.assertFalse(os.path.exists(
+                    os.path.join(out_dir, "api_calls.jsonl")))
+                with mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")):
+                    inspection = paired_dispatch.inspect_campaign(
+                        out_dir, manifest, active_samples={"sample"})
+                self.assertEqual(inspection["errors"], [])
+            finally:
+                allow_write.set()
+                worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(len(worker_errors), 1)
+            self.assertIsInstance(
+                worker_errors[0], model_openai.OpenCodeTransportError)
+            api_rows = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_calls.jsonl"))
+            self.assertEqual(len(api_rows), 1)
+            self.assertEqual(
+                api_rows[0]["classification"], "provider/API failure")
+
+    def test_success_terminal_holds_root_lock_through_api_row_and_active_poll(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {
+                "OPENCODE_API_KEY": "unit-test-key",
+                "ANCHORPATCH_WORKER_LAUNCH_ID": "worker-a",
+            }, clear=False,
+        ):
+            manifest = self._write_active_inspection_fixture(out_dir)
+
+            def successful_generate(*_args, **kwargs):
+                kwargs["_raw_event_sink"]({
+                    "record_type": "attempt_start", "attempt_index": 1,
+                    "attempt_kind": "transport_initial",
+                })
+                kwargs["_raw_event_sink"]({
+                    "record_type": "sdk_stream_event", "attempt_index": 1,
+                    "event": {"type": "content_block_delta",
+                              "delta": {"type": "text_delta"}},
+                })
+                kwargs["_raw_event_sink"]({
+                    "record_type": "attempt_end", "attempt": {
+                        "attempt_index": 1,
+                        **self._successful_attempt_end_fields(),
+                    },
+                })
+                result = {
+                    "message": "Hello", "http_status": 200,
+                    "stream_complete": True, "finish_reason": "end_turn",
+                    "stop_reason": "end_turn",
+                    "response_classification": "normal",
+                    "prompt_tokens": 5, "completion_tokens": 1,
+                    "total_tokens": 6, "input_tokens": 5,
+                    "output_tokens": 1, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "transport_attempts": [{
+                        "attempt_index": 1, "status": "success"}],
+                    "call_kind": "hybridpatch_primary",
+                    "thinking_mode": "adaptive",
+                    "transport": "anthropic_sdk_v2",
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "max_response_slots": 2,
+                    "response_slots_used": 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": 1,
+                }
+                kwargs["_response_commit_sink"](result)
+                return result
+
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "minimax-m3", successful_generate)
+            recorder.set_step(1, "forward", "target")
+            _step, semantic_root = recorder._semantic_root(
+                "hybridpatch_primary")
+            lock_path = os.path.join(
+                out_dir, "api_semantic_locks",
+                f"{recorder._semantic_digest(semantic_root)}.lock")
+            original_write = recorder._write_record
+            write_entered = threading.Event()
+            allow_write = threading.Event()
+            worker_results = []
+            worker_errors = []
+
+            def blocked_write(record):
+                write_entered.set()
+                if not allow_write.wait(5):
+                    raise RuntimeError("unit-test write barrier timed out")
+                original_write(record)
+
+            recorder._write_record = blocked_write
+
+            def run_success():
+                try:
+                    with mock.patch.object(
+                            run_meta, "_enforce_pre_call_campaign_guards"):
+                        worker_results.append(recorder.generate(
+                            [{"role": "user", "content": "Hello"}],
+                            model="minimax-m3",
+                            call_kind="hybridpatch_primary"))
+                except BaseException as exc:
+                    worker_errors.append(exc)
+
+            worker = threading.Thread(target=run_success, daemon=True)
+            worker.start()
+            self.assertTrue(write_entered.wait(5), worker_errors)
+            contender = open(lock_path, "a+", encoding="utf-8")
+            try:
+                with self.assertRaises(portalocker.exceptions.LockException):
+                    portalocker.lock(
+                        contender,
+                        portalocker.LOCK_EX | portalocker.LOCK_NB)
+                ledger = run_meta._read_jsonl_records_with_retry(
+                    os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+                self.assertEqual(ledger[-1]["event"], "response_committed")
+                self.assertFalse(os.path.exists(
+                    os.path.join(out_dir, "api_calls.jsonl")))
+                with mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")):
+                    inspection = paired_dispatch.inspect_campaign(
+                        out_dir, manifest, active_samples={"sample"})
+                self.assertEqual(inspection["errors"], [])
+            finally:
+                allow_write.set()
+                worker.join(5)
+                contender.close()
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(worker_errors, [])
+            self.assertEqual(len(worker_results), 1)
+            with open(lock_path, "a+", encoding="utf-8") as post_commit:
+                portalocker.lock(
+                    post_commit,
+                    portalocker.LOCK_EX | portalocker.LOCK_NB)
+                portalocker.unlock(post_commit)
+            api_rows = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_calls.jsonl"))
+            self.assertEqual(len(api_rows), 1)
+            self.assertIsNone(api_rows[0]["classification"])
+
+    def test_formal_recovery_authorization_state_machine(self):
+        def build_fixture(out_dir, variant):
+            sample = "sample"
+            method = "hybridpatch"
+            old_worker, new_worker = "worker-old", "worker-new"
+            old_pid, new_pid = 101, 202
+            old_invocation, new_invocation = "inv-old", "inv-new"
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(
+                plan_path, ["target", "next"])
+            plan_sha = paired_dispatch._sha256(plan_path)
+            manifest = {
+                "schema": paired_dispatch.SCHEMA,
+                "run_git_commit": "1" * 40,
+                "config": {
+                    "samples": [sample], "method_set": [method],
+                    "num_round_trips": 2,
+                },
+                "task_plans": {
+                    sample: {
+                        "path": os.path.basename(plan_path),
+                        "sha256": plan_sha,
+                        "forward_state_sequence": ["target", "next"],
+                    },
+                },
+            }
+            forward_root = (
+                "hybridpatch/sample/rt01/forward/hybridpatch_primary")
+            backward_root = (
+                "hybridpatch/sample/rt01/backward/hybridpatch_primary")
+            next_root = (
+                "hybridpatch/sample/rt02/forward/hybridpatch_primary")
+            forward_g000 = f"{forward_root}/g000"
+            backward_g000 = f"{backward_root}/g000"
+            backward_g001 = f"{backward_root}/g001"
+            next_g000 = f"{next_root}/g000"
+            forward_fp = "fingerprint-forward"
+            backward_fp = "fingerprint-backward"
+            next_fp = "fingerprint-next"
+            resume = {
+                "parent_semantic_call_id": backward_g000,
+                "semantic_root_id": backward_root,
+                "semantic_call_id": backward_g001,
+                "generation_index": 1,
+                "request_fingerprint": backward_fp,
+                "next_attempt_index": 3,
+                "prior_worker_launch_id": old_worker,
+                "prior_invocation_id": old_invocation,
+            }
+
+            dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+            for row in (
+                {"event": "launch", "worker_launch_id": old_worker,
+                 "sample": sample, "pid": old_pid},
+                {"event": "worker_authorized",
+                 "worker_launch_id": old_worker, "sample": sample,
+                 "worker_pid": old_pid, "invocation_id": old_invocation,
+                 "task_plan_sha256": plan_sha,
+                 "transport_resume_authorization": None},
+                {"event": "launch", "worker_launch_id": new_worker,
+                 "sample": sample, "pid": new_pid},
+                {"event": "worker_authorized",
+                 "worker_launch_id": new_worker, "sample": sample,
+                 "worker_pid": new_pid, "invocation_id": new_invocation,
+                 "task_plan_sha256": plan_sha,
+                 "transport_resume_authorization": resume},
+            ):
+                run_meta.append_jsonl_locked(dispatch_path, row)
+            for row in (
+                {
+                    "schema": "anchorpatch.run_metadata/3",
+                    "invocation_id": old_invocation,
+                    "worker_launch_id": old_worker,
+                    "worker_pid": old_pid, "samples": [sample],
+                    "status": "infrastructure_incomplete",
+                    "task_plans": {sample: {
+                        "sha256": plan_sha, "round_trips": 2}},
+                    "transport_resume_authorization": None,
+                },
+                {
+                    "schema": "anchorpatch.run_metadata/3",
+                    "invocation_id": new_invocation,
+                    "worker_launch_id": new_worker,
+                    "worker_pid": new_pid, "samples": [sample],
+                    "status": "started",
+                    "task_plans": {sample: {
+                        "sha256": plan_sha, "round_trips": 2}},
+                    "transport_resume_authorization": (
+                        paired_dispatch._canonical_resume_authorization(
+                            resume)),
+                },
+            ):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "run_metadata.jsonl"), row)
+            paired_dispatch._write_active_worker_set(
+                out_dir, manifest,
+                [] if variant == "unconsumed" else [{
+                    "worker_launch_id": new_worker, "sample": sample,
+                }])
+
+            attempt_rows = []
+
+            def append_event(exact_id, root, generation, parent, worker,
+                             event, **fields):
+                attempt_rows.append({
+                    "schema": "anchorpatch.api_attempt/4",
+                    "step_id": "/".join(root.split("/")[:4]),
+                    "semantic_root_id": root,
+                    "semantic_call_id": exact_id,
+                    "generation_index": generation,
+                    "parent_semantic_call_id": parent,
+                    "worker_launch_id": worker,
+                    "event": event,
+                    **fields,
+                })
+
+            def append_success(exact_id, root, generation, parent, worker,
+                               call_id, fingerprint, attempt_index):
+                append_event(
+                    exact_id, root, generation, parent, worker,
+                    "semantic_request", call_id=call_id,
+                    call_kind="hybridpatch_primary",
+                    request_fingerprint=fingerprint)
+                append_event(
+                    exact_id, root, generation, parent, worker,
+                    "attempt_start", call_id=call_id,
+                    attempt_index=attempt_index,
+                    call_kind="hybridpatch_primary",
+                    attempt_kind=(
+                        "transport_initial" if generation == 0
+                        else "transport_recovery_initial"),
+                    request_fingerprint=fingerprint)
+                append_event(
+                    exact_id, root, generation, parent, worker,
+                    "generation_progress", call_id=call_id,
+                    attempt_index=attempt_index, delta_type="text_delta")
+                append_event(
+                    exact_id, root, generation, parent, worker,
+                    "attempt_end", call_id=call_id,
+                    attempt_index=attempt_index,
+                    **self._successful_attempt_end_fields())
+                append_event(
+                    exact_id, root, generation, parent, worker,
+                    "response_committed", call_id=call_id,
+                    attempt_index=attempt_index,
+                    response_slots_used=1,
+                    transient_failure_count=0,
+                    http_attempts_used=attempt_index,
+                    request_fingerprint=fingerprint)
+
+            def append_failure():
+                append_event(
+                    backward_g000, backward_root, 0, None, old_worker,
+                    "semantic_request", call_id="old-backward",
+                    call_kind="hybridpatch_primary",
+                    request_fingerprint=backward_fp)
+                for attempt_index in (1, 2):
+                    append_event(
+                        backward_g000, backward_root, 0, None, old_worker,
+                        "attempt_start", call_id="old-backward",
+                        attempt_index=attempt_index,
+                        call_kind="hybridpatch_primary",
+                        attempt_kind=(
+                            "transport_initial" if attempt_index == 1
+                            else "transport_retry"),
+                        request_fingerprint=backward_fp)
+                    append_event(
+                        backward_g000, backward_root, 0, None, old_worker,
+                        "generation_progress", call_id="old-backward",
+                        attempt_index=attempt_index,
+                        delta_type="text_delta")
+                    append_event(
+                        backward_g000, backward_root, 0, None, old_worker,
+                        "attempt_end", call_id="old-backward",
+                        attempt_index=attempt_index,
+                        **self._failed_attempt_end_fields())
+                    append_event(
+                        backward_g000, backward_root, 0, None, old_worker,
+                        "attempt_budget", call_id="old-backward",
+                        attempt_index=attempt_index,
+                        budget_class="response_slot",
+                        response_slots_used=attempt_index,
+                        transient_failure_count=0)
+                append_event(
+                    backward_g000, backward_root, 0, None, old_worker,
+                    "call_failed", call_id="old-backward",
+                    attempt_index=2, status="provider_failure",
+                    error_type="incomplete_stream",
+                    response_slots_used=2,
+                    transient_failure_count=0,
+                    http_attempts_used=2,
+                    request_fingerprint=backward_fp)
+
+            append_success(
+                forward_g000, forward_root, 0, None, old_worker,
+                "old-forward", forward_fp, 1)
+            append_failure()
+            if variant != "unconsumed":
+                append_success(
+                    backward_g001, backward_root, 1, backward_g000,
+                    new_worker, "new-backward", backward_fp, 3)
+            if variant == "accepted":
+                append_success(
+                    next_g000, next_root, 0, None, new_worker,
+                    "new-next", next_fp, 1)
+            with open(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                for row in attempt_rows:
+                    handle.write(json.dumps(row) + "\n")
+
+            def api_row(*, exact_id, root, rt, direction, generation,
+                        parent, request_id, fingerprint, worker, pid,
+                        provider_called=True, response_replayed=False,
+                        replayed_from=None, failure=False,
+                        http_attempts=1):
+                return {
+                    "schema": "anchorpatch.api_call/4",
+                    "sample": sample, "method": method,
+                    "rt_index": rt, "direction": direction,
+                    "call_kind": "hybridpatch_primary",
+                    "step_id": "/".join(root.split("/")[:4]),
+                    "semantic_root_id": root,
+                    "semantic_call_id": exact_id,
+                    "generation_index": generation,
+                    "parent_semantic_call_id": parent,
+                    "request_id": request_id,
+                    "worker_launch_id": worker, "worker_pid": pid,
+                    "provider_called": provider_called,
+                    "response_replayed": response_replayed,
+                    "replayed_from_call_id": replayed_from,
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "transport_recovery_index": generation,
+                    "request_fingerprint": fingerprint,
+                    "classification": (
+                        "provider/API failure" if failure else None),
+                    "count_as_method_failure": False,
+                    "error_type": (
+                        "incomplete_stream" if failure else None),
+                    "max_response_slots": 2,
+                    "response_slots_used": 2 if failure else 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": http_attempts,
+                }
+
+            rows = [
+                api_row(
+                    exact_id=forward_g000, root=forward_root, rt=1,
+                    direction="forward", generation=0, parent=None,
+                    request_id="old-forward", fingerprint=forward_fp,
+                    worker=old_worker, pid=old_pid),
+                api_row(
+                    exact_id=backward_g000, root=backward_root, rt=1,
+                    direction="backward", generation=0, parent=None,
+                    request_id="old-backward", fingerprint=backward_fp,
+                    worker=old_worker, pid=old_pid, failure=True,
+                    http_attempts=2),
+                api_row(
+                    exact_id=forward_g000, root=forward_root, rt=1,
+                    direction="forward", generation=0, parent=None,
+                    request_id="replay-forward", fingerprint=forward_fp,
+                    worker=new_worker, pid=new_pid,
+                    provider_called=False, response_replayed=True,
+                    replayed_from="old-forward"),
+            ]
+            if variant == "provider-before":
+                rows[-1].update({
+                    "provider_called": True,
+                    "response_replayed": False,
+                    "replayed_from_call_id": None,
+                })
+            if variant != "unconsumed":
+                recovery_row = api_row(
+                    exact_id=backward_g001, root=backward_root, rt=1,
+                    direction="backward", generation=1,
+                    parent=backward_g000, request_id="new-backward",
+                    fingerprint=backward_fp, worker=new_worker,
+                    pid=new_pid, http_attempts=3)
+                rows.append(recovery_row)
+                if variant == "duplicate":
+                    rows.append(dict(recovery_row))
+            if variant == "accepted":
+                rows.append(api_row(
+                    exact_id=next_g000, root=next_root, rt=2,
+                    direction="forward", generation=0, parent=None,
+                    request_id="new-next", fingerprint=next_fp,
+                    worker=new_worker, pid=new_pid))
+            with open(
+                os.path.join(out_dir, "api_calls.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+
+            os.makedirs(os.path.join(out_dir, "api_journal"), exist_ok=True)
+
+            def write_journal(exact_id, root, generation, parent, call_id,
+                              fingerprint, attempt_index):
+                digest = hashlib.sha256(
+                    exact_id.encode("utf-8")).hexdigest()[:24]
+                run_meta.write_json_atomic(
+                    os.path.join(
+                        out_dir, "api_journal",
+                        f"{digest}.response.json"), {
+                            "schema": "anchorpatch.api_response_journal/4",
+                            "semantic_root_id": root,
+                            "semantic_call_id": exact_id,
+                            "generation_index": generation,
+                            "parent_semantic_call_id": parent,
+                            "call_id": call_id,
+                            "request_fingerprint": fingerprint,
+                            "result": {
+                                "message": "complete",
+                                "stream_complete": True,
+                                "stop_reason": "end_turn",
+                                "input_tokens": 5, "output_tokens": 1,
+                                "transport_revision": (
+                                    "opencode_anthropic_sdk/4"),
+                                "transport_resume_policy": (
+                                    "exact_payload_new_semantic_call/1"),
+                                "call_kind": "hybridpatch_primary",
+                                "semantic_root_id": root,
+                                "semantic_call_id": exact_id,
+                                "generation_index": generation,
+                                "parent_semantic_call_id": parent,
+                                "max_response_slots": 2,
+                                "response_slots_used": 1,
+                                "max_transient_failures": 3,
+                                "transient_failure_count": 0,
+                                "http_attempts_used": attempt_index,
+                            },
+                        })
+
+            write_journal(
+                forward_g000, forward_root, 0, None,
+                "old-forward", forward_fp, 1)
+            if variant != "unconsumed":
+                write_journal(
+                    backward_g001, backward_root, 1, backward_g000,
+                    "new-backward", backward_fp, 3)
+            if variant == "accepted":
+                write_journal(
+                    next_g000, next_root, 0, None,
+                    "new-next", next_fp, 1)
+            return manifest, rows
+
+        cases = (
+            ("accepted", None),
+            ("provider-before",
+             "provider call preceded recovery authorization use"),
+            ("unconsumed", "recovery authorization was not consumed"),
+            ("duplicate", "recovery authorization used more than once"),
+        )
+        for variant, expected_error in cases:
+            with self.subTest(variant=variant), \
+                    tempfile.TemporaryDirectory() as out_dir:
+                manifest, rows = build_fixture(out_dir, variant)
+                with mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")):
+                    inspection = paired_dispatch.inspect_campaign(
+                        out_dir, manifest, active_samples={"sample"})
+                if expected_error is None:
+                    self.assertEqual(inspection["errors"], [])
+                    new_worker_ids = [
+                        row["semantic_call_id"] for row in rows
+                        if row["worker_launch_id"] == "worker-new"
+                    ]
+                    self.assertEqual(new_worker_ids, [
+                        "hybridpatch/sample/rt01/forward/"
+                        "hybridpatch_primary/g000",
+                        "hybridpatch/sample/rt01/backward/"
+                        "hybridpatch_primary/g001",
+                        "hybridpatch/sample/rt02/forward/"
+                        "hybridpatch_primary/g000",
+                    ])
+                else:
+                    self.assertTrue(any(
+                        expected_error in error
+                        for error in inspection["errors"]),
+                        inspection["errors"])
 
     def test_paired_dispatch_counterbalances_and_checks_campaign_integrity(self):
         orders = [paired_dispatch.method_order(index) for index in range(10)]
@@ -571,6 +2131,8 @@ class IntegrationContractTests(unittest.TestCase):
                 },
             }
             api_rows = []
+            attempt_rows = []
+            journal_rows = []
             for method in manifest["config"]["method_set"]:
                 os.makedirs(os.path.join(out_dir, method), exist_ok=True)
                 result_rows = []
@@ -580,26 +2142,109 @@ class IntegrationContractTests(unittest.TestCase):
                         if method == "hybridpatch"
                         else "fullrewrite_primary"
                     )
-                    semantic_call_id = (
-                        f"{method}/sample/rt01/{direction}/{call_kind}"
-                    )
+                    step_id = f"{method}/sample/rt01/{direction}"
+                    semantic_root_id = f"{step_id}/{call_kind}"
+                    semantic_call_id = f"{semantic_root_id}/g000"
+                    request_id = f"original-{method}-{direction}"
+                    request_fingerprint = f"fingerprint-{method}-{direction}"
                     api_rows.append({
+                        "schema": "anchorpatch.api_call/4",
                         "sample": "sample", "method": method,
                         "rt_index": 1, "direction": direction,
                         "call_kind": call_kind,
+                        "step_id": step_id,
+                        "semantic_root_id": semantic_root_id,
                         "semantic_call_id": semantic_call_id,
-                        "request_id": f"original-{method}-{direction}",
+                        "generation_index": 0,
+                        "parent_semantic_call_id": None,
+                        "request_id": request_id,
                         "provider_called": True,
                         "worker_launch_id": "worker-a",
                         "worker_pid": 101,
                         "response_replayed": False,
                         "replayed_from_call_id": None,
-                        "transport_revision": "opencode_anthropic_sdk/3",
+                        "transport_revision": "opencode_anthropic_sdk/4",
+                        "transport_resume_policy": (
+                            "exact_payload_new_semantic_call/1"),
+                        "transport_recovery_index": 0,
+                        "request_fingerprint": request_fingerprint,
+                        "classification": None,
+                        "count_as_method_failure": False,
                         "max_response_slots": 2,
                         "response_slots_used": 1,
                         "max_transient_failures": 3,
                         "transient_failure_count": 0,
+                        "http_attempts_used": 1,
                     })
+                    journal_rows.append((semantic_call_id, {
+                        "schema": "anchorpatch.api_response_journal/4",
+                        "semantic_root_id": semantic_root_id,
+                        "semantic_call_id": semantic_call_id,
+                        "generation_index": 0,
+                        "parent_semantic_call_id": None,
+                        "call_id": request_id,
+                        "request_fingerprint": request_fingerprint,
+                        "result": {
+                            "message": "complete",
+                            "stream_complete": True,
+                            "stop_reason": "end_turn",
+                            "input_tokens": 5,
+                            "output_tokens": 1,
+                            "transport_revision": (
+                                "opencode_anthropic_sdk/4"),
+                            "transport_resume_policy": (
+                                "exact_payload_new_semantic_call/1"),
+                            "call_kind": call_kind,
+                            "semantic_root_id": semantic_root_id,
+                            "semantic_call_id": semantic_call_id,
+                            "generation_index": 0,
+                            "parent_semantic_call_id": None,
+                            "max_response_slots": 2,
+                            "response_slots_used": 1,
+                            "max_transient_failures": 3,
+                            "transient_failure_count": 0,
+                            "http_attempts_used": 1,
+                        },
+                    }))
+                    for event, fields in (
+                        ("semantic_request", {
+                            "call_id": request_id,
+                            "call_kind": call_kind,
+                            "request_fingerprint": request_fingerprint,
+                        }),
+                        ("attempt_start", {
+                            "call_id": request_id, "attempt_index": 1,
+                            "call_kind": call_kind,
+                            "attempt_kind": "transport_initial",
+                            "request_fingerprint": request_fingerprint,
+                        }),
+                        ("generation_progress", {
+                            "call_id": request_id, "attempt_index": 1,
+                            "delta_type": "text_delta",
+                        }),
+                        ("attempt_end", {
+                            "call_id": request_id, "attempt_index": 1,
+                            **self._successful_attempt_end_fields(),
+                        }),
+                        ("response_committed", {
+                            "call_id": request_id, "attempt_index": 1,
+                            "response_slots_used": 1,
+                            "transient_failure_count": 0,
+                            "http_attempts_used": 1,
+                            "request_fingerprint": request_fingerprint,
+                        }),
+                    ):
+                        attempt_rows.append({
+                            "schema": "anchorpatch.api_attempt/4",
+                            "step_id": step_id,
+                            "semantic_root_id": semantic_root_id,
+                            "semantic_call_id": semantic_call_id,
+                            "generation_index": 0,
+                            "parent_semantic_call_id": None,
+                            "worker_launch_id": "worker-a",
+                            "event": event,
+                            **fields,
+                        })
                     result_rows.append({
                         "sample_id": "sample", "method": method,
                         "round_trip_num": 1,
@@ -635,10 +2280,26 @@ class IntegrationContractTests(unittest.TestCase):
                 for row in api_rows:
                     handle.write(json.dumps(row) + "\n")
             with open(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                for row in attempt_rows:
+                    handle.write(json.dumps(row) + "\n")
+            os.makedirs(os.path.join(out_dir, "api_journal"), exist_ok=True)
+            for semantic_call_id, journal in journal_rows:
+                digest = hashlib.sha256(
+                    semantic_call_id.encode("utf-8")).hexdigest()[:24]
+                run_meta.write_json_atomic(
+                    os.path.join(
+                        out_dir, "api_journal",
+                        f"{digest}.response.json"),
+                    journal)
+            with open(
                 os.path.join(out_dir, "run_metadata.jsonl"),
                 "w", encoding="utf-8",
             ) as handle:
                 handle.write(json.dumps({
+                    "schema": "anchorpatch.run_metadata/3",
                     "invocation_id": "invocation-a",
                     "worker_launch_id": "worker-a",
                     "worker_pid": 101,
@@ -650,7 +2311,27 @@ class IntegrationContractTests(unittest.TestCase):
                             "round_trips": 1,
                         },
                     },
+                    "transport_resume_authorization": None,
                 }) + "\n")
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "sample_outcomes.jsonl"), {
+                    "schema": "anchorpatch.sample_outcome/1",
+                    "created_at": "2026-07-17T00:00:00+08:00",
+                    "sample": "sample", "status": "finished",
+                    "worker_launch_id": "worker-a", "worker_pid": 101,
+                    "invocation_id": "invocation-a",
+                    "methods": ["fullrewrite", "hybridpatch"],
+                    "checkpoint_progress": {
+                        "fullrewrite": {
+                            "completed_round_trips": 1,
+                            "committed_rows": 2,
+                        },
+                        "hybridpatch": {
+                            "completed_round_trips": 1,
+                            "committed_rows": 2,
+                        },
+                    },
+                })
             dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
             for dispatch_row in (
                 {
@@ -815,20 +2496,6 @@ class IntegrationContractTests(unittest.TestCase):
                 write_hybrid_rows()
 
                 original = api_rows[0]
-                digest = hashlib.sha256(
-                    original["semantic_call_id"].encode("utf-8")
-                ).hexdigest()[:24]
-                journal_dir = os.path.join(out_dir, "api_journal")
-                os.makedirs(journal_dir, exist_ok=True)
-                run_meta.write_json_atomic(
-                    os.path.join(journal_dir, f"{digest}.response.json"),
-                    {
-                        "schema": "anchorpatch.api_response_journal/3",
-                        "semantic_call_id": original["semantic_call_id"],
-                        "call_id": original["request_id"],
-                        "result": {},
-                    },
-                )
                 replay = dict(original)
                 replay.update({
                     "request_id": "replay-request",
@@ -851,7 +2518,7 @@ class IntegrationContractTests(unittest.TestCase):
                     handle.write(json.dumps(original) + "\n")
                 inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
                 self.assertTrue(any(
-                    "duplicate provider POST" in error
+                    "duplicate provider semantic generation" in error
                     for error in inspection["errors"]
                 ))
 
@@ -1107,7 +2774,8 @@ class IntegrationContractTests(unittest.TestCase):
             dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
             with self.assertRaisesRegex(RuntimeError, "exited with 7"):
                 paired_dispatch._record_worker_exit(
-                    running, "sample", running["sample"], 7, dispatch_log
+                    out_dir, running, "sample", running["sample"], 7,
+                    dispatch_log
                 )
             self.assertIn("sample", running)
             exit_rows = run_meta._read_jsonl_records_with_retry(dispatch_log)
@@ -1128,6 +2796,17 @@ class IntegrationContractTests(unittest.TestCase):
                     "finished_at": None,
                 }],
             )
+            run_meta.append_jsonl_locked(dispatch_log, {
+                "event": "launch_intent",
+                "worker_launch_id": "worker-a",
+                "sample": "sample",
+            })
+            run_meta.append_jsonl_locked(dispatch_log, {
+                "event": "launch",
+                "worker_launch_id": "worker-a",
+                "sample": "sample",
+                "pid": 101,
+            })
             reconciled = paired_dispatch._stop_and_reconcile_workers(
                 out_dir, running)
             self.assertEqual(
@@ -1153,7 +2832,8 @@ class IntegrationContractTests(unittest.TestCase):
             dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
             with self.assertRaisesRegex(RuntimeError, "exited with 7"):
                 paired_dispatch._record_worker_exit(
-                    running, "sample", running["sample"], 7, dispatch_log
+                    out_dir, running, "sample", running["sample"], 7,
+                    dispatch_log
                 )
             self.assertIn("sample", running)
             exit_rows = run_meta._read_jsonl_records_with_retry(dispatch_log)
@@ -1170,7 +2850,18 @@ class IntegrationContractTests(unittest.TestCase):
                     paired_dispatch, "_assert_worker_leases_free"
                 ) as leases_free, \
                 mock.patch.object(
-                    paired_dispatch, "interrupt_running_invocations",
+                    paired_dispatch,
+                    "_audit_running_invocation_provenance",
+                    return_value=[{
+                        "invocation_id": "invocation-a",
+                        "worker_launch_id": "worker-a",
+                        "worker_pid": 101,
+                        "sample": "sample",
+                    }],
+                ) as audit, \
+                mock.patch.object(
+                    paired_dispatch,
+                    "interrupt_audited_running_invocations",
                     return_value=[{"invocation_id": "invocation-a"}],
                 ) as interrupt:
             result = paired_dispatch._stop_and_reconcile_workers(
@@ -1182,11 +2873,171 @@ class IntegrationContractTests(unittest.TestCase):
             [{"invocation_id": "invocation-a"}],
         )
         leases_free.assert_called_once_with(out_dir, running)
+        audit.assert_called_once_with(out_dir)
         interrupt.assert_called_once_with(
             out_dir,
             status="interrupted_by_dispatcher",
-            worker_launch_ids={"worker-a"},
+            audited=[{
+                "invocation_id": "invocation-a",
+                "worker_launch_id": "worker-a",
+                "worker_pid": 101,
+                "sample": "sample",
+            }],
         )
+
+    def test_dispatch_retains_active_worker_until_lease_and_metadata_close(self):
+        class FakeProcess:
+            pid = 101
+
+            @staticmethod
+            def poll():
+                return None
+
+        def make_task_plans(out_dir, samples, *_args):
+            plans = {}
+            for sample in samples:
+                plan_path = os.path.join(
+                    out_dir, f"{sample}.task_plan.json")
+                utils_relay_plan.save_relay_task_plan(
+                    plan_path, ["target"])
+                plans[sample] = {
+                    "path": os.path.basename(plan_path),
+                    "sha256": paired_dispatch._sha256(plan_path),
+                    "forward_state_sequence": ["target"],
+                }
+            return plans
+
+        for hold_lease in (True, False):
+            with self.subTest(hold_lease=hold_lease), \
+                    tempfile.TemporaryDirectory() as out_dir:
+                args = mock.Mock(
+                    campaign_role="smoke", smoke_dir=None,
+                    samples=["sample"], key_labels=["KEY_01"],
+                    keys_file="unused.env", num_round_trips=1, seed=42,
+                    dry_run=False, resume=False, start_timeout=0.1,
+                    poll_interval=0, progress_interval=9999,
+                    notes="unit",
+                )
+                held_lease = []
+
+                def fake_popen(_command, **kwargs):
+                    worker_id = kwargs["env"][
+                        "ANCHORPATCH_WORKER_LAUNCH_ID"]
+                    run_meta._write_jsonl_atomic(
+                        os.path.join(out_dir, "run_metadata.jsonl"),
+                        [{
+                            "invocation_id": f"invocation-{worker_id}",
+                            "worker_launch_id": worker_id,
+                            "worker_pid": 101,
+                            "samples": ["sample"],
+                            "status": "running",
+                            "invocation_finished_at": None,
+                            "finished_at": None,
+                        }],
+                    )
+                    if hold_lease:
+                        lease = open(
+                            kwargs["env"]["ANCHORPATCH_WORKER_LOCK_PATH"],
+                            "a+", encoding="utf-8")
+                        portalocker.lock(
+                            lease,
+                            portalocker.LOCK_EX | portalocker.LOCK_NB)
+                        held_lease.append(lease)
+                    return FakeProcess()
+
+                inspections = iter([
+                    {"errors": [], "api_calls": 0,
+                     "preservation_violations": 0},
+                    {"errors": ["forced global integrity error"],
+                     "api_calls": 0, "preservation_violations": 0},
+                ])
+                try:
+                    with mock.patch.object(
+                            paired_dispatch,
+                            "_validate_campaign_grid"), \
+                            mock.patch.object(
+                                paired_dispatch,
+                                "_require_formal_opencode_transport"), \
+                            mock.patch.object(
+                                paired_dispatch, "read_keys",
+                                return_value={"KEY_01": "redacted"}), \
+                            mock.patch.object(
+                                paired_dispatch, "prepare_task_plans",
+                                side_effect=make_task_plans), \
+                            mock.patch.object(
+                                paired_dispatch, "_git_identity",
+                                return_value=("1" * 40, "clean")), \
+                            mock.patch.object(
+                                paired_dispatch, "code_fingerprint",
+                                return_value={"unit": "test"}), \
+                            mock.patch.object(
+                                paired_dispatch, "inspect_campaign",
+                                side_effect=lambda *_args, **_kwargs: next(
+                                    inspections)), \
+                            mock.patch.object(
+                                paired_dispatch, "_authorize_workers"), \
+                            mock.patch.object(
+                                paired_dispatch.subprocess, "Popen",
+                                side_effect=fake_popen), \
+                            mock.patch.object(
+                                paired_dispatch, "_terminate_workers",
+                                side_effect=RuntimeError(
+                                    "terminate/kill failed")), \
+                            mock.patch.object(
+                                paired_dispatch.time, "sleep"):
+                        result = paired_dispatch._launch_under_lease(
+                            args, out_dir)
+                finally:
+                    for lease in held_lease:
+                        portalocker.unlock(lease)
+                        lease.close()
+
+                self.assertEqual(result, 1)
+                with open(
+                    paired_dispatch._active_worker_set_path(out_dir),
+                    encoding="utf-8",
+                ) as handle:
+                    active = json.load(handle)
+                dispatch_rows = run_meta._read_jsonl_records_with_retry(
+                    os.path.join(out_dir, "dispatch_log.jsonl"))
+                stop = next(
+                    row for row in reversed(dispatch_rows)
+                    if row.get("event") == "campaign_stop")
+                reconciliation = stop["worker_reconciliation"]
+                self.assertEqual(
+                    reconciliation["termination_error"],
+                    "terminate/kill failed")
+                metadata = run_meta.read_run_metadata_snapshot(out_dir)
+
+                if hold_lease:
+                    self.assertEqual(
+                        [item["sample"]
+                         for item in active["workers"].values()],
+                        ["sample"])
+                    self.assertIn(
+                        "sample", reconciliation["lease_error"])
+                    self.assertEqual(
+                        reconciliation["active_set_retained"],
+                        ["sample"])
+                    self.assertNotIn(
+                        "audited_invocations", reconciliation)
+                    self.assertEqual(metadata[0]["status"], "running")
+                else:
+                    self.assertEqual(active["workers"], {})
+                    self.assertIsNone(reconciliation["lease_error"])
+                    self.assertEqual(
+                        len(reconciliation["closed_invocations"]), 1)
+                    self.assertEqual(
+                        reconciliation["audited_invocations"][0]["sample"],
+                        "sample")
+                    self.assertEqual(
+                        reconciliation["audited_invocations"][0][
+                            "worker_pid"],
+                        101)
+                    self.assertNotIn("active_set_retained", reconciliation)
+                    self.assertEqual(
+                        metadata[0]["status"],
+                        "interrupted_by_dispatcher")
 
     def test_audited_resume_cas_rejects_toctou_and_malformed_identity(self):
         def running(invocation, worker, pid, sample):
@@ -1301,6 +3152,170 @@ class IntegrationContractTests(unittest.TestCase):
                 run_meta.read_campaign_stop_conditions(out_dir)
             with self.assertRaisesRegex(RuntimeError, "invalid campaign stop"):
                 run_meta.record_campaign_stop_condition(out_dir, "new")
+
+    def test_stop_latched_during_transport_preflight_blocks_provider_post(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+        ):
+            provider = mock.Mock(
+                side_effect=AssertionError("provider must not be called"))
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "minimax-m3", provider)
+            recorder.set_step(1, "forward", "target")
+
+            def latch_after_ledger_preflight(*_args, **_kwargs):
+                run_meta.record_campaign_stop_condition(
+                    out_dir, "sibling_integrity_failure",
+                    sample="sibling")
+                return None, None
+
+            with mock.patch.object(
+                    recorder, "_find_lineage_journal",
+                    side_effect=latch_after_ledger_preflight):
+                with self.assertRaises(run_meta.CampaignStoppedError):
+                    recorder.generate(
+                        [{"role": "user", "content": "Hello"}],
+                        model="minimax-m3",
+                        call_kind="hybridpatch_primary")
+
+            provider.assert_not_called()
+            ledger = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+            self.assertFalse(any(
+                row.get("event") == "attempt_start" for row in ledger))
+
+    def test_stop_latched_during_backoff_blocks_retry_provider_post(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+        ):
+            provider_posts = []
+            first_failure = model_openai._HTTPStatusError(
+                503, "temporary service failure")
+
+            def fake_transport_call(*_args, **kwargs):
+                attempt_index = kwargs["attempt_index"]
+                sink = kwargs["raw_event_sink"]
+                sink({
+                    "record_type": "attempt_start",
+                    "attempt_index": attempt_index,
+                    "attempt_kind": (
+                        "transport_initial" if attempt_index == 1
+                        else "transport_retry"),
+                })
+                # The SDK emits attempt_start immediately before opening the
+                # stream; reaching here represents an actual provider POST.
+                provider_posts.append(attempt_index)
+                if attempt_index == 1:
+                    attempt = {
+                        "attempt_index": 1,
+                        **self._failed_attempt_end_fields(
+                            generation_delta_seen=False,
+                            error_type="server_error"),
+                        "http_status": 503,
+                    }
+                    first_failure._opencode_attempt = attempt
+                    sink({"record_type": "attempt_end", "attempt": attempt})
+                    raise first_failure
+                raise AssertionError("retry POST must be stopped by latch")
+
+            def latch_during_backoff(_delay):
+                run_meta.record_campaign_stop_condition(
+                    out_dir, "sibling_integrity_failure",
+                    sample="sibling")
+
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None, "minimax-m3",
+                model_openai.OpenAI_Model().generate)
+            recorder.set_step(1, "forward", "target")
+            with mock.patch.object(
+                    model_openai, "_call_opencode_messages",
+                    side_effect=fake_transport_call) as transport_call, \
+                    mock.patch.object(
+                        model_openai.time, "sleep",
+                        side_effect=latch_during_backoff):
+                with self.assertRaises(model_openai.OpenCodeTransportError):
+                    recorder.generate(
+                        [{"role": "user", "content": "Hello"}],
+                        model="minimax-m3", return_metadata=True,
+                        call_kind="hybridpatch_primary")
+
+            self.assertEqual(transport_call.call_count, 2)
+            self.assertEqual(provider_posts, [1])
+            ledger = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+            self.assertEqual(
+                [row.get("event") for row in ledger].count(
+                    "attempt_start"),
+                1)
+            self.assertFalse(any(
+                row.get("event") == "response_committed" for row in ledger))
+
+    def test_stop_latch_wins_commit_ordering_lock_with_zero_relay_commit(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            result_path = os.path.join(out_dir, "hybridpatch", "sample.jsonl")
+            checkpoint_path = os.path.join(
+                out_dir, "hybridpatch", "sample.ckpt.json")
+            rows = [
+                {"round_trip_num": 1,
+                 "round_trip_direction": "forward"},
+                {"round_trip_num": 1,
+                 "round_trip_direction": "backward"},
+            ]
+            checkpoint = {"completed_round_trips": 1}
+            stop_has_ordering_lock = threading.Event()
+            allow_stop_write = threading.Event()
+            stop_errors = []
+            commit_errors = []
+            original_write = run_meta.write_json_atomic
+
+            def blocked_stop_write(path, payload):
+                if os.path.basename(path) == "campaign_stop.json":
+                    stop_has_ordering_lock.set()
+                    if not allow_stop_write.wait(5):
+                        raise RuntimeError("unit-test stop barrier timed out")
+                return original_write(path, payload)
+
+            def stop_worker():
+                try:
+                    run_meta.record_campaign_stop_condition(
+                        out_dir, "sibling_integrity_failure")
+                except BaseException as exc:
+                    stop_errors.append(exc)
+
+            def commit_worker():
+                try:
+                    run_meta.append_relay_rows_and_checkpoint(
+                        result_path, checkpoint_path, rows, checkpoint,
+                        campaign_out_dir=out_dir)
+                except BaseException as exc:
+                    commit_errors.append(exc)
+
+            with mock.patch.object(
+                    run_meta, "write_json_atomic",
+                    side_effect=blocked_stop_write):
+                stopper = threading.Thread(target=stop_worker, daemon=True)
+                stopper.start()
+                self.assertTrue(stop_has_ordering_lock.wait(5))
+                committer = threading.Thread(target=commit_worker, daemon=True)
+                committer.start()
+                self.assertTrue(committer.is_alive())
+                allow_stop_write.set()
+                stopper.join(5)
+                committer.join(5)
+
+            self.assertFalse(stopper.is_alive())
+            self.assertFalse(committer.is_alive())
+            self.assertEqual(stop_errors, [])
+            self.assertEqual(len(commit_errors), 1)
+            self.assertIsInstance(
+                commit_errors[0], run_meta.CampaignStoppedError)
+            self.assertFalse(os.path.exists(result_path))
+            self.assertFalse(os.path.exists(checkpoint_path))
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir)[0][
+                    "condition"],
+                "sibling_integrity_failure")
 
     def test_dispatch_worker_barrier_closes_lease_metadata_pid_and_plan(self):
         with tempfile.TemporaryDirectory() as out_dir:
@@ -1571,7 +3586,9 @@ class IntegrationContractTests(unittest.TestCase):
                     "distractor": True,
                     "opencode_transport": "anthropic_sdk_v2",
                     "minimax_transport": "opencode",
-                    "transport_revision": "opencode_anthropic_sdk/3",
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
                     "stop_on_preservation_violation": True,
                 },
                 "task_plans": {},
@@ -1892,6 +3909,129 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(backward_stop["direction"], "backward")
             self.assertFalse(backward_stop["result_committed"])
 
+    def test_sibling_stop_during_backward_generation_blocks_eval_and_commit(self):
+        class DummyDomain:
+            samples_folder = None
+
+        class DummyExecLog:
+            def to_dict(self):
+                return {"ops_accepted": 1, "ops_total": 1}
+
+        states = {
+            "initial": {
+                "context": ["a.txt"], "solution_folder": "solution",
+                "prompts": [{
+                    "target_state": "target", "prompt": "forward"}],
+            },
+            "target": {
+                "context": ["a.txt"], "solution_folder": "solution",
+                "prompts": [{
+                    "target_state": "initial", "prompt": "backward"}],
+            },
+        }
+        sample = {"start_state": "initial", "sample_type": "dummy"}
+        edit_result = (
+            "raw", {"a.txt": "new"}, {}, DummyExecLog(), "hybridpatch",
+            {"a.txt": "old"}, {},
+        )
+        backward_entered = threading.Event()
+        release_backward = threading.Event()
+        calls = []
+        runner_errors = []
+
+        def blocking_edit(*_args, **kwargs):
+            direction = kwargs.get("step_direction")
+            calls.append(direction)
+            if direction == "backward":
+                backward_entered.set()
+                if not release_backward.wait(5):
+                    raise RuntimeError("unit-test backward barrier timed out")
+            return edit_result
+
+        with tempfile.TemporaryDirectory() as out_dir, \
+                tempfile.TemporaryDirectory() as sample_dir, \
+                mock.patch.object(
+                    experiment_runner, "_require_formal_opencode_transport"), \
+                mock.patch.object(
+                    experiment_runner, "load_sample",
+                    return_value=(sample, sample_dir, states)), \
+                mock.patch.object(
+                    experiment_runner, "get_domain",
+                    return_value=DummyDomain()), \
+                mock.patch.object(
+                    experiment_runner, "load_distractor_context",
+                    return_value={}), \
+                mock.patch.object(
+                    experiment_runner, "build_context_from_folder",
+                    return_value={"a.txt": "old"}), \
+                mock.patch.object(
+                    experiment_runner, "build_relay_task_plan",
+                    return_value=["target"]), \
+                mock.patch.object(
+                    experiment_runner, "register_task_plan",
+                    return_value={"sha256": "a" * 64,
+                                  "round_trips": 1}), \
+                mock.patch.object(
+                    experiment_runner, "shuffle_context",
+                    side_effect=lambda value: value), \
+                mock.patch.object(
+                    experiment_runner, "merge_distractor",
+                    side_effect=lambda value, _distractor: value), \
+                mock.patch.object(
+                    experiment_runner, "_edit_step",
+                    side_effect=blocking_edit), \
+                mock.patch.object(
+                    experiment_runner, "_evaluate",
+                    return_value={"score": 1.0}) as evaluate, \
+                mock.patch.object(
+                    experiment_runner, "is_context_complete",
+                    return_value=True), \
+                mock.patch.object(experiment_runner, "dump_step_docs"), \
+                mock.patch.object(
+                    experiment_runner, "generate_response_id",
+                    return_value="rid-fwd"), \
+                mock.patch.object(
+                    experiment_runner, "_row",
+                    return_value={"evaluation": {"score": 1.0},
+                                  "bdpatch": {}}), \
+                mock.patch.object(
+                    experiment_runner,
+                    "append_relay_rows_and_checkpoint") as commit:
+
+            def run_worker():
+                try:
+                    experiment_runner.run_relay(
+                        "hybridpatch", "sample", num_round_trips=1,
+                        include_distractor=True, out_dir=out_dir,
+                        model="offline-test-model", max_tokens=16,
+                        generate_fn=mock.Mock(), printing=False)
+                except BaseException as exc:
+                    runner_errors.append(exc)
+
+            worker = threading.Thread(target=run_worker, daemon=True)
+            worker.start()
+            self.assertTrue(backward_entered.wait(5), runner_errors)
+            run_meta.record_campaign_stop_condition(
+                out_dir, "sibling_integrity_failure",
+                sample="sibling")
+            release_backward.set()
+            worker.join(5)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(calls, ["forward", "backward"])
+            self.assertEqual(evaluate.call_count, 1)
+            commit.assert_not_called()
+            self.assertEqual(len(runner_errors), 1)
+            self.assertIsInstance(
+                runner_errors[0], run_meta.CampaignStoppedError)
+            self.assertRegex(
+                str(runner_errors[0]),
+                "campaign stop")
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, "hybridpatch", "sample.jsonl")))
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, "hybridpatch", "sample.ckpt.json")))
+
     def test_formal_runner_rejects_legacy_transport(self):
         with mock.patch.dict(
             os.environ, {
@@ -1945,6 +4085,10 @@ class IntegrationContractTests(unittest.TestCase):
         for raw, classification in (
             ("", "model_empty"),
             ("I cannot perform this task.", "normal"),
+            ("Use {ordinary braces} in prose.", "normal"),
+            ('```json\n{"answer":"ordinary data"}\n```', "normal"),
+            ("I cannot perform this task; {no protocol was emitted}.",
+             "normal"),
         ):
             calls = []
 
@@ -2215,7 +4359,9 @@ class IntegrationContractTests(unittest.TestCase):
             "cache_creation_input_tokens": 0, "transport_attempts": [],
             "call_kind": "fullrewrite_primary", "thinking_mode": "adaptive",
             "transport": "anthropic_sdk_v2",
-            "transport_revision": "opencode_anthropic_sdk/3",
+            "transport_revision": "opencode_anthropic_sdk/4",
+            "transport_resume_policy": (
+                "exact_payload_new_semantic_call/1"),
             "max_response_slots": 2, "response_slots_used": 1,
             "max_transient_failures": 3, "transient_failure_count": 0,
             "http_attempts_used": 1,
@@ -2225,10 +4371,17 @@ class IntegrationContractTests(unittest.TestCase):
             calls.append(1)
             kwargs["_raw_event_sink"]({
                 "record_type": "attempt_start", "attempt_index": 1,
+                "attempt_kind": "transport_initial",
+            })
+            kwargs["_raw_event_sink"]({
+                "record_type": "sdk_stream_event", "attempt_index": 1,
+                "event": {"type": "content_block_delta",
+                          "delta": {"type": "text_delta"}},
             })
             kwargs["_raw_event_sink"]({
                 "record_type": "attempt_end", "attempt": {
-                    "attempt_index": 1, "status": "success", "stream_complete": True,
+                    "attempt_index": 1,
+                    **self._successful_attempt_end_fields(),
                 },
             })
             kwargs["_response_commit_sink"](result)
@@ -2244,6 +4397,17 @@ class IntegrationContractTests(unittest.TestCase):
             first.generate([{"role": "user", "content": "Hello"}],
                            model="minimax-m3", call_kind="fullrewrite_primary")
 
+            ledger_path = os.path.join(
+                out_dir, "api_attempt_ledger.jsonl")
+            ledger = run_meta._read_jsonl_records_with_retry(ledger_path)
+            self.assertEqual(
+                [row.get("event") for row in ledger].count(
+                    "response_committed"), 1)
+            with open(ledger_path, "w", encoding="utf-8") as handle:
+                for row in ledger:
+                    if row.get("event") != "response_committed":
+                        handle.write(json.dumps(row) + "\n")
+
             second = run_meta.ApiCallRecorder(
                 out_dir, "fullrewrite", "sample", None, "minimax-m3",
                 mock.Mock(side_effect=AssertionError("provider must not be called")),
@@ -2257,40 +4421,1065 @@ class IntegrationContractTests(unittest.TestCase):
                 os.path.join(out_dir, "api_calls.jsonl")
             )
             self.assertEqual([r["provider_called"] for r in records], [True, False])
+            reconciled = run_meta._read_jsonl_records_with_retry(ledger_path)
+            self.assertEqual(
+                [row.get("event") for row in reconciled].count(
+                    "response_committed"), 1)
 
-    def test_dangling_generation_attempt_budget_survives_worker_restart(self):
+            journal_path = second._journal_path(
+                second._semantic_ids("fullrewrite_primary")[1])
+            with open(journal_path, encoding="utf-8") as handle:
+                valid = json.load(handle)
+            broken = dict(valid)
+            broken["request_fingerprint"] = "wrong-fingerprint"
+            run_meta.write_json_atomic(journal_path, broken)
+            fingerprint_forbidden = mock.Mock(
+                side_effect=AssertionError("provider must not be called"))
+            third = run_meta.ApiCallRecorder(
+                out_dir, "fullrewrite", "sample", None,
+                "minimax-m3", fingerprint_forbidden)
+            third.set_step(1, "forward", "target")
+            with self.assertRaisesRegex(
+                    RuntimeError, "fingerprint differs within"):
+                third.generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="minimax-m3", call_kind="fullrewrite_primary")
+            fingerprint_forbidden.assert_not_called()
+
+            broken = dict(valid)
+            broken["schema"] = "anchorpatch.api_response_journal/3"
+            run_meta.write_json_atomic(journal_path, broken)
+            forbidden = mock.Mock(
+                side_effect=AssertionError("provider must not be called"))
+            fourth = run_meta.ApiCallRecorder(
+                out_dir, "fullrewrite", "sample", None,
+                "minimax-m3", forbidden)
+            fourth.set_step(1, "forward", "target")
+            with self.assertRaisesRegex(RuntimeError, "journal schema"):
+                fourth.generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="minimax-m3", call_kind="fullrewrite_primary")
+            forbidden.assert_not_called()
+
+    def test_blank_stop_reason_fails_closed_in_ledger_and_journal(self):
+        for stop_reason in ("", " \t "):
+            with self.subTest(
+                    artifact="ledger", stop_reason=repr(stop_reason)), \
+                    tempfile.TemporaryDirectory() as out_dir:
+                provider = mock.Mock(
+                    side_effect=AssertionError("provider must not be called"))
+                recorder = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", provider)
+                recorder.set_step(1, "forward", "target")
+                _step, semantic = recorder._semantic_ids(
+                    "hybridpatch_primary")
+                call_id = "call-ledger"
+                fingerprint = "fingerprint-ledger"
+                recorder._append_ledger(
+                    semantic, "semantic_request", call_id=call_id,
+                    call_kind="hybridpatch_primary",
+                    request_fingerprint=fingerprint)
+                recorder._append_ledger(
+                    semantic, "attempt_start", attempt_index=1,
+                    call_id=call_id, call_kind="hybridpatch_primary",
+                    attempt_kind="transport_initial",
+                    request_fingerprint=fingerprint)
+                recorder._append_ledger(
+                    semantic, "generation_progress", attempt_index=1,
+                    call_id=call_id, delta_type="text_delta")
+                terminal = self._successful_attempt_end_fields()
+                terminal["stop_reason"] = stop_reason
+                recorder._append_ledger(
+                    semantic, "attempt_end", attempt_index=1,
+                    call_id=call_id, **terminal)
+                with self.assertRaisesRegex(
+                        RuntimeError, "incomplete successful stream"):
+                    recorder._ledger_state(semantic)
+                provider.assert_not_called()
+
+            with self.subTest(
+                    artifact="journal", stop_reason=repr(stop_reason)), \
+                    tempfile.TemporaryDirectory() as out_dir:
+                provider = mock.Mock(
+                    side_effect=AssertionError("provider must not be called"))
+                recorder = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", provider)
+                recorder.set_step(1, "forward", "target")
+                _step, semantic = recorder._semantic_ids(
+                    "hybridpatch_primary")
+                lineage = run_meta._semantic_lineage_fields(semantic)
+                fingerprint = "fingerprint-journal"
+                result = {
+                    "semantic_root_id": lineage["semantic_root_id"],
+                    "semantic_call_id": semantic,
+                    "generation_index": 0,
+                    "parent_semantic_call_id": None,
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "call_kind": "hybridpatch_primary",
+                    "stream_complete": True,
+                    "stop_reason": stop_reason,
+                    "message": "complete text",
+                    "input_tokens": 1,
+                    "output_tokens": 1,
+                    "max_response_slots": 2,
+                    "max_transient_failures": 3,
+                    "response_slots_used": 1,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": 1,
+                }
+                run_meta.write_json_atomic(
+                    recorder._journal_path(semantic), {
+                        "schema": run_meta.API_RESPONSE_JOURNAL_SCHEMA,
+                        "semantic_root_id": lineage["semantic_root_id"],
+                        "semantic_call_id": semantic,
+                        "generation_index": 0,
+                        "parent_semantic_call_id": None,
+                        "call_id": "call-journal",
+                        "request_fingerprint": fingerprint,
+                        "result": result,
+                    })
+                with self.assertRaisesRegex(
+                        RuntimeError, "journal result is incomplete"):
+                    recorder._find_lineage_journal(
+                        lineage["semantic_root_id"], fingerprint)
+                provider.assert_not_called()
+
+    def test_committed_ledger_without_journal_fails_before_provider(self):
+        result = {
+            "message": "Hello", "http_status": 200,
+            "stream_complete": True, "finish_reason": "end_turn",
+            "stop_reason": "end_turn", "response_classification": "normal",
+            "prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6,
+            "input_tokens": 5, "output_tokens": 1,
+            "cache_read_input_tokens": 0,
+            "cache_creation_input_tokens": 0, "transport_attempts": [],
+            "call_kind": "fullrewrite_primary", "thinking_mode": "adaptive",
+            "transport": "anthropic_sdk_v2",
+            "transport_revision": "opencode_anthropic_sdk/4",
+            "max_response_slots": 2, "response_slots_used": 1,
+            "max_transient_failures": 3, "transient_failure_count": 0,
+            "http_attempts_used": 1,
+        }
+
+        def fake_generate(*_args, **kwargs):
+            kwargs["_raw_event_sink"]({
+                "record_type": "attempt_start", "attempt_index": 1,
+                "attempt_kind": "transport_initial",
+            })
+            kwargs["_raw_event_sink"]({
+                "record_type": "sdk_stream_event", "attempt_index": 1,
+                "event": {"type": "content_block_delta",
+                          "delta": {"type": "text_delta"}},
+            })
+            kwargs["_raw_event_sink"]({
+                "record_type": "attempt_end", "attempt": {
+                    "attempt_index": 1,
+                    **self._successful_attempt_end_fields(),
+                },
+            })
+            kwargs["_response_commit_sink"](result)
+            return dict(result)
+
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
             os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
         ):
             first = run_meta.ApiCallRecorder(
-                out_dir, "hybridpatch", "sample", None, "minimax-m3", mock.Mock()
-            )
+                out_dir, "fullrewrite", "sample", None,
+                "minimax-m3", fake_generate)
+            first.set_step(1, "forward", "target")
+            first.generate(
+                [{"role": "user", "content": "Hello"}],
+                model="minimax-m3", call_kind="fullrewrite_primary")
+            journal_path = first._journal_path(
+                first._semantic_ids("fullrewrite_primary")[1])
+            os.remove(journal_path)
+
+            forbidden = mock.Mock(
+                side_effect=AssertionError("provider must not be called"))
+            second = run_meta.ApiCallRecorder(
+                out_dir, "fullrewrite", "sample", None,
+                "minimax-m3", forbidden)
+            second.set_step(1, "forward", "target")
+            with self.assertRaisesRegex(
+                    RuntimeError, "committed response.*journal is missing"):
+                second.generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="minimax-m3", call_kind="fullrewrite_primary")
+            forbidden.assert_not_called()
+
+    def test_dangling_generation_attempt_fails_closed_before_provider(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+        ):
+            provider = mock.Mock(
+                side_effect=AssertionError("provider must not be called"))
+            first = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None, "minimax-m3",
+                provider)
             first.set_step(2, "backward", "target")
+            messages = [{"role": "user", "content": "Hello"}]
+            generate_kwargs = {
+                "model": "minimax-m3",
+                "call_kind": "hybridpatch_primary",
+            }
+            fingerprint = run_meta._semantic_request_fingerprint(
+                (messages,), generate_kwargs, "minimax-m3",
+                "hybridpatch_primary")
             _step, semantic = first._semantic_ids("hybridpatch_primary")
-            first._append_ledger(semantic, "attempt_start", attempt_index=1)
             first._append_ledger(
-                semantic, "generation_progress", attempt_index=1,
-                delta_type="thinking_delta",
-            )
+                semantic, "semantic_request", call_id="crashed-call",
+                call_kind="hybridpatch_primary",
+                request_fingerprint=fingerprint)
+            first._append_ledger(
+                semantic, "attempt_start", attempt_index=1,
+                call_id="crashed-call", call_kind="hybridpatch_primary",
+                attempt_kind="transport_initial",
+                request_fingerprint=fingerprint)
+            second = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None, "minimax-m3",
+                provider)
+            second.set_step(2, "backward", "target")
+            with self.assertRaisesRegex(
+                    RuntimeError, "unclosed HTTP attempt"):
+                second.generate(
+                    messages, model="minimax-m3",
+                    call_kind="hybridpatch_primary")
+            provider.assert_not_called()
+
+    def test_malformed_or_v3_attempt_ledger_fails_closed_before_provider(self):
+        for payload, expected in (
+            ('{"schema":', "invalid JSONL"),
+            (json.dumps({
+                "schema": "anchorpatch.api_attempt/3",
+                "semantic_call_id": (
+                    "hybridpatch/sample/rt01/forward/hybridpatch_primary"),
+                "event": "semantic_request",
+            }), "schema differs"),
+            (json.dumps({
+                "schema": "anchorpatch.api_attempt/4",
+                "step_id": "hybridpatch/sample/rt01/forward",
+                "semantic_root_id": (
+                    "hybridpatch/sample/rt01/forward/hybridpatch_primary"),
+                "semantic_call_id": (
+                    "hybridpatch/sample/rt01/forward/"
+                    "hybridpatch_primary/g000"),
+                "generation_index": 0,
+                "parent_semantic_call_id": None,
+                "event": "transport_resume",
+            }), "unknown event|retired same-ID"),
+        ):
+            with self.subTest(expected=expected), \
+                    tempfile.TemporaryDirectory() as out_dir, \
+                    mock.patch.dict(
+                        os.environ,
+                        {"OPENCODE_API_KEY": "unit-test-key"}, clear=False):
+                with open(
+                    os.path.join(out_dir, "api_attempt_ledger.jsonl"),
+                    "w", encoding="utf-8",
+                ) as handle:
+                    handle.write(payload + "\n")
+                provider = mock.Mock(
+                    side_effect=AssertionError("provider must not be called"))
+                recorder = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", provider)
+                recorder.set_step(1, "forward", "target")
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    recorder.generate(
+                        [{"role": "user", "content": "Hello"}],
+                        model="minimax-m3",
+                        call_kind="hybridpatch_primary")
+                provider.assert_not_called()
+
+    def test_lineage_gap_and_fingerprint_mismatch_fail_before_provider(self):
+        cases = (
+            ("gap", 2, "same", "semantic lineage generation order"),
+            ("fingerprint", 1, "different",
+             "request fingerprint is inconsistent"),
+        )
+        for label, next_generation, next_fingerprint, expected in cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as out_dir, \
+                    mock.patch.dict(
+                        os.environ,
+                        {"OPENCODE_API_KEY": "unit-test-key"}, clear=False):
+                provider = mock.Mock(
+                    side_effect=AssertionError("provider must not be called"))
+                recorder = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", provider)
+                recorder.set_step(1, "forward", "target")
+                step_id, root = recorder._semantic_root(
+                    "hybridpatch_primary")
+                generation_zero = f"{root}/g000"
+                recorder._append_ledger(
+                    generation_zero, "semantic_request", call_id="call-0",
+                    call_kind="hybridpatch_primary",
+                    request_fingerprint="same")
+                for attempt_index in (1, 2):
+                    recorder._append_ledger(
+                        generation_zero, "attempt_start",
+                        attempt_index=attempt_index, call_id="call-0",
+                        call_kind="hybridpatch_primary",
+                        attempt_kind=(
+                            "transport_initial" if attempt_index == 1
+                            else "transport_retry"),
+                        request_fingerprint="same")
+                    recorder._append_ledger(
+                        generation_zero, "generation_progress",
+                        attempt_index=attempt_index, call_id="call-0",
+                        delta_type="text_delta")
+                    recorder._append_ledger(
+                        generation_zero, "attempt_end",
+                        attempt_index=attempt_index, call_id="call-0",
+                        **self._failed_attempt_end_fields())
+                    recorder._append_ledger(
+                        generation_zero, "attempt_budget",
+                        attempt_index=attempt_index, call_id="call-0",
+                        budget_class="response_slot",
+                        response_slots_used=attempt_index,
+                        transient_failure_count=0)
+                recorder._append_ledger(
+                    generation_zero, "call_failed", call_id="call-0",
+                    attempt_index=2, status="provider_failure",
+                    error_type="incomplete_stream", response_slots_used=2,
+                    transient_failure_count=0, http_attempts_used=2,
+                    request_fingerprint="same")
+                exact = f"{root}/g{next_generation:03d}"
+                parent = f"{root}/g{next_generation - 1:03d}"
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "api_attempt_ledger.jsonl"), {
+                        "schema": "anchorpatch.api_attempt/4",
+                        "step_id": step_id,
+                        "semantic_root_id": root,
+                        "semantic_call_id": exact,
+                        "generation_index": next_generation,
+                        "parent_semantic_call_id": parent,
+                        "worker_launch_id": recorder.worker_launch_id,
+                        "event": "semantic_request",
+                        "call_id": f"call-{next_generation}",
+                        "call_kind": "hybridpatch_primary",
+                        "request_fingerprint": next_fingerprint,
+                    })
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    recorder.generate(
+                        [{"role": "user", "content": "Hello"}],
+                        model="minimax-m3",
+                        call_kind="hybridpatch_primary")
+                provider.assert_not_called()
+
+    def test_forged_transport_budget_counters_fail_before_provider(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+        ):
+            provider = mock.Mock(
+                side_effect=AssertionError("provider must not be called"))
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "minimax-m3", provider)
+            recorder.set_step(1, "forward", "target")
+            _step, semantic = recorder._semantic_ids(
+                "hybridpatch_primary")
+            fingerprint = "fingerprint"
+            recorder._append_ledger(
+                semantic, "semantic_request", call_id="call-0",
+                call_kind="hybridpatch_primary",
+                request_fingerprint=fingerprint)
+            recorder._append_ledger(
+                semantic, "attempt_start", attempt_index=1,
+                call_id="call-0", call_kind="hybridpatch_primary",
+                attempt_kind="transport_initial",
+                request_fingerprint=fingerprint)
+            recorder._append_ledger(
+                semantic, "attempt_end", attempt_index=1,
+                call_id="call-0",
+                **self._failed_attempt_end_fields(
+                    generation_delta_seen=False,
+                    error_type="connection_error"))
+            recorder._append_ledger(
+                semantic, "attempt_budget", attempt_index=1,
+                call_id="call-0", budget_class="response_slot",
+                response_slots_used=1, transient_failure_count=0)
+            with self.assertRaisesRegex(
+                    RuntimeError, "budget counters disagree"):
+                recorder.generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="minimax-m3",
+                    call_kind="hybridpatch_primary")
+            provider.assert_not_called()
+
+    def test_request_fingerprint_includes_positional_generate_arguments(self):
+        base = ([{"role": "user", "content": "one"}],)
+        changed = ([{"role": "user", "content": "two"}],)
+        kwargs = {
+            "model": "minimax-m3", "call_kind": "hybridpatch_primary"}
+        self.assertNotEqual(
+            run_meta._semantic_request_fingerprint(
+                base, kwargs, "minimax-m3", "hybridpatch_primary"),
+            run_meta._semantic_request_fingerprint(
+                changed, kwargs, "minimax-m3", "hybridpatch_primary"),
+        )
+
+    def test_future_generation_delta_and_signature_delta_restore_distinct_budgets(self):
+        def state_after(delta_type):
+            with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+                os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+            ):
+                recorder = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", mock.Mock())
+                recorder.set_step(3, "forward", "target")
+                messages = [{"role": "user", "content": "Hello"}]
+                kwargs = {
+                    "model": "minimax-m3",
+                    "call_kind": "hybridpatch_primary",
+                }
+                fingerprint = run_meta._semantic_request_fingerprint(
+                    (messages,), kwargs, "minimax-m3",
+                    "hybridpatch_primary")
+                _step, semantic = recorder._semantic_ids(
+                    "hybridpatch_primary")
+                recorder._append_ledger(
+                    semantic, "semantic_request", call_id="failed-call",
+                    call_kind="hybridpatch_primary",
+                    request_fingerprint=fingerprint)
+                recorder._append_ledger(
+                    semantic, "attempt_start", attempt_index=1,
+                    call_id="failed-call", call_kind="hybridpatch_primary",
+                    attempt_kind="transport_initial",
+                    request_fingerprint=fingerprint)
+                generation_delta_seen = run_meta._generation_delta_type(
+                    delta_type)
+                if generation_delta_seen:
+                    recorder._append_ledger(
+                        semantic, "generation_progress", attempt_index=1,
+                        call_id="failed-call", delta_type=delta_type)
+                recorder._append_ledger(
+                    semantic, "attempt_end", attempt_index=1,
+                    call_id="failed-call",
+                    **self._failed_attempt_end_fields(
+                        generation_delta_seen=generation_delta_seen))
+                recorder._append_ledger(
+                    semantic, "attempt_budget", attempt_index=1,
+                    call_id="failed-call",
+                    budget_class=(
+                        "response_slot" if generation_delta_seen
+                        else "transient_failure"),
+                    response_slots_used=int(generation_delta_seen),
+                    transient_failure_count=int(not generation_delta_seen))
+                return recorder._ledger_state(semantic)
+
+        future = state_after("audio_delta")
+        self.assertEqual(future["response_slots_used"], 1)
+        self.assertEqual(future["transient_failure_count"], 0)
+        signature = state_after("signature_delta")
+        self.assertEqual(signature["response_slots_used"], 0)
+        self.assertEqual(signature["transient_failure_count"], 1)
+
+    def test_infrastructure_resume_keeps_attempts_and_uses_next_index(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        kwargs = {
+            "model": "minimax-m3", "call_kind": "hybridpatch_primary"}
+        fingerprint = run_meta._semantic_request_fingerprint(
+            (messages,), kwargs, "minimax-m3", "hybridpatch_primary")
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+        ):
+            prior = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "minimax-m3", mock.Mock())
+            prior.set_step(2, "backward", "target")
+            _step, semantic = prior._semantic_ids("hybridpatch_primary")
+            prior._append_ledger(
+                semantic, "semantic_request", call_id="failed-call",
+                call_kind="hybridpatch_primary",
+                request_fingerprint=fingerprint)
+            for attempt_index in (1, 2):
+                prior._append_ledger(
+                    semantic, "attempt_start", attempt_index=attempt_index,
+                    call_id="failed-call", call_kind="hybridpatch_primary",
+                    attempt_kind=(
+                        "transport_initial" if attempt_index == 1
+                        else "transport_retry"),
+                    request_fingerprint=fingerprint)
+                prior._append_ledger(
+                    semantic, "generation_progress",
+                    attempt_index=attempt_index,
+                    call_id="failed-call", delta_type="thinking_delta")
+                prior._append_ledger(
+                    semantic, "attempt_end", attempt_index=attempt_index,
+                    call_id="failed-call",
+                    **self._failed_attempt_end_fields())
+                prior._append_ledger(
+                    semantic, "attempt_budget", attempt_index=attempt_index,
+                    call_id="failed-call", budget_class="response_slot",
+                    response_slots_used=attempt_index,
+                    transient_failure_count=0)
+            prior._append_ledger(
+                semantic, "call_failed", call_id="failed-call",
+                status="provider_failure", error_type="incomplete_stream",
+                response_slots_used=2, transient_failure_count=0,
+                http_attempts_used=2, attempt_index=2,
+                recovery_index=0, request_fingerprint=fingerprint)
+            observed = {}
+
+            def resumed_generate(*_args, **inner):
+                observed.update(inner["_retry_state"])
+                next_index = observed["http_attempts_used"] + 1
+                inner["_raw_event_sink"]({
+                    "record_type": "attempt_start",
+                    "attempt_index": next_index,
+                    "attempt_kind": "transport_recovery_initial",
+                })
+                inner["_raw_event_sink"]({
+                    "record_type": "sdk_stream_event",
+                    "attempt_index": next_index,
+                    "event": {"type": "content_block_delta",
+                              "delta": {"type": "text_delta"}},
+                })
+                result = {
+                    "message": "Hello", "http_status": 200,
+                    "stream_complete": True, "finish_reason": "end_turn",
+                    "stop_reason": "end_turn",
+                    "response_classification": "normal",
+                    "prompt_tokens": 5, "completion_tokens": 1,
+                    "total_tokens": 6, "input_tokens": 5,
+                    "output_tokens": 1, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "transport_attempts": [{
+                        "attempt_index": next_index, "status": "success"}],
+                    "call_kind": "hybridpatch_primary",
+                    "thinking_mode": "adaptive",
+                    "transport": "anthropic_sdk_v2",
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "max_response_slots": 2, "response_slots_used": 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": next_index,
+                }
+                inner["_raw_event_sink"]({
+                    "record_type": "attempt_end", "attempt": {
+                        "attempt_index": next_index,
+                        **self._successful_attempt_end_fields(),
+                    },
+                })
+                inner["_response_commit_sink"](result)
+                return result
+
+            with mock.patch.dict(os.environ, {
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID": semantic,
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX": "1",
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT": (
+                    fingerprint),
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX": "3",
+            }, clear=False):
+                resumed = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", resumed_generate)
+                resumed.set_step(2, "backward", "target")
+                out = resumed.generate(
+                    messages, model="minimax-m3",
+                    call_kind="hybridpatch_primary")
+            self.assertEqual(observed["response_slots_used"], 0)
+            self.assertEqual(observed["transient_failure_count"], 0)
+            self.assertEqual(observed["http_attempts_used"], 2)
+            self.assertEqual(observed["generation_index"], 1)
+            self.assertEqual(observed["parent_semantic_call_id"], semantic)
+            self.assertEqual(out["message"], "Hello")
+            self.assertEqual(out["generation_index"], 1)
+            self.assertEqual(out["parent_semantic_call_id"], semantic)
+            root = semantic.rsplit("/", 1)[0]
+            recovered_semantic = f"{root}/g001"
+            self.assertEqual(out["semantic_call_id"], recovered_semantic)
+            ledger = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+            attempt_indices = [
+                row.get("attempt_index") for row in ledger
+                if row.get("event") == "attempt_start"]
+            self.assertEqual(attempt_indices, [1, 2, 3])
+            self.assertNotIn(
+                "transport_resume", [row.get("event") for row in ledger])
+            exact_ids = {
+                row["semantic_call_id"] for row in ledger
+                if row.get("semantic_root_id") == root
+            }
+            self.assertEqual(exact_ids, {semantic, recovered_semantic})
+            parent_state = resumed._ledger_state(semantic)
+            recovered_state = resumed._ledger_state(recovered_semantic)
+            self.assertEqual(parent_state["response_slots_used"], 2)
+            self.assertEqual(parent_state["http_attempts_used"], 2)
+            self.assertEqual(recovered_state["response_slots_used"], 1)
+            self.assertEqual(recovered_state["http_attempts_used"], 3)
+            self.assertEqual(
+                recovered_state["parent_semantic_call_id"], semantic)
+
+    def test_multiple_exact_recoveries_keep_per_generation_budgets(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        generate_kwargs = {
+            "model": "minimax-m3", "call_kind": "hybridpatch_primary"}
+        fingerprint = run_meta._semantic_request_fingerprint(
+            (messages,), generate_kwargs, "minimax-m3",
+            "hybridpatch_primary")
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+        ):
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "minimax-m3", mock.Mock())
+            recorder.set_step(4, "forward", "target")
+            _step, generation_zero = recorder._semantic_ids(
+                "hybridpatch_primary")
+            generation_one_context = recorder._semantic_context(
+                "hybridpatch_primary", 1,
+                parent_semantic_call_id=generation_zero)
+            generation_one = generation_one_context["semantic_call_id"]
+
+            def append_exhausted_generation(
+                    semantic_call_id, call_id, attempt_indices, generation):
+                recorder._append_ledger(
+                    semantic_call_id, "semantic_request", call_id=call_id,
+                    call_kind="hybridpatch_primary",
+                    request_fingerprint=fingerprint)
+                for local_index, attempt_index in enumerate(
+                        attempt_indices, 1):
+                    recorder._append_ledger(
+                        semantic_call_id, "attempt_start",
+                        attempt_index=attempt_index, call_id=call_id,
+                        call_kind="hybridpatch_primary",
+                        attempt_kind=(
+                            "transport_initial"
+                            if generation == 0 and local_index == 1
+                            else "transport_retry"
+                            if generation == 0
+                            else "transport_recovery_initial"
+                            if local_index == 1
+                            else "transport_recovery_retry"),
+                        request_fingerprint=fingerprint)
+                    recorder._append_ledger(
+                        semantic_call_id, "generation_progress",
+                        attempt_index=attempt_index, call_id=call_id,
+                        delta_type="text_delta")
+                    recorder._append_ledger(
+                        semantic_call_id, "attempt_end",
+                        attempt_index=attempt_index, call_id=call_id,
+                        **self._failed_attempt_end_fields())
+                    recorder._append_ledger(
+                        semantic_call_id, "attempt_budget",
+                        attempt_index=attempt_index, call_id=call_id,
+                        budget_class="response_slot",
+                        response_slots_used=local_index,
+                        transient_failure_count=0)
+                recorder._append_ledger(
+                    semantic_call_id, "call_failed", call_id=call_id,
+                    status="provider_failure",
+                    error_type="incomplete_stream",
+                    response_slots_used=2, transient_failure_count=0,
+                    http_attempts_used=attempt_indices[-1],
+                    attempt_index=attempt_indices[-1],
+                    request_fingerprint=fingerprint)
+
+            append_exhausted_generation(
+                generation_zero, "failed-g000", (1, 2), 0)
+            append_exhausted_generation(
+                generation_one, "failed-g001", (3, 4), 1)
 
             observed = {}
 
-            def resumed_generate(*_args, **kwargs):
-                observed.update(kwargs["_retry_state"])
-                raise RuntimeError("test stop after state observation")
+            def generation_two_generate(*_args, **inner):
+                observed.update(inner["_retry_state"])
+                attempt_index = observed["http_attempts_used"] + 1
+                inner["_raw_event_sink"]({
+                    "record_type": "attempt_start",
+                    "attempt_index": attempt_index,
+                    "attempt_kind": "transport_recovery_initial",
+                })
+                inner["_raw_event_sink"]({
+                    "record_type": "sdk_stream_event",
+                    "attempt_index": attempt_index,
+                    "event": {"type": "content_block_delta",
+                              "delta": {"type": "text_delta"}},
+                })
+                inner["_raw_event_sink"]({
+                    "record_type": "attempt_end", "attempt": {
+                        "attempt_index": attempt_index,
+                        **self._successful_attempt_end_fields(),
+                    },
+                })
+                result = {
+                    "message": "Hello", "http_status": 200,
+                    "stream_complete": True, "finish_reason": "end_turn",
+                    "stop_reason": "end_turn",
+                    "response_classification": "normal",
+                    "prompt_tokens": 5, "completion_tokens": 1,
+                    "total_tokens": 6, "input_tokens": 5,
+                    "output_tokens": 1, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "transport_attempts": [{
+                        "attempt_index": attempt_index, "status": "success"}],
+                    "call_kind": "hybridpatch_primary",
+                    "thinking_mode": "adaptive",
+                    "transport": "anthropic_sdk_v2",
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "max_response_slots": 2, "response_slots_used": 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": attempt_index,
+                }
+                inner["_response_commit_sink"](result)
+                return result
 
-            second = run_meta.ApiCallRecorder(
-                out_dir, "hybridpatch", "sample", None, "minimax-m3", resumed_generate
-            )
-            second.set_step(2, "backward", "target")
-            with self.assertRaises(RuntimeError):
-                second.generate([{"role": "user", "content": "Hello"}],
-                                model="minimax-m3", call_kind="hybridpatch_primary")
-            self.assertEqual(observed["response_slots_used"], 1)
+            with mock.patch.dict(os.environ, {
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID": (
+                    generation_one),
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX": "2",
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT": (
+                    fingerprint),
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX": "5",
+            }, clear=False):
+                resumed = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", generation_two_generate)
+                resumed.set_step(4, "forward", "target")
+                out = resumed.generate(
+                    messages, model="minimax-m3",
+                    call_kind="hybridpatch_primary")
+
+            root = generation_zero.rsplit("/", 1)[0]
+            generation_two = f"{root}/g002"
+            self.assertEqual(observed["response_slots_used"], 0)
             self.assertEqual(observed["transient_failure_count"], 0)
-            self.assertEqual(observed["http_attempts_used"], 1)
+            self.assertEqual(observed["http_attempts_used"], 4)
+            self.assertEqual(observed["generation_index"], 2)
+            self.assertEqual(
+                observed["parent_semantic_call_id"], generation_one)
+            self.assertEqual(out["semantic_call_id"], generation_two)
+            self.assertEqual(out["generation_index"], 2)
 
-    def test_api_log_schema_v3_and_secret_redaction(self):
+            ledger = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+            self.assertEqual([
+                row["attempt_index"] for row in ledger
+                if row.get("event") == "attempt_start"
+            ], [1, 2, 3, 4, 5])
+            self.assertNotIn(
+                "transport_resume", [row.get("event") for row in ledger])
+            for semantic_call_id, expected_slots in (
+                    (generation_zero, 2), (generation_one, 2),
+                    (generation_two, 1)):
+                state = resumed._ledger_state(semantic_call_id)
+                self.assertEqual(
+                    state["response_slots_used"], expected_slots)
+                self.assertEqual(state["transient_failure_count"], 0)
+
+    def test_committed_recovery_does_not_block_next_semantic_root(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        generate_kwargs = {
+            "model": "minimax-m3", "call_kind": "hybridpatch_primary"}
+        fingerprint = run_meta._semantic_request_fingerprint(
+            (messages,), generate_kwargs, "minimax-m3",
+            "hybridpatch_primary")
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+        ):
+            seed = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "minimax-m3", mock.Mock())
+            seed.set_step(1, "forward", "target")
+            _step, generation_zero = seed._semantic_ids(
+                "hybridpatch_primary")
+            self._append_exhausted_response_generation(
+                seed, generation_zero, "failed-g000", fingerprint, (1, 2))
+
+            observed = []
+
+            def successful_generate(*_args, **inner):
+                state = dict(inner["_retry_state"])
+                observed.append(state)
+                attempt_index = state["http_attempts_used"] + 1
+                inner["_raw_event_sink"]({
+                    "record_type": "attempt_start",
+                    "attempt_index": attempt_index,
+                    "attempt_kind": (
+                        "transport_recovery_initial"
+                        if state["generation_index"] else
+                        "transport_initial"),
+                })
+                inner["_raw_event_sink"]({
+                    "record_type": "sdk_stream_event",
+                    "attempt_index": attempt_index,
+                    "event": {"type": "content_block_delta",
+                              "delta": {"type": "text_delta"}},
+                })
+                inner["_raw_event_sink"]({
+                    "record_type": "attempt_end", "attempt": {
+                        "attempt_index": attempt_index,
+                        **self._successful_attempt_end_fields(),
+                    },
+                })
+                result = {
+                    "message": "Hello", "http_status": 200,
+                    "stream_complete": True, "finish_reason": "end_turn",
+                    "stop_reason": "end_turn",
+                    "response_classification": "normal",
+                    "prompt_tokens": 5, "completion_tokens": 1,
+                    "total_tokens": 6, "input_tokens": 5,
+                    "output_tokens": 1, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "transport_attempts": [{
+                        "attempt_index": attempt_index,
+                        "status": "success"}],
+                    "call_kind": "hybridpatch_primary",
+                    "thinking_mode": "adaptive",
+                    "transport": "anthropic_sdk_v2",
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "max_response_slots": 2,
+                    "response_slots_used": 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": attempt_index,
+                }
+                inner["_response_commit_sink"](result)
+                return result
+
+            with mock.patch.dict(os.environ, {
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID": (
+                    generation_zero),
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX": "1",
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT": (
+                    fingerprint),
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX": "3",
+            }, clear=False):
+                recorder = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", successful_generate)
+                recorder.set_step(1, "forward", "target")
+                recovered = recorder.generate(
+                    messages, model="minimax-m3",
+                    call_kind="hybridpatch_primary")
+                recorder.set_step(2, "backward", "initial")
+                next_root = recorder.generate(
+                    messages, model="minimax-m3",
+                    call_kind="hybridpatch_primary")
+
+            self.assertEqual(recovered["generation_index"], 1)
+            self.assertEqual(next_root["generation_index"], 0)
+            self.assertNotEqual(
+                recovered["semantic_root_id"], next_root["semantic_root_id"])
+            self.assertEqual(
+                [state["http_attempts_used"] for state in observed], [2, 0])
+
+    def test_resume_authorization_mismatch_fails_before_provider(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        generate_kwargs = {
+            "model": "minimax-m3", "call_kind": "hybridpatch_primary"}
+        fingerprint = run_meta._semantic_request_fingerprint(
+            (messages,), generate_kwargs, "minimax-m3",
+            "hybridpatch_primary")
+        cases = (
+            ("wrong-fingerprint", "3", "request fingerprint changed"),
+            (fingerprint, "99", "next HTTP attempt"),
+        )
+        for authorized_fingerprint, next_attempt, expected in cases:
+            with self.subTest(expected=expected), \
+                    tempfile.TemporaryDirectory() as out_dir, \
+                    mock.patch.dict(
+                        os.environ, {"OPENCODE_API_KEY": "unit-test-key"},
+                        clear=False):
+                seed = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", mock.Mock())
+                seed.set_step(1, "forward", "target")
+                _step, generation_zero = seed._semantic_ids(
+                    "hybridpatch_primary")
+                self._append_exhausted_response_generation(
+                    seed, generation_zero, "failed-g000", fingerprint,
+                    (1, 2))
+                provider = mock.Mock(side_effect=AssertionError(
+                    "provider must not be called"))
+                with mock.patch.dict(os.environ, {
+                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID": (
+                        generation_zero),
+                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX": "1",
+                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT": (
+                        authorized_fingerprint),
+                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX": (
+                        next_attempt),
+                }, clear=False):
+                    recorder = run_meta.ApiCallRecorder(
+                        out_dir, "hybridpatch", "sample", None,
+                        "minimax-m3", provider)
+                    recorder.set_step(1, "forward", "target")
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        recorder.generate(
+                            messages, model="minimax-m3",
+                            call_kind="hybridpatch_primary")
+                provider.assert_not_called()
+
+    def test_budget_overrun_and_cross_generation_attempt_order_fail_closed(self):
+        messages = [{"role": "user", "content": "Hello"}]
+        generate_kwargs = {
+            "model": "minimax-m3", "call_kind": "hybridpatch_primary"}
+        fingerprint = run_meta._semantic_request_fingerprint(
+            (messages,), generate_kwargs, "minimax-m3",
+            "hybridpatch_primary")
+
+        for label in ("extra-attempt", "cross-generation-order"):
+            with self.subTest(label=label), \
+                    tempfile.TemporaryDirectory() as out_dir, \
+                    mock.patch.dict(
+                        os.environ, {"OPENCODE_API_KEY": "unit-test-key"},
+                        clear=False):
+                provider = mock.Mock(side_effect=AssertionError(
+                    "provider must not be called"))
+                recorder = run_meta.ApiCallRecorder(
+                    out_dir, "hybridpatch", "sample", None,
+                    "minimax-m3", provider)
+                recorder.set_step(1, "forward", "target")
+                _step, generation_zero = recorder._semantic_ids(
+                    "hybridpatch_primary")
+                if label == "extra-attempt":
+                    recorder._append_ledger(
+                        generation_zero, "semantic_request",
+                        call_id="over-budget",
+                        call_kind="hybridpatch_primary",
+                        request_fingerprint=fingerprint)
+                    for attempt_index in (1, 2, 3):
+                        recorder._append_ledger(
+                            generation_zero, "attempt_start",
+                            attempt_index=attempt_index,
+                            call_id="over-budget",
+                            call_kind="hybridpatch_primary",
+                            attempt_kind=(
+                                "transport_initial" if attempt_index == 1
+                                else "transport_retry"),
+                            request_fingerprint=fingerprint)
+                        recorder._append_ledger(
+                            generation_zero, "generation_progress",
+                            attempt_index=attempt_index,
+                            call_id="over-budget", delta_type="text_delta")
+                        recorder._append_ledger(
+                            generation_zero, "attempt_end",
+                            attempt_index=attempt_index,
+                            call_id="over-budget",
+                            **self._failed_attempt_end_fields())
+                        recorder._append_ledger(
+                            generation_zero, "attempt_budget",
+                            attempt_index=attempt_index,
+                            call_id="over-budget",
+                            budget_class="response_slot",
+                            response_slots_used=attempt_index,
+                            transient_failure_count=0)
+                    expected = "exceeds the frozen R2/I3 budget"
+                else:
+                    self._append_exhausted_response_generation(
+                        recorder, generation_zero, "failed-g000",
+                        fingerprint, (1, 2))
+                    generation_one = recorder._semantic_context(
+                        "hybridpatch_primary", 1,
+                        parent_semantic_call_id=generation_zero
+                    )["semantic_call_id"]
+                    recorder._append_ledger(
+                        generation_one, "semantic_request",
+                        call_id="out-of-order",
+                        call_kind="hybridpatch_primary",
+                        request_fingerprint=fingerprint)
+                    recorder._append_ledger(
+                        generation_one, "attempt_start", attempt_index=1,
+                        call_id="out-of-order",
+                        call_kind="hybridpatch_primary",
+                        attempt_kind="transport_recovery_initial",
+                        request_fingerprint=fingerprint)
+                    recorder._append_ledger(
+                        generation_one, "attempt_end", attempt_index=1,
+                        call_id="out-of-order",
+                        **self._failed_attempt_end_fields(
+                            generation_delta_seen=False,
+                            error_type="connection_error"))
+                    recorder._append_ledger(
+                        generation_one, "attempt_budget", attempt_index=1,
+                        call_id="out-of-order",
+                        budget_class="transient_failure",
+                        response_slots_used=0,
+                        transient_failure_count=1)
+                    expected = "attempt indexes are duplicated/out of order"
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    recorder.generate(
+                        messages, model="minimax-m3",
+                        call_kind="hybridpatch_primary")
+                provider.assert_not_called()
+
+    def test_hybrid_repair_has_independent_transport_budget(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,
+        ):
+            observed = {}
+
+            def repair_generate(*_args, **kwargs):
+                observed.update(kwargs["_retry_state"])
+                result = {
+                    "message": "{}", "http_status": 200,
+                    "stream_complete": True, "finish_reason": "end_turn",
+                    "stop_reason": "end_turn",
+                    "response_classification": "normal",
+                    "prompt_tokens": 1, "completion_tokens": 1,
+                    "total_tokens": 2, "input_tokens": 1,
+                    "output_tokens": 1, "cache_read_input_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "transport_attempts": [],
+                    "call_kind": "hybridpatch_repair",
+                    "transport": "anthropic_sdk_v2",
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "max_response_slots": 2, "response_slots_used": 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": 1,
+                }
+                kwargs["_raw_event_sink"]({
+                    "record_type": "attempt_start", "attempt_index": 1,
+                    "attempt_kind": "transport_initial"})
+                kwargs["_raw_event_sink"]({
+                    "record_type": "sdk_stream_event", "attempt_index": 1,
+                    "event": {"type": "content_block_delta",
+                              "delta": {"type": "text_delta"}},
+                })
+                kwargs["_raw_event_sink"]({
+                    "record_type": "attempt_end", "attempt": {
+                        "attempt_index": 1,
+                        **self._successful_attempt_end_fields(),
+                    },
+                })
+                kwargs["_response_commit_sink"](result)
+                return result
+
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "minimax-m3", repair_generate)
+            recorder.set_step(1, "forward", "target")
+            _step, primary = recorder._semantic_ids(
+                "hybridpatch_primary")
+            self._append_exhausted_response_generation(
+                recorder, primary, "primary-failed",
+                "primary-fingerprint", (1, 2))
+            recorder.generate(
+                [{"role": "user", "content": "repair"}],
+                model="minimax-m3", call_kind="hybridpatch_repair")
+            self.assertEqual(observed["response_slots_used"], 0)
+            self.assertEqual(observed["transient_failure_count"], 0)
+            self.assertEqual(observed["http_attempts_used"], 0)
+
+    def test_api_log_schema_v4_and_secret_redaction(self):
         secret = "unit-test-secret-key"
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
             os.environ,
@@ -2299,10 +5488,22 @@ class IntegrationContractTests(unittest.TestCase):
         ):
             def fake_generate(*_args, **kwargs):
                 kwargs["_raw_event_sink"]({
-                    "record_type": "attempt_start",
+                    "record_type": "attempt_start", "attempt_index": 1,
+                    "attempt_kind": "transport_initial",
                     "error": f"must redact {secret}",
                 })
-                return {
+                kwargs["_raw_event_sink"]({
+                    "record_type": "sdk_stream_event", "attempt_index": 1,
+                    "event": {"type": "content_block_delta",
+                              "delta": {"type": "text_delta"}},
+                })
+                kwargs["_raw_event_sink"]({
+                    "record_type": "attempt_end", "attempt": {
+                        "attempt_index": 1,
+                        **self._successful_attempt_end_fields(),
+                    },
+                })
+                result = {
                     "message": "Hello", "http_status": 200,
                     "stream_complete": True, "finish_reason": "end_turn",
                     "stop_reason": "end_turn", "response_classification": "normal",
@@ -2312,19 +5513,28 @@ class IntegrationContractTests(unittest.TestCase):
                     "transport_attempts": [{"attempt_index": 1, "status": "success"}],
                     "call_kind": "key_probe", "thinking_mode": "adaptive",
                     "transport": "anthropic_sdk_v2",
-                    "transport_revision": "opencode_anthropic_sdk/3",
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "max_response_slots": 2, "response_slots_used": 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": 1,
                 }
+                kwargs["_response_commit_sink"](result)
+                return result
 
             recorder = run_meta.ApiCallRecorder(
                 out_dir, "fullrewrite", "sample", None, "minimax-m3", fake_generate
             )
+            recorder.set_step(1, "forward", "target")
             out = recorder.generate(
                 [{"role": "user", "content": "Hello"}], model="minimax-m3",
                 call_kind="key_probe", thinking_mode="adaptive",
             )
             with open(os.path.join(out_dir, "api_calls.jsonl"), encoding="utf-8") as handle:
                 record = json.loads(handle.readline())
-            self.assertEqual(record["schema"], "anchorpatch.api_call/3")
+            self.assertEqual(record["schema"], "anchorpatch.api_call/4")
             self.assertEqual(record["call_kind"], "key_probe")
             self.assertTrue(record["stream_complete"])
             self.assertEqual(len(record["transport_attempts"]), 1)
@@ -2357,6 +5567,7 @@ class IntegrationContractTests(unittest.TestCase):
             recorder = run_meta.ApiCallRecorder(
                 out_dir, "hybridpatch", "sample", None, "minimax-m3", fail_generate
             )
+            recorder.set_step(1, "forward", "target")
             with self.assertRaises(model_openai.OpenCodeTransportError):
                 recorder.generate(
                     [{"role": "user", "content": "Hello"}], model="minimax-m3",
@@ -2364,8 +5575,8 @@ class IntegrationContractTests(unittest.TestCase):
                     call_kind="hybridpatch_primary",
                 )
             record = next(iter(recorder.records_by_id.values()))
-            self.assertEqual(record["schema"], "anchorpatch.api_call/3")
-            self.assertEqual(record["transport_revision"], "opencode_anthropic_sdk/3")
+            self.assertEqual(record["schema"], "anchorpatch.api_call/4")
+            self.assertEqual(record["transport_revision"], "opencode_anthropic_sdk/4")
             self.assertEqual(record["max_tokens"], 131072)
             self.assertEqual(record["thinking_mode"], "adaptive")
 
@@ -2556,7 +5767,7 @@ class MinimaxOfficialTransportTests(unittest.TestCase):
         clean_env = {k: v for k, v in os.environ.items() if k != "MINIMAX_TRANSPORT"}
         with mock.patch.dict(os.environ, clean_env, clear=True):
             cfg = model_openai.minimax_runtime_config(max_tokens=None)
-            self.assertEqual(cfg["transport_revision"], "opencode_anthropic_sdk/3")
+            self.assertEqual(cfg["transport_revision"], "opencode_anthropic_sdk/4")
 
 
 if __name__ == "__main__":

@@ -494,3 +494,35 @@
 - usage lower bounds: committed rows HP/FR 3,318,844/2,448,339 tokens and USD 2.462493/1.790758; API ledger HP/FR 3,545,711/2,635,378 and USD 2.681167/1.995007; eight killed in-flight calls lack final usage
 - retention: `analysis/failure_summary.md`; private ZIP `../hybridpatch_private_archives/exp_20260717_hybridv8_softbudget_paired10__e6abad4__failed_informative.zip`, SHA-256 `08eba3ee36b2c63df5e58b7d0c5796e3ba4b5409ecc1476e9bf4cf4b83d6c694`; secret/heuristic matches 0
 - record status: official prepare stops at incomplete formal endpoint as intended; no manual canonical record was created and no method-effect claim is eligible
+
+## 2026-07-18 - Before Code Change: OpenCode transport-v4 stream classification and sample isolation
+
+- scope: create `opencode_anthropic_sdk/4` without changing transport-v3 history or HP_V8 method protocol/prompt/executor/gate; old `exp_20260717_hybridv8_softbudget_paired10` remains `failed_informative`
+- trigger: MiniMax Anthropic `APIStatusError(status=200, "Streaming response failed")` was not recoverable under the old campaign path, and one exhausted worker stopped unrelated samples
+- planned transport change: classify HTTP-200/incomplete terminal chains before ordinary status handling; enforce event-derived R2/I3; separate transport attempts from HP repair; use exact-payload semantic lineage for audited recovery
+- planned dispatcher change: isolate only four-source-evidenced retry exhaustion; keep missing endpoints null; continue sibling workers; retain preservation/Git/duplicate/half-commit/ledger/local/evaluator/shared-integrity failures as global stops
+- validation: fault injection, real dispatcher/checkpoint zero-API paths, V1–V8 replay, frozen archive replay, runtime evaluator preflight and clean-tree review before any paid call
+- guardrails: no HP_V8 method, FullRewrite, evaluator, scoring, data or frozen-record changes
+
+## 2026-07-18 - Before Experiment: HP_V8 transport-v4 smoke2 and paired10 diagnostic
+
+- experiments: `exp_20260718_hybridv8_transportv4_smoke2` then, only after GO, `exp_20260718_hybridv8_transportv4_paired10`
+- plans: `docs/experiment_plans/exp_20260718_hybridv8_transportv4_smoke2.md` and `docs/experiment_plans/exp_20260718_hybridv8_transportv4_paired10.md`
+- fixed design: MiniMax-M3, seed42, distractor-on, same per-sample plans and alternating method order; 2 samples×2RT smoke followed by the user-fixed 10 samples×10RT
+- claim boundary: all samples are exposed and both experiments are `diagnostic_only`; no method-effect claim from smoke or incomplete main
+- launch status: `NO-GO` until v4 review, all zero-API gates, runtime evaluator preflight, final read-only plan review, clean implementation commit and Key probe pass; no API call made at this entry
+
+## 2026-07-18 - After Code Change / Zero-API Preflight: OpenCode transport-v4
+
+- implementation: `opencode_anthropic_sdk/4` classifies HTTP-200/incomplete terminal chains before ordinary status; per exact semantic call R2/I3; every HTTP attempt rechecks campaign guards; transport retry and HP repair retain separate call kinds, prompts and budgets
+- isolation/recovery: only four-source-evidenced retry exhaustion is sample-local; sibling workers continue; recovery uses exact `gNNN` lineage, one-shot four-field authorization, same fingerprint and continuous attempt index; committed RT creates no POST
+- global integrity: post-call and pre-commit Git/tree/task-plan/latch checks, latch-ordered result commit, preservation stop, semantic-root ownership, active-worker lease retention and provenance-audited CAS closure
+- tests: compile 98 files PASS; HybridPatch executor 72/72; HP transport/dispatcher 83/83; transport-core 47/47; splitter PASS; analyzer 5/5; process-experiment 9/9; burden replay 400 rows/394 successes
+- readonly replay: V4 smoke 70, V5 dev20 400, V6 dev20 400, V7 dev20 400, V8 smoke 8 and V8 partial paired 96 backward RS PASS; frozen V3 dev20full retains its pre-existing `quantum4 RT9 0.9850→1.0000` verifier mismatch under both V3 and V8 verifier, so it is disclosed rather than rewritten
+- runtime preflight: fixed 10 samples all initial evaluator score 1.0; seed42/10RT task-plan references and preregistered hashes match
+- scope audit: no HP_V3–HP_V7, Baseline, data, records/exp archive, HP_V8 protocol/prompt/executor/gate, FullRewrite, evaluator or scoring changes; HP/transport `model_openai.py` byte-identical SHA-256 `cdfe85e9f48b81d16ff85857d51b97db09b559877675456708838959ff15fd93`
+- plan review: fresh-context read-only review returned plan-level GO after fixing cwd/dry-run commands,
+  2RT hashes, verifier/review gates, explicit cost-stop policy, full resume templates and a fixed maximum
+  of one audited recovery (`g001`) per failed semantic root
+- API status: still `NO-GO`; no key read or API call yet. Remaining gates are clean implementation
+  commit, formal dry-run and Key probe
