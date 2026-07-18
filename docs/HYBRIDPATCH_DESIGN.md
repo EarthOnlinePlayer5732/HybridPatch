@@ -1,7 +1,7 @@
 # HybridPatch 设计总览
 
-状态：`HP_V3`–`HP_V7` 冻结设计总览；当前生成协议为
-`hybridpatch/7`。本文描述方法语义、版本演进和证据边界，不替代各实验的
+状态：`HP_V3`–`HP_V7` 冻结设计总览；当前 active draft 生成协议为
+`hybridpatch/8`。本文描述方法语义、版本演进和证据边界，不替代各实验的
 canonical record。
 
 ## 1. 方法定位与当前结论边界
@@ -33,18 +33,23 @@ strict38 只有 16 条 FR 链来自完整官方重跑，其余沿用冻结 FR，
 因此 `+0.008` 回答同 transport 方法效应，`+0.262` 回答现有论文 baseline
 处理政策口径；二者不可互换。
 
+HP_V8 的 10 样本 transport-v4 诊断 exact RT10 为 HP `0.745`、FR `0.696`、
+delta `+0.049`，但样本全部已曝光且差值高度异质。它证明 V8/transport-v4 的
+完整运行与审计链，不替代上述 strict38 same-transport 方法效应，也不证明提示精简
+导致性能提升。
+
 ## 2. 端到端管线
 
 ```text
 文档字节
   │
-  ├─ split_struct2 → 文件/块索引
+  ├─ 词法分类 → default 或 block_movement profile
+  │    └─ 仅 block_movement 按需调用 split_struct2 coarse index
   │
   ├─ build_hybrid_prompt
-  │    ├─ editable context
-  │    ├─ read-only context
-  │    ├─ target filenames
-  │    └─ 四路径 schema + 当前 protocol
+  │    ├─ editable context + 权威 target/readonly 名称
+  │    ├─ default: local/bulk/bounded
+  │    └─ block_movement: local/bulk/DSL/bounded + coarse index
   │
   ├─ LLM → JSON envelope + 可选 [FILE BODIES]
   │
@@ -67,17 +72,14 @@ Runner 在进入 HybridPatch 前把 distractor/read-only 文件从 editable cont
 
 ## 3. 协议信封与文件体传输
 
-当前生成端输出一个 `hybridpatch/7` 信封：
+当前生成端输出一个 `hybridpatch/8` 信封：
 
 ```json
 {
-  "protocol": "hybridpatch/7",
+  "protocol": "hybridpatch/8",
   "plan": {
     "task_family": "format_conversion",
-    "writable_files": ["report.json"],
-    "readonly_files": ["reference.txt"],
-    "target_files": ["report.json"],
-    "obligations": ["preserve all unrelated records"]
+    "edit_footprint": "whole_file_change"
   },
   "action": {
     "route": "bounded_rewrite",
@@ -88,8 +90,9 @@ Runner 在进入 HybridPatch 前把 distractor/read-only 文件从 editable cont
 }
 ```
 
-`plan` 是审计和约束信息，`action` 必须四选一。执行语义由 `action.route`
-决定，而不是由自然语言计划猜测。
+V8 `plan` 恰好只有 `task_family` 与 `edit_footprint`；后者必须与四选一
+`action.route` 一致。可编辑、target 和 readonly 文件由 runner 掌握，不要求模型在
+plan 中重复授权。执行语义由 `action.route` 决定，而不是由自然语言计划猜测。
 
 长文本、含反斜杠或引号的 `content`、`new_text`、`old_text`、
 `anchor_text` 和 `text` 不应嵌套进 JSON 字符串。模型在字段中写
@@ -166,10 +169,10 @@ preservation_violations =
 不可解析时不凭空要求输出可解析；输入可解析的已改文件不得回退，新建的可 lint
 文件必须可解析。可选解析器缺失时该项是 no-signal，而不是假 PASS。
 
-## 6. `hybridpatch/2`–`hybridpatch/7` 演进
+## 6. `hybridpatch/2`–`hybridpatch/8` 演进
 
-所有语义都由信封内的 `protocol` 经 `rev_of()` 选择。生成端默认 v7，提取和
-执行端接受 v1–v7；schema 会拒绝未知或缺失的 protocol。`rev_of()` 的 v1
+所有语义都由信封内的 `protocol` 经 `rev_of()` 选择。生成端默认 v8，提取和
+执行端接受 v1–v8；schema 会拒绝未知或缺失的 protocol。`rev_of()` 的 v1
 fallback 只是防御性旧语义默认值，不会绕过 schema gate。
 
 | 版本 | 变化 | 解决的问题 |
@@ -181,6 +184,7 @@ fallback 只是防御性旧语义默认值，不会绕过 schema gate。
 | `/5` | bulk 的所有匹配和 expected count 按步骤输入快照解析；跨 op 冲突显式拒绝；同行 delete 去重；统一右向左应用 | 防止前序 op 新插入文本被后序 op 再次匹配，保证 accepted op 集可独立解释 |
 | `/6` | bulk 包含型冲突消解：delete span 完全包含 replace span 时由 delete 吞并；新增 reference-free format-health gate | 修复等价顺序操作被误判重叠，并拦截“格式从可解析退化为不可解析”的内容损伤 |
 | `/7` | executor 和 gate 与 v6 字节语义相同；新增 runner/verifier 层 partial-acceptance 提交政策 | 避免一个死 op 让同一步其他安全 accepted op 全部丢失 |
+| `/8` | 按需 coarse index/DSL；default 保留 local/bulk/bounded，block profile 保留四路径；plan 只含 task family 与 edit footprint；repair 去除无关上下文；负担 P95 改为软 telemetry | 减少无用提示与显式协议负担，同时不关闭有效路径、不按长度拒绝正确输出 |
 
 文件体 `[FILE BODIES]` 传输是在 v2 前的 P0 修复中引入，之后各版本沿用；它不是
 单独的新 route。每次版本升级都保留旧分支，使冻结归档继续按原 protocol 重放。
@@ -210,12 +214,12 @@ repair；transport 层对 incomplete stream 的重发不等于方法 repair。
 `hybridpatch_protocol_failure_kept_context`。这是显式失败，不是假装成功，也不会
 调用 FullRewrite 替代。
 
-### 7.3 v7 partial acceptance
+### 7.3 v7+ partial acceptance
 
-v7 只在 repair 已经用完、终局失败**仅由 op rejection 导致**时考虑提交执行器已经
+v7 和继承该政策的 v8 只在 repair 已经用完、终局失败**仅由 op rejection 导致**时考虑提交执行器已经
 应用的 accepted-op 子集。必须同时满足：
 
-1. 信封是 `hybridpatch/7`；
+1. 信封是 `hybridpatch/7` 或 `hybridpatch/8`；
 2. route 是 `local_patch` 或 `bulk_patch`；
 3. 至少一个 op accepted，且至少一个 op rejected；
 4. 没有 route violation；
@@ -228,8 +232,9 @@ local 的 v3 快照语义和 bulk 的 v5 快照语义使 accepted op 不依赖�
 `partial_acceptance_eligible()`，旧 protocol 被硬门控为不合格。
 
 提交时记录 `partial_acceptance=true` 和 `partial_skipped_ops`。当前证据量仍有限：
-V7 dev20 为 `5/400` 步，V7 val40 canonical 归档为 `11/760` 个 HP 步；这支持机制
-可运行和 replay，不足以证明所有任务类型上的普遍无害性。
+V7 dev20 为 `5/400` 步，V7 val40 canonical 归档为 `11/760` 个 HP 步，V8
+10 样本诊断为 `1/200`；这支持机制可运行和 replay，不足以证明所有任务类型上的
+普遍无害性。
 
 ## 8. Transport 边界
 
@@ -320,6 +325,7 @@ canonical statistic；partial 历史仍保留供核查。
 | v6 dev20 / val40 | [dev20](../HP_V6/records/exp_20260710_hybridv6dev20full/report.md)；[val40](../HP_V6/records/exp_20260711_hybridv6val40/report.md) |
 | v7 partial acceptance dev20 | [report](../HP_V7/records/exp_20260711_hybridv7dev20full/report.md) |
 | v7 same-transport canonical38 | [human report](../HP_V7/records/exp_20260712_hybridv7val40_transportv3/report.md)；[machine summary](../HP_V7/records/exp_20260712_hybridv7val40_transportv3/summary.json)；[casebook](../HP_V7/records/exp_20260712_hybridv7val40_transportv3/casebook.jsonl)；[verification](../HP_V7/records/exp_20260712_hybridv7val40_transportv3/verification.txt) |
+| v8 transport-v4 10 样本诊断 | [sanitized summary](../HP_V8/analysis/exp_20260718_hybridv8_transportv4_snapshotfix_paired10.md)；生成 record 私有封存以避免改写冻结 catalog hash |
 | 冻结 FR / FR+Official | [Baseline index](../Baseline/EXPERIMENTS.md) |
 | transport-v3 规范与 smoke | [frozen spec](../transport/docs/API_TRANSPORT_FROZEN_V3.md)；FINDINGS §230 |
 | transport-v4 活动规范 | [active spec](../transport/docs/API_TRANSPORT_V4.md)；新实验必须使用独立 out_dir |
@@ -333,10 +339,10 @@ canonical statistic；partial 历史仍保留供核查。
 1. **同可靠 transport 下没有 RS 优势证据**：canonical38 为 `Δ=+0.008`
    且不显著。论文采用官方非流式一次性 baseline 政策时应另报
    FR+Official `Δ=+0.262`，并附 16/38 官方链、混合来源和事后预筛披露。
-2. **成本更高**：HP primary、可选 repair、较长协议输出共同增加 token；当前
-   canonical38 为 FR 的 `1.67×`。
-3. **bounded rewrite 仍占多数**：V7 canonical38 中 HP 路由
-   bounded rewrite `473/760`（62.2%），生成字节占比约 `0.619`。方法更准确的
+2. **成本更高**：HP primary、可选 repair、较长协议输出共同增加 token；
+   canonical38 为 FR 的 `1.67×`，V8 10 样本诊断的已知 usage 为 `1.27×`。
+3. **bounded rewrite 仍占多数**：V8 10 样本诊断中声明 route
+   bounded rewrite `124/200`（62.0%）；另有 1 个 model-empty 无合法 route。方法更准确的
    定位是“有受约束写入和失败门的混合编辑”，不是纯局部 patch。
 4. **preservation invariant 不保证声明区域正确**：模型可在合法写入范围内产生
    事实丢失、语义错列或格式虽可解析但内容错误。
@@ -357,7 +363,7 @@ canonical statistic；partial 历史仍保留供核查。
 
 ## 11. 实现映射与变更纪律
 
-当前完整实现位于各冻结 `HP_Vx/src/`，最新语义参考 `HP_V7/src/`：
+冻结语义位于各 `HP_Vx/src/`；当前 active draft 语义参考 `HP_V8/src/`：
 
 | 文件 | 职责 |
 |---|---|

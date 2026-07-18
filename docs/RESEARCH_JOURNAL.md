@@ -314,6 +314,27 @@ API locator 完整。KEY_11 不能解除 terminal；无进展 resume 未执行�
 在 prompt/schema 层存在；但真实 smoke 未覆盖三条非 bounded 路径，主 campaign 又不
 完整，故唯一可靠 live 声明仍是 chain integrity、可重放 provenance 与 preservation=0。
 
+### 5.12 HP_V8 transport-v4 snapshotfix paired10（2026-07-18）——断电续未提交后缀，完整诊断 endpoint
+
+提交 `bc4a39f7dd1476848927d45bcf1840a74677e6be` 上的 snapshotfix smoke 通过后，
+同提交 paired10 使用 MiniMax-M3、transport-v4、seed42、distractor-on 和固定 task plans。
+主机在 362/400 行时断电；7 个完整样本保持不动，只从 filesystem3、musicsheet2、
+satellite4 的 checkpoint 后续跑。三条 host-loss attempt 已开始生成，按 response-slot
+语义显式闭合；旧 raw 和 committed prefix 不改写。satellite4 g000 二次不完整后先按样本
+隔离，再用唯一 g001 完成。最终 400/400、20 个 RT10 checkpoint、10 个 latest finished；
+verifier PASS 200/200，strict inspector 无错误，preservation 0/199 applicable + 1 N/A。
+
+**配对统计**：exact backward RT10 HP **0.745178** vs FR **0.695854**，delta
+**+0.049324**（n=10，sample SD 0.344047，4 正/4 负/2 平）；CF@0.10 为 4/90 vs
+8/90。HP routes bounded/local/bulk/DSL=124/54/14/7，另 1 个空响应无 route；repair
+32 次、成功采用 21 次；protocol kept-context 11/200；soft burden 12/200；所有超限
+均继续执行。
+
+已知 final usage 为 HP 8.448M tokens / USD 7.036488、FR 6.661M / USD 5.571257；
+10 个已生成但中断的 attempt 无 final usage，精确账单未知。样本全已曝光且差值异质；
+该结果只作 diagnostic，不证明 HP 普遍优于 FR，也不把随机 provider 得分变化归因于
+snapshot fix。恢复机制、raw/ledger hash 和私有归档见 HP_V8 脱敏诊断报告与版本卡。
+
 ---
 
 ## 6. 追加约定（怎么继续写这份文档）

@@ -576,3 +576,52 @@
   stop/verifier/strict-inspector/cost gates, ignored prepare and read-only review run before main;
   only tracked finalize and After documentation are deferred until main ends so the hard same-commit
   clean-tree gate remains satisfiable. A smoke NO-GO is postprocessed immediately.
+
+## 2026-07-18 - After Experiment: snapshotfix paired10 — audited host-loss continuation complete
+
+- identity: `exp_20260718_hybridv8_transportv4_snapshotfix_paired10`; clean commit
+  `bc4a39f7dd1476848927d45bcf1840a74677e6be`; MiniMax-M3; transport
+  `opencode_anthropic_sdk/4`; seed42; distractor-on; fixed exposed 10-sample scope
+- host interruption: power loss left 362/400 committed rows and three generation-started HTTP attempts
+  without terminal events. A full pre-recovery archive was sealed first (SHA-256
+  `7fe215abe20e311f426e5329e9e8ba0125c9bedbec0f512b8e2d5e373e262354`); the old raw
+  files stayed byte-identical
+- continuation policy: per the user's explicit instruction, the same campaign resumed only
+  `filesystem3`, `musicsheet2` and `satellite4` from the first uncommitted checkpoint suffix. The three
+  host-loss attempts consumed their observed-generation response slots; attempts and raw evidence were
+  append-only. The 82 rows already committed for those samples generated zero later provider POSTs
+- isolation evidence: satellite4 g000 exhausted both response slots and first ended
+  `infrastructure_incomplete`; filesystem3 and musicsheet2 continued to completion. A second ordinary
+  dispatcher resume launched only satellite4 g001, after which all ten latest outcomes were `finished`
+- final integrity: 400/400 unique result rows, 20/20 checkpoints at RT10, no duplicate or half-committed
+  round trip; 436 API rows = 433 provider rows + 3 zero-POST journal replays; 442 attempts = 432 complete
+  responses + 10 generation attempts without final usage; strict inspector `errors=[]`, evidence digest
+  `6e0750f7779ee6c20d4c11c4d0f15a5c84c52c02472e0e0d15e25d0f217de3f2`
+- verification/result: raw replay PASS 200/200 backward. Exact backward RT10 HP/FR
+  `0.745178/0.695854`, paired delta `+0.049324`, sample SD `0.344047`, wins/losses/ties `4/4/2`;
+  CriticalFailure@0.10 `4/90` vs `8/90`. This is diagnostic-only over exposed samples
+- HP telemetry: declared bounded/local/bulk/DSL routes `124/54/14/7` plus one no-route model-empty
+  kept-context row; repair attempted `32/200`, used/success `21/32`; protocol failure `11/200`; soft
+  burden `12/200`; preservation `0` across 199 applicable steps plus one explicit N/A
+- known usage: HP 8,448,270 tokens / USD 7.036488; FR 6,660,571 / USD 5.571257. Ten
+  generation attempts have no final usage, so exact provider billing remains unknown
+- review/finalize: two independent read-only audits returned GO within the diagnostic-only boundary;
+  official verifier, prepare, finalize and both record validators PASS. The unparsed model-empty row's
+  legacy `protocol_version=hybridpatch/1` fallback was excluded from observed-envelope revision
+  collection without editing the raw row; a permanent process-tool regression test was added. The
+  generated record bundle is private rather than catalogued because a catalog hash change would rewrite
+  every frozen HP_V3–HP_V7/Baseline/transport record
+- final zero-API regression: compile 98 files PASS; executor 72/72; splitters byte-exact; HP integrated
+  transport/dispatcher 85/85; transport-core 47/47; analyzer 5/5; process tool 14/14; burden replay
+  400 rows/394 successes; V7 dev20 replay PASS 400; this campaign replay PASS 200; observed revisions
+  exactly `['hybridpatch/8']`; `git diff --check` and records-only validator PASS. The full source-linked
+  validator retains one pre-existing HEAD mismatch: the frozen transport-v2 record stores the older
+  transport log hash/size while current HEAD already contains the later 7,583-byte log; fixing it would
+  rewrite a frozen record, so it is disclosed and left unchanged
+- retention: complete private archive
+  `../hybridpatch_private_archives/exp_20260718_hybridv8_transportv4_snapshotfix_paired10_complete.tgz`,
+  SHA-256 `d24f416498c754d0be317d02c5b8f4916a7f21b4eb558c8e6d64184a89834508`;
+  recovery runtime archive SHA-256
+  `245001818ba8afaa8974f6b48ff6b7f42ac13a17fdb6c030dcd1f2b09f8522f1`; generated record
+  snapshot SHA-256 `d86e944e5ac5cd225c21670626a288861f958d3ed24026635dda5756ca9d5f53`;
+  archive credential scan found zero exact Key, Authorization, Cookie or private-key matches

@@ -1,8 +1,10 @@
 # HP_V8（hybridpatch/8）版本卡草稿
 
-状态：**active draft**。本版已完成零 API 实现与回归验证，并在提交
-`e6abad4449f7c2536c914725586fb44094546d76` 上运行了一个 2 样本付费 smoke；
-后续 10 样本诊断 campaign 依停止条件中止。现有证据不支持方法优越性或总体效果结论。
+状态：**active draft**。本版已完成零 API 实现、回归验证和一组 10 样本 RT10
+付费诊断。最终完整 campaign 运行身份为提交
+`bc4a39f7dd1476848927d45bcf1840a74677e6be`、clean tree、
+`opencode_anthropic_sdk/4`；现有证据只支持固定已曝光样本上的描述性结果，不支持
+方法优越性、泛化或 snapshot fix 的效果因果结论。
 
 ## 五问摘要
 
@@ -10,13 +12,15 @@
 2. **优化方向**：性能优先于 token 成本。词法分类只控制 coarse 块索引和 `dsl_rules` 是否出现，不能关闭 local/bulk；V8 plan 与 repair 继续精简，但协议负担阈值只作软 telemetry。
 3. **当前证据**：冻结 dev20 的 400 步零 API 重放显示 primary 字符数
    `27,459.715→20,662.020`（-24.755%），反事实 repair
-   `20,009.222→16,044.667`（-19.814%）。付费 smoke 完成 16/16 行并重放
-   8/8 backward，HP/FR exact RT2 为 `0.500/0.998`；该 n=2 已曝光范围只证明链路。
-4. **新问题**：离线仍有 1/399 路径不兼容与 25/394 软 burden 超限形态；smoke
-   8/8 HP 步都选 bounded 且无超限，未 live 覆盖 local/bulk/DSL 或软超限。
-   paired10 又在 provider terminal stream failure 后停于 192/400 行，无法形成 n=10 终点。
-5. **下一轮靶子**：先审计 obj3d2 的 evaluator-layout/真实 UV 双重失效与 framing
-   repair 成本，再以新的预注册实验编号决定是否重跑；原 failed campaign 不得重掷。
+   `20,009.222→16,044.667`（-19.814%）。最终付费诊断完成 400/400 行；exact
+   backward RT10 为 HP `0.745178`、FR `0.695854`、配对差 `+0.049324`
+   （n=10，4 正/4 负/2 平），CriticalFailure 为 `4/90` 对 `8/90`。
+4. **新问题**：样本异质性很大，`mathlean2` 上 HP 比 FR 低 `0.574488`；HP
+   protocol kept-context 为 `11/200`，repair 成功采用 `21/32`。10 个已开始生成的
+   transport attempt 缺 final usage，因此归档只能给出已知 usage 费用而非精确账单。
+5. **下一轮靶子**：优先定位 `mathlean2` 集中的 schema/gate/op rejection，而不是继续
+   压缩提示字符；任何新方法实验使用新编号和未曝光样本。本次断电恢复只作为经过审计的
+   campaign continuation 证据，不扩展为普遍恢复规则。
 
 ## 唯一研究假设
 
@@ -297,8 +301,68 @@ credential scan 对 11 个本机 Key、Authorization、Cookie 与 private-key ma
 `ad3a56972def73ad550db32d4835a4802b14719ad758fb4d5fdf85df9a708407`。
 修正后的付费 smoke/main 已分别预注册为
 `exp_20260718_hybridv8_transportv4_snapshotfix_smoke2` 与
-`exp_20260718_hybridv8_transportv4_snapshotfix_paired10`；开始前仍需 clean commit、formal
-dry-run、计划审阅和 Key probe，旧目录不得 resume 或拼接。
+`exp_20260718_hybridv8_transportv4_snapshotfix_paired10`。
+
+## 2026-07-18 snapshotfix paired10 完整诊断与断电续跑
+
+`exp_20260718_hybridv8_transportv4_snapshotfix_paired10` 在 clean commit
+`bc4a39f7dd1476848927d45bcf1840a74677e6be` 上运行 MiniMax-M3、transport-v4、
+seed42、distractor-on、固定 10 样本和交替方法顺序。主机断电时目录已有 362/400 行：
+7 个样本完整，`filesystem3`、`musicsheet2`、`satellite4` 各有未完成后缀。按用户明确
+要求，本次没有新建 campaign 或重跑完整样本，而是先封存 362/400 快照，再只从三个
+checkpoint 的首个未提交 RT 续跑。
+
+断电留下的三条 HTTP attempt 都已见 generation delta，但缺 `message_stop`、final usage，
+且 content block 未闭合。恢复把它们显式追加为 retryable `host_power_loss`，各消耗一个
+response slot；attempt2 保持相同 prompt、参数、request fingerprint、semantic call 和
+call ID，并写入新的 raw transport 文件。`filesystem3` 与 `musicsheet2` 直接完成；
+`satellite4` 的 g000 attempt2 再次不完整，按样本级隔离先写
+`infrastructure_incomplete`，其后只启动该样本并使用唯一授权的 g001。断电前三个样本
+已经提交的 82 行在恢复期间产生 0 次 provider POST；三个 journal replay 也明确记录
+`provider_called=false`。恢复 helper 位于工作树外，运行代码、方法指纹、Git commit 和
+tree 身份均未改变；helper SHA-256 与 append-only ledger hash 保存在
+`analysis/powerloss_recovery_prepared.json`。
+
+最终完整性：400 个唯一 result key，forward/backward 各 200；20 个 checkpoint 均
+RT10；10 个 latest outcome 均 `finished`。strict inspector 为 `errors=[]`、436 API rows、
+433 semantic calls、442 HTTP attempts；verifier 从 raw 独立重算 200/200 backward RS
+并 PASS。证据 digest 在续跑结束、prepare 前和独立审计时均为
+`6e0750f7779ee6c20d4c11c4d0f15a5c84c52c02472e0e0d15e25d0f217de3f2`。
+
+描述性 exact backward RT10：HP `0.745178`、FR `0.695854`、paired delta
+`+0.049324`、sample SD `0.344047`，4 正/4 负/2 平。CriticalFailure@0.10 为 HP
+`4/90`、FR `8/90`。这 10 个样本全部已曝光，且删除 `filesystem3` 后平均 delta 变为
+负值，因此不得表述为方法普遍优越或 snapshot fix 的效果因果证据。
+
+HP 的 199 个声明 route 为 bounded/local/bulk/DSL=`124/54/14/7`，另 1 个完整
+thinking-only max_tokens 空响应没有合法 route；profiles 为 block/default=`117/83`。
+repair attempted `32/200`，成功且采用 `21/32`；最终 kept-context protocol failure
+`11/200`；软 burden 超限 `12/200` 且全部继续执行。preservation 为 199 个适用步骤
+0 violations，空响应 kept-context 步为明确 1 个 N/A。
+
+有 final usage 的 432 个 response 中，HP（含 repair）为 8,448,270 tokens、
+USD 7.036488；FR 为 6,660,571 tokens、USD 5.571257；合计 15,108,841 tokens、
+USD 12.607745。另有 7 个 `incomplete_stream` 与 3 个 `host_power_loss` generation
+attempt 缺 final usage，故这些数字是可审计的已知 usage/费用，不是精确 provider 账单。
+
+official prepare、双人只读完整性/结果审阅、finalize 和 records validator 在生成态均
+PASS。由于全局 catalog hash 会连带改写 HP_V3–HP_V7、Baseline 和旧 transport 的冻结
+record，生成 record 只作私有快照，不提交全局登记；Git 中的脱敏诊断报告为
+`analysis/exp_20260718_hybridv8_transportv4_snapshotfix_paired10.md`。完整私有 raw 归档为
+`../hybridpatch_private_archives/exp_20260718_hybridv8_transportv4_snapshotfix_paired10_complete.tgz`
+（SHA-256 `d24f416498c754d0be317d02c5b8f4916a7f21b4eb558c8e6d64184a89834508`）；
+恢复 helper 归档 SHA-256 为
+`245001818ba8afaa8974f6b48ff6b7f42ac13a17fdb6c030dcd1f2b09f8522f1`。
+完整归档的 3,754 个成员经 11 个本机 Key 精确值及 Authorization/Cookie/private-key
+marker 扫描，命中均为 0；Key 值未打印。
+
+最终零 API 回归：98 个 Python 文件编译 PASS；executor 72/72、splitter byte-exact、
+HP transport/dispatcher 85/85、transport-core 47/47、analyzer 5/5、process tool 14/14；
+burden 报告 400 rows/394 successes；V7 dev20 和本 campaign 分别只读 replay 400/200
+backward RS，均 PASS；observed protocol revisions 仅 `hybridpatch/8`；`git diff --check`
+与 `validate_experiment_records.py --records-only` PASS。完整 source-linked validator 仍报告
+一个当前 HEAD 已存在的历史错配：冻结 transport-v2 record 保存的是 5,184-byte 旧 transport
+log 哈希，而 HEAD 的同一日志已演进为 7,583 bytes。为不改写冻结记录，本轮只披露，不修补。
 
 ## 运行方式
 

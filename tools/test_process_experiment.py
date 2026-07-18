@@ -127,6 +127,94 @@ class ProcessExperimentTests(unittest.TestCase):
         self.assertTrue(process.contains_placeholder({"x": ["review_required"]}))
         self.assertFalse(process.contains_placeholder({"x": ["reviewed"]}))
 
+    def test_result_protocols_ignores_unparsed_kept_context_default(self) -> None:
+        rows = [
+            {
+                "bdpatch": {
+                    "hybrid": {
+                        "protocol_rev": "hybridpatch/8",
+                        "protocol_version": "hybridpatch/8",
+                        "route": "local_patch",
+                    }
+                }
+            },
+            {
+                "bdpatch": {
+                    "hybrid": {
+                        "protocol_rev": None,
+                        "protocol_version": "hybridpatch/1",
+                        "invalid_json": True,
+                        "route": None,
+                        "failed_step_kept_context": True,
+                    }
+                }
+            },
+        ]
+
+        self.assertEqual(process.result_protocols(rows), ["hybridpatch/8"])
+
+    def test_result_protocols_keeps_legacy_parsed_fallback(self) -> None:
+        rows = [
+            {
+                "bdpatch": {
+                    "hybrid": {
+                        "protocol_version": "hybridpatch/7",
+                        "invalid_json": False,
+                        "route": "bulk_patch",
+                        "failed_step_kept_context": False,
+                    }
+                }
+            }
+        ]
+
+        self.assertEqual(process.result_protocols(rows), ["hybridpatch/7"])
+
+    def test_result_protocols_accepts_legacy_route_share_key(self) -> None:
+        rows = [
+            {
+                "bdpatch": {
+                    "hybrid": {
+                        "protocol_version": "hybridpatch/6",
+                        "route": None,
+                        "route_share_key": "local_patch",
+                    }
+                }
+            }
+        ]
+
+        self.assertEqual(process.result_protocols(rows), ["hybridpatch/6"])
+
+    def test_result_protocols_prefers_direct_revision_without_route(self) -> None:
+        rows = [
+            {
+                "bdpatch": {
+                    "hybrid": {
+                        "protocol_rev": "hybridpatch/8",
+                        "protocol_version": "hybridpatch/1",
+                        "route": None,
+                        "route_share_key": None,
+                    }
+                }
+            }
+        ]
+
+        self.assertEqual(process.result_protocols(rows), ["hybridpatch/8"])
+
+    def test_result_protocols_prefers_direct_revision_over_fallback(self) -> None:
+        rows = [
+            {
+                "bdpatch": {
+                    "hybrid": {
+                        "protocol_rev": "hybridpatch/8",
+                        "protocol_version": "hybridpatch/1",
+                        "route": "local_patch",
+                    }
+                }
+            }
+        ]
+
+        self.assertEqual(process.result_protocols(rows), ["hybridpatch/8"])
+
     def test_review_computes_canonical_counts(self) -> None:
         entry = process.validate_review(self.review(), self.facts())
         self.assertEqual(entry["verification"]["canonical_backward_rows"], 4)

@@ -350,7 +350,13 @@ def result_protocols(rows: Iterable[dict[str, Any]]) -> list[str]:
     revisions: set[str] = set()
     for row in rows:
         hybrid = ((row.get("bdpatch") or {}).get("hybrid") or {})
-        revision = hybrid.get("protocol_rev") or hybrid.get("protocol_version")
+        revision = hybrid.get("protocol_rev")
+        route = hybrid.get("route") or hybrid.get("route_share_key")
+        # Legacy telemetry defaults protocol_version to v1 even when no
+        # envelope parsed. A route is the existing witness that the fallback
+        # revision came from an observed executable envelope.
+        if not revision and route:
+            revision = hybrid.get("protocol_version")
         if revision:
             revisions.add(str(revision))
     return sorted(revisions)
