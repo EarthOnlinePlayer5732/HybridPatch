@@ -8,8 +8,11 @@ shared campaign-integrity failures.
 """
 
 import argparse
+import contextlib
+import copy
 from datetime import datetime
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -76,6 +79,69 @@ SUPPLEMENTAL_SAMPLES = [
 SMOKE_GRID_STEPS = 16
 MAIN_GRID_STEPS = 400
 SUPPLEMENTAL_GRID_STEPS = 1600
+CONFIRMATION_SAMPLE_COUNT = 68
+CONFIRMATION_RESERVE_COUNT = 17
+CONFIRMATION_CANDIDATE_COUNT = 85
+CONFIRMATION_KEY_COUNT = 13
+CONFIRMATION_SLOTS_PER_KEY = 4
+CONFIRMATION_GRID_STEPS = 2720
+CONFIRMATION_KNOWN_USAGE_LIMIT_USD = 130.0
+CONFIRMATION_EXPERIMENT_ID = (
+    "exp_20260719_hybridv8_transportv4_method_unseen_confirmation68"
+)
+CONFIRMATION_DOCUMENTED_DEVELOPER_EXPOSURE = {"python1"}
+CONFIRMATION_SELECTION_SCHEMA = (
+    "anchorpatch.method_unseen_confirmation_split/1"
+)
+MIXED_CONFIRMATION_SELECTION_SCHEMA = "anchorpatch.mixed_confirmation_split/1"
+MIXED_CONFIRMATION_EXPERIMENT_ID = (
+    "exp_20260719_hybridv8_transportv4_mixed_confirmation100"
+)
+MIXED_CONFIRMATION_CANDIDATE_COUNT = 190
+MIXED_CONFIRMATION_SAMPLE_COUNT = 100
+MIXED_CONFIRMATION_RESERVE_COUNT = 90
+CONFIRMATION_ANALYSIS_POLICY = {
+    "schema": "anchorpatch.confirmation_analysis_policy/1",
+    "sensitivity_sets": [["python4"], ["audiosyn1"],
+                         ["python4", "audiosyn1"]],
+    "bootstrap": {"seed": 42, "resamples": 10000},
+    "critical_failure": {
+        "metric": "CriticalFailure",
+        "threshold": 0.10,
+    },
+    "evaluator_error_policy": {
+        "backward_rows_require": "finite_score_0_1_or_nonempty_error",
+        "error_row_score": 0.0,
+        "error_rows_reported_separately": True,
+    },
+    "known_committed_usage_wave_boundary_stop": {
+        "scope": "wave_boundary_committed_result_rows",
+        "usd_threshold": CONFIRMATION_KNOWN_USAGE_LIMIT_USD,
+    },
+}
+MIXED_CONFIRMATION_ANALYSIS_POLICY = {
+    "schema": "anchorpatch.mixed_confirmation_analysis_policy/1",
+    "headline_scope": "selected100",
+    "pre_registered_cohorts": [
+        "method_unseen",
+        "historical_hp_method_exposed",
+    ],
+    "bootstrap": {"seed": 42, "resamples": 10000},
+    "critical_failure": {
+        "metric": "CriticalFailure",
+        "threshold": 0.10,
+    },
+    "evaluator_error_policy": {
+        "backward_rows_require": "finite_score_0_1_or_nonempty_error",
+        "error_row_score": 0.0,
+        "error_rows_reported_separately": True,
+    },
+    "known_committed_usage_wave_boundary_stop": {
+        "scope": "wave_boundary_committed_result_rows",
+        "usd_threshold": CONFIRMATION_KNOWN_USAGE_LIMIT_USD,
+    },
+}
+_CONFIRMATION_SELECTION_VERIFIED_TOKEN = object()
 SMOKE_PROJECTED_COST_LIMIT_USD = 50.0
 
 
@@ -121,6 +187,81 @@ def _canonical_resume_authorization(authorization):
         "request_fingerprint": authorization["request_fingerprint"],
         "next_attempt_index": authorization["next_attempt_index"],
     }
+
+
+def _resume_authorization_consumed_before(
+        resume, api_rows, api_index, *, sample, worker_launch_id, out_dir):
+    """Return true when an invocation-level resume auth was already consumed."""
+    try:
+        parent = _validate_resume_authorization(resume)
+    except RuntimeError:
+        return False
+    if parent["sample"] != sample:
+        return False
+    matches = [
+        row for index, row in enumerate(api_rows, 1)
+        if index < api_index
+        and row.get("worker_launch_id") == worker_launch_id
+        and row.get("sample") == sample
+        and row.get("semantic_call_id") == resume["semantic_call_id"]
+        and row.get("semantic_root_id") == resume["semantic_root_id"]
+        and row.get("generation_index") == resume["generation_index"]
+        and row.get("parent_semantic_call_id")
+        == resume["parent_semantic_call_id"]
+        and row.get("request_fingerprint") == resume["request_fingerprint"]
+        and row.get("provider_called") is True
+        and row.get("response_replayed") is False
+        and row.get("classification") != "provider/API failure"
+        and row.get("count_as_method_failure") is False
+    ]
+    if len(matches) != 1:
+        return False
+    prior = matches[0]
+    digest = hashlib.sha256(
+        resume["semantic_call_id"].encode("utf-8")).hexdigest()[:24]
+    journal_path = os.path.join(
+        out_dir, "api_journal", f"{digest}.response.json")
+    if not os.path.isfile(journal_path):
+        return False
+    try:
+        journal = _read_json(journal_path)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    result = journal.get("result") if isinstance(journal, dict) else None
+    if (not isinstance(result, dict)
+            or journal.get("schema") != API_RESPONSE_JOURNAL_SCHEMA
+            or journal.get("semantic_root_id") != resume["semantic_root_id"]
+            or journal.get("semantic_call_id") != resume["semantic_call_id"]
+            or journal.get("generation_index") != resume["generation_index"]
+            or journal.get("parent_semantic_call_id")
+            != resume["parent_semantic_call_id"]
+            or journal.get("call_id") != prior.get("request_id")
+            or journal.get("request_fingerprint")
+            != resume["request_fingerprint"]
+            or result.get("semantic_root_id") != resume["semantic_root_id"]
+            or result.get("semantic_call_id") != resume["semantic_call_id"]
+            or result.get("generation_index") != resume["generation_index"]
+            or result.get("parent_semantic_call_id")
+            != resume["parent_semantic_call_id"]
+            or result.get("stream_complete") is not True
+            or result.get("transport_revision") != TRANSPORT_REVISION
+            or result.get("transport_resume_policy")
+            != TRANSPORT_RESUME_POLICY):
+        return False
+    ledger = _read_jsonl(os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+    committed = [
+        row for row in ledger
+        if row.get("schema") == API_ATTEMPT_SCHEMA
+        and row.get("event") == "response_committed"
+        and row.get("semantic_call_id") == resume["semantic_call_id"]
+        and row.get("semantic_root_id") == resume["semantic_root_id"]
+        and row.get("generation_index") == resume["generation_index"]
+        and row.get("parent_semantic_call_id")
+        == resume["parent_semantic_call_id"]
+        and row.get("call_id") == prior.get("request_id")
+        and row.get("request_fingerprint") == resume["request_fingerprint"]
+    ]
+    return len(committed) == 1
 
 
 def _validate_resume_authorization(authorization):
@@ -269,14 +410,15 @@ def _validated_attempt_lineage(
 
 
 def method_order(index):
-    """Deterministic alternating order: exact 5/5 balance for ten samples."""
+    """Return the deterministic counterbalanced paired-method order."""
     if index % 2 == 0:
         return ["hybridpatch", "fullrewrite"]
     return ["fullrewrite", "hybridpatch"]
 
 
 def build_key_assignments(
-        samples, key_labels, slots_per_key, *, alternate_within_key=False):
+        samples, key_labels, slots_per_key, *, alternate_within_key=False,
+        allow_queue=False):
     """Balance sample workers over keys and alternate each key's first arm.
 
     A sample remains one audited worker that runs both paired methods.  The
@@ -290,16 +432,20 @@ def build_key_assignments(
         raise RuntimeError("--key_labels must be a non-empty unique key pool")
     if (not _is_exact_int(slots_per_key) or slots_per_key < 1):
         raise RuntimeError("--slots_per_key must be >= 1")
-    if len(samples) > len(labels) * slots_per_key:
+    capacity = len(labels) * slots_per_key
+    if len(samples) > capacity and not allow_queue:
         raise RuntimeError(
             "sample count exceeds key concurrency capacity: "
             f"{len(samples)} > {len(labels)} x {slots_per_key}"
         )
-    schedule = [
-        label
-        for slot_index in range(slots_per_key)
-        for label in labels
-    ][:len(samples)]
+    schedule = []
+    while len(schedule) < len(samples):
+        schedule.extend(
+            label
+            for _slot_index in range(slots_per_key)
+            for label in labels
+        )
+    schedule = schedule[:len(samples)]
     per_key_indexes = {label: 0 for label in labels}
     per_key_starts = {
         label: index % 2 for index, label in enumerate(labels)
@@ -319,6 +465,74 @@ def build_key_assignments(
         })
         per_key_indexes[label] += 1
     return assignments
+
+
+def _mixed_confirmation_sample_order(
+        samples, key_labels, slots_per_key, selection_record):
+    """Order selected100 so both pre-registered cohorts are arm-balanced."""
+    cohorts = selection_record.get("cohorts") or {}
+    unseen = sorted(cohorts.get("method_unseen") or [])
+    historical = sorted(
+        cohorts.get("historical_hp_method_exposed") or [])
+    if (len(unseen) != 60 or len(historical) != 40
+            or set(unseen) & set(historical)
+            or set(unseen) | set(historical) != set(samples)):
+        raise RuntimeError("mixed confirmation cohort assignment is invalid")
+    placeholders = [f"position-{index:03d}" for index in range(len(samples))]
+    template = build_key_assignments(
+        placeholders, key_labels, slots_per_key,
+        alternate_within_key=True, allow_queue=True)
+    hp_positions = [
+        index for index, item in enumerate(template)
+        if item["methods"][0] == "hybridpatch"]
+    fr_positions = [
+        index for index, item in enumerate(template)
+        if item["methods"][0] == "fullrewrite"]
+    if len(hp_positions) != 50 or len(fr_positions) != 50:
+        raise RuntimeError("mixed confirmation method template is not 50/50")
+    ordered = [None] * len(samples)
+    for position, sample in zip(hp_positions[:30], unseen[:30]):
+        ordered[position] = sample
+    for position, sample in zip(fr_positions[:30], unseen[30:]):
+        ordered[position] = sample
+    for position, sample in zip(hp_positions[30:], historical[:20]):
+        ordered[position] = sample
+    for position, sample in zip(fr_positions[30:], historical[20:]):
+        ordered[position] = sample
+    if any(sample is None for sample in ordered):
+        raise RuntimeError("mixed confirmation sample ordering is incomplete")
+    return ordered
+
+
+def _partition_assignment_waves(assignments, slots_per_key):
+    """Partition a stable assignment stream into per-key bounded waves."""
+    if not _is_exact_int(slots_per_key) or slots_per_key < 1:
+        raise RuntimeError("wave slots_per_key must be >= 1")
+    waves = []
+    current = []
+    key_counts = {}
+    seen_samples = set()
+    for item in assignments:
+        if not isinstance(item, dict):
+            raise RuntimeError("assignment wave contains a non-object")
+        sample = item.get("sample")
+        label = item.get("key_label")
+        if (not isinstance(sample, str) or not sample
+                or sample in seen_samples
+                or not isinstance(label, str) or not label):
+            raise RuntimeError("assignment wave identity is invalid")
+        if key_counts.get(label, 0) >= slots_per_key:
+            if not current:
+                raise RuntimeError("assignment wave cannot make progress")
+            waves.append(current)
+            current = []
+            key_counts = {}
+        current.append(item)
+        key_counts[label] = key_counts.get(label, 0) + 1
+        seen_samples.add(sample)
+    if current:
+        waves.append(current)
+    return waves
 
 
 def _validate_campaign_grid(args):
@@ -350,6 +564,30 @@ def _validate_campaign_grid(args):
             raise RuntimeError(
                 "supplemental requires --slots_per_key 4"
             )
+    elif args.campaign_role == "confirmation":
+        selection_record = _argument_value(
+            args, "_selection_manifest_record", {}) or {}
+        expected_count = (
+            MIXED_CONFIRMATION_SAMPLE_COUNT
+            if selection_record.get("schema")
+            == MIXED_CONFIRMATION_SELECTION_SCHEMA
+            else CONFIRMATION_SAMPLE_COUNT
+        )
+        if (expected_count not in {
+                CONFIRMATION_SAMPLE_COUNT, MIXED_CONFIRMATION_SAMPLE_COUNT}
+                or len(list(args.samples)) != expected_count
+                or len(set(args.samples)) != expected_count
+                or args.num_round_trips != 10):
+            raise RuntimeError(
+                "confirmation requires the committed selection grid at 10 RT"
+            )
+        if getattr(args, "smoke_dir", None):
+            raise RuntimeError("confirmation cannot declare --smoke_dir")
+        if (getattr(args, "slots_per_key", None)
+                != CONFIRMATION_SLOTS_PER_KEY):
+            raise RuntimeError(
+                "confirmation requires --slots_per_key 4"
+            )
     else:
         raise RuntimeError(f"unsupported campaign role: {args.campaign_role}")
 
@@ -362,6 +600,778 @@ def _sha256(path):
 def _read_json(path):
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def _canonical_json_bytes(value):
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+def _validate_mixed_confirmation_selection_payload(
+        payload, available_samples=None):
+    rule = payload.get("candidate_rule")
+    if not isinstance(rule, dict):
+        raise RuntimeError("selection manifest candidate_rule is missing")
+    expected_rule = {
+        "seed": 42,
+        "rule": "authorized_mixed_60_method_unseen_plus_40_historical",
+        "candidate_count": MIXED_CONFIRMATION_CANDIDATE_COUNT,
+        "selected_count": MIXED_CONFIRMATION_SAMPLE_COUNT,
+        "reserve_count": MIXED_CONFIRMATION_RESERVE_COUNT,
+        "method_unseen_candidate_count": 81,
+        "method_unseen_selected_count": 60,
+        "historical_candidate_count": 109,
+        "historical_selected_count": 40,
+    }
+    if any(rule.get(key) != value for key, value in expected_rule.items()):
+        raise RuntimeError("mixed confirmation candidate rule is not frozen")
+    lists = {}
+    for field, expected_count in (
+            ("candidate_sample_ids", MIXED_CONFIRMATION_CANDIDATE_COUNT),
+            ("selected_sample_ids", MIXED_CONFIRMATION_SAMPLE_COUNT),
+            ("reserve_sample_ids", MIXED_CONFIRMATION_RESERVE_COUNT)):
+        values = payload.get(field)
+        if (not isinstance(values, list)
+                or len(values) != expected_count
+                or values != sorted(values)
+                or len(set(values)) != expected_count
+                or any(not isinstance(value, str) or not value
+                       for value in values)):
+            raise RuntimeError(
+                f"mixed selection {field} must contain {expected_count} "
+                "sorted unique sample IDs")
+        lists[field] = list(values)
+    candidates = set(lists["candidate_sample_ids"])
+    selected = set(lists["selected_sample_ids"])
+    reserve = set(lists["reserve_sample_ids"])
+    if selected & reserve or selected | reserve != candidates:
+        raise RuntimeError("mixed selection selected/reserve partition is invalid")
+    if available_samples is not None and not candidates <= set(available_samples):
+        raise RuntimeError(
+            "mixed selection contains a sample outside samples_delegate52")
+
+    cohorts = payload.get("cohorts")
+    if not isinstance(cohorts, dict):
+        raise RuntimeError("mixed selection cohorts are missing")
+    unseen = cohorts.get("method_unseen")
+    historical = cohorts.get("historical_hp_method_exposed")
+    if not isinstance(unseen, dict) or not isinstance(historical, dict):
+        raise RuntimeError("mixed selection cohort objects are missing")
+    unseen_candidates = unseen.get("candidate_sample_ids")
+    unseen_selected = unseen.get("selected_sample_ids")
+    historical_candidates = historical.get("candidate_sample_ids")
+    historical_selected = historical.get("selected_sample_ids")
+    mandatory = historical.get("mandatory_actual_hp_api_sample_ids")
+    if (not isinstance(unseen_candidates, list)
+            or len(unseen_candidates) != 81
+            or len(set(unseen_candidates)) != 81
+            or unseen_candidates != sorted(unseen_candidates)
+            or not isinstance(unseen_selected, list)
+            or len(unseen_selected) != 60
+            or unseen_selected != sorted(unseen_selected)
+            or not set(unseen_selected) <= set(unseen_candidates)
+            or not isinstance(historical_candidates, list)
+            or len(historical_candidates) != 109
+            or len(set(historical_candidates)) != 109
+            or historical_candidates != sorted(historical_candidates)
+            or not isinstance(historical_selected, list)
+            or len(historical_selected) != 40
+            or historical_selected != sorted(historical_selected)
+            or not set(historical_selected) <= set(historical_candidates)
+            or set(unseen_candidates) & set(historical_candidates)
+            or set(unseen_candidates) | set(historical_candidates) != candidates
+            or set(unseen_selected) | set(historical_selected) != selected
+            or not isinstance(mandatory, list)
+            or len(mandatory) != 17
+            or mandatory != sorted(mandatory)
+            or not set(mandatory) <= set(historical_selected)):
+        raise RuntimeError("mixed selection cohort partition is invalid")
+
+    audit = payload.get("exposure_audit")
+    strict = (audit or {}).get("strict_any_provider_call")
+    recent = set((audit or {}).get("recent_campaign_sample_ids") or [])
+    if (not isinstance(audit, dict)
+            or not isinstance(strict, dict)
+            or strict.get("sample_count") != 234
+            or audit.get("method_unseen_candidate_count") != 81
+            or audit.get(
+                "method_exposed_candidate_count_after_recent_exclusion") != 109
+            or audit.get("actual_hp_api_historical_mandatory_count") != 17
+            or set((audit.get("source_level_hp_exposure") or {}).keys())
+                != {"json1", "molecule1", "obj3d1", "starcatalog1"}
+            or len(recent) != 44
+            or selected & recent):
+        raise RuntimeError("mixed selection exposure audit is invalid")
+    runtime = payload.get("runtime_evaluator_smoke")
+    if (not isinstance(runtime, dict)
+            or runtime.get("checked_count") != 234
+            or runtime.get("runnable_count") != 234
+            or runtime.get("failed_count") != 0):
+        raise RuntimeError(
+            "mixed selection requires a passing 234/234 runtime smoke")
+    if payload.get("experiment_id") != MIXED_CONFIRMATION_EXPERIMENT_ID:
+        raise RuntimeError("mixed selection experiment_id is invalid")
+
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, dict) or inputs.get("sample_count") != 234:
+        raise RuntimeError("mixed selection inputs are invalid")
+    expected_paths = {
+        "selector_script": "tools/build_mixed_confirmation_split.py",
+        "base_selector_script": "tools/build_unseen_confirmation_split.py",
+        "registry": "data/CONTAMINATION_REGISTRY.json",
+        "hybrid_split": "data/hybrid_split.json",
+    }
+    normalized_inputs = {}
+    for name, expected_path in expected_paths.items():
+        entry = inputs.get(name)
+        if (not isinstance(entry, dict)
+                or entry.get("path") != expected_path
+                or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256")))):
+            raise RuntimeError(f"mixed selection {name} input digest is invalid")
+        normalized_inputs[name] = {
+            "path": expected_path,
+            "sha256": entry["sha256"],
+        }
+    recent_inputs = inputs.get("recent_campaign_manifests")
+    if (not isinstance(recent_inputs, dict) or len(recent_inputs) != 2):
+        raise RuntimeError("mixed selection recent manifest inputs are invalid")
+    for relative, entry in recent_inputs.items():
+        if (not isinstance(entry, dict)
+                or entry.get("path") != f"{relative}/dispatch_manifest.json"
+                or not re.fullmatch(r"[0-9a-f]{64}", str(entry.get("sha256")))):
+            raise RuntimeError("mixed selection recent manifest digest is invalid")
+    content_digest = inputs.get("sample_content_manifest_sha256")
+    if not re.fullmatch(r"[0-9a-f]{64}", str(content_digest)):
+        raise RuntimeError("mixed selection sample content digest is invalid")
+    normalized_inputs["recent_campaign_manifests"] = copy.deepcopy(recent_inputs)
+    normalized_inputs["sample_content_manifest"] = {
+        "path": "data/samples_delegate52",
+        "sample_count": 234,
+        "sha256": content_digest,
+    }
+
+    features = payload.get("features")
+    if (not isinstance(features, dict)
+            or set(features) != candidates
+            or any(not isinstance(value, dict) for value in features.values())):
+        raise RuntimeError("mixed selection features do not cover candidates")
+    preview = payload.get("artifact_sha256_preview")
+    expected_preview = hashlib.sha256(_canonical_json_bytes({
+        "candidate_sample_ids": lists["candidate_sample_ids"],
+        "selected_sample_ids": lists["selected_sample_ids"],
+        "reserve_sample_ids": lists["reserve_sample_ids"],
+        "cohorts": cohorts,
+        "features": features,
+    })).hexdigest()
+    if preview != expected_preview:
+        raise RuntimeError("mixed selection canonical digest mismatch")
+    return {
+        "selection_kind": "mixed100",
+        "experiment_id": payload["experiment_id"],
+        "selected_sample_ids": lists["selected_sample_ids"],
+        "reserve_sample_ids": lists["reserve_sample_ids"],
+        "reserve_selection_order": lists["reserve_sample_ids"],
+        "candidate_sample_ids": lists["candidate_sample_ids"],
+        "artifact_sha256_preview": preview,
+        "inputs": normalized_inputs,
+        "cohorts": {
+            "method_unseen": list(unseen_selected),
+            "historical_hp_method_exposed": list(historical_selected),
+        },
+    }
+
+
+def _validate_confirmation_selection_payload(payload, available_samples=None):
+    """Validate the committed zero-API selection artifact and its digest."""
+    if not isinstance(payload, dict):
+        raise RuntimeError("selection manifest must be a JSON object")
+    if payload.get("schema") == MIXED_CONFIRMATION_SELECTION_SCHEMA:
+        return _validate_mixed_confirmation_selection_payload(
+            payload, available_samples=available_samples)
+    if payload.get("schema") != CONFIRMATION_SELECTION_SCHEMA:
+        raise RuntimeError("selection manifest schema is not supported")
+    rule = payload.get("candidate_rule")
+    if not isinstance(rule, dict):
+        raise RuntimeError("selection manifest candidate_rule is missing")
+    expected_rule = {
+        "seed": 42,
+        "candidate_count": CONFIRMATION_CANDIDATE_COUNT,
+        "selected_count": CONFIRMATION_SAMPLE_COUNT,
+        "reserve_count": CONFIRMATION_RESERVE_COUNT,
+    }
+    if any(rule.get(key) != value for key, value in expected_rule.items()):
+        raise RuntimeError(
+            "selection manifest must freeze seed42 with selected68/reserve17"
+        )
+    if rule.get("rule") != "candidate_count_below100_select_about80_percent":
+        raise RuntimeError("selection manifest candidate rule is not frozen")
+
+    lists = {}
+    for field, expected_count in (
+            ("candidate_sample_ids", CONFIRMATION_CANDIDATE_COUNT),
+            ("selected_sample_ids", CONFIRMATION_SAMPLE_COUNT),
+            ("reserve_sample_ids", CONFIRMATION_RESERVE_COUNT)):
+        values = payload.get(field)
+        if (not isinstance(values, list)
+                or len(values) != expected_count
+                or any(not isinstance(value, str) or not value
+                       for value in values)
+                or len(set(values)) != expected_count
+                or values != sorted(values)):
+            raise RuntimeError(
+                f"selection manifest {field} is not a sorted unique list "
+                f"of {expected_count} samples"
+            )
+        lists[field] = list(values)
+    selected = set(lists["selected_sample_ids"])
+    reserve = set(lists["reserve_sample_ids"])
+    candidates = set(lists["candidate_sample_ids"])
+    if selected & reserve or selected | reserve != candidates:
+        raise RuntimeError(
+            "selection manifest selected/reserve partition is invalid"
+        )
+    reserve_order = payload.get("reserve_selection_order")
+    if (not isinstance(reserve_order, list)
+            or len(reserve_order) != CONFIRMATION_RESERVE_COUNT
+            or any(not isinstance(value, str) or not value
+                   for value in reserve_order)
+            or set(reserve_order) != reserve):
+        raise RuntimeError(
+            "selection manifest reserve_selection_order must exactly cover reserve"
+        )
+    if available_samples is not None and not candidates <= set(
+            available_samples):
+        raise RuntimeError(
+            "selection manifest contains a sample outside samples_delegate52"
+        )
+
+    exposure = payload.get("exposure_policy")
+    if not isinstance(exposure, dict):
+        raise RuntimeError("selection manifest exposure_policy is missing")
+    strict = exposure.get("strict_any_provider_call")
+    method_policy = exposure.get("method_developer_unseen")
+    if (not isinstance(strict, dict)
+            or strict.get("sample_count") != 234
+            or rule.get("strict_unseen_candidate_count") != 0):
+        raise RuntimeError(
+            "selection manifest strict exposure audit must show 234 exposed, 0 unseen"
+        )
+    if (not isinstance(method_policy, dict)
+            or method_policy.get("excluded_sample_count") != 149
+            or method_policy.get("registry_clean_candidate_count") != 86
+            or method_policy.get("split_test_count") != 20
+            or method_policy.get(
+                "clean_candidate_with_method_exposure_count") != 1
+            or method_policy.get(
+                "clean_candidate_with_method_exposure_ids") != ["python1"]
+            or set((method_policy.get(
+                "documented_developer_content_exposure") or {}).keys())
+                != CONFIRMATION_DOCUMENTED_DEVELOPER_EXPOSURE):
+        raise RuntimeError(
+            "selection manifest method exposure audit must freeze the clean85 "
+            "holdout and exclude all 149 exposed samples"
+        )
+
+    runtime = payload.get("runtime_evaluator_smoke")
+    if (not isinstance(runtime, dict)
+            or runtime.get("checked_count") != 234
+            or runtime.get("runnable_count") != 234
+            or runtime.get("failed_count") != 0):
+        raise RuntimeError(
+            "selection manifest must include a passing 234/234 runtime smoke"
+        )
+
+    experiment_id = payload.get("experiment_id")
+    if experiment_id != CONFIRMATION_EXPERIMENT_ID:
+        raise RuntimeError("selection manifest experiment_id is invalid")
+    inputs = payload.get("inputs")
+    if not isinstance(inputs, dict):
+        raise RuntimeError("selection manifest inputs are missing")
+    normalized_inputs = {}
+    expected_paths = {
+        "selector_script": "tools/build_unseen_confirmation_split.py",
+        "registry": "data/CONTAMINATION_REGISTRY.json",
+        "hybrid_split": "data/hybrid_split.json",
+    }
+    for name, expected_path in expected_paths.items():
+        entry = inputs.get(name)
+        if (not isinstance(entry, dict)
+                or entry.get("path") != expected_path
+                or not isinstance(entry.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"])):
+            raise RuntimeError(
+                f"selection manifest {name} input digest is invalid"
+            )
+        normalized_inputs[name] = {
+            "path": expected_path,
+            "sha256": entry["sha256"],
+        }
+    sample_digest = inputs.get("sample_json_manifest_sha256")
+    if (inputs.get("samples_root") != "data/samples_delegate52"
+            or inputs.get("sample_count") != 234
+            or not isinstance(sample_digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", sample_digest)):
+        raise RuntimeError(
+            "selection manifest sample input digest is invalid"
+        )
+    normalized_inputs["sample_json_manifest"] = {
+        "path": inputs["samples_root"],
+        "sample_count": inputs["sample_count"],
+        "sha256": sample_digest,
+    }
+
+    features = payload.get("features")
+    if (not isinstance(features, dict)
+            or set(features) != candidates
+            or any(not isinstance(value, dict) for value in features.values())):
+        raise RuntimeError(
+            "selection manifest features do not cover the candidate partition"
+        )
+    preview = payload.get("artifact_sha256_preview")
+    expected_preview = hashlib.sha256(_canonical_json_bytes({
+        "candidate_sample_ids": lists["candidate_sample_ids"],
+        "selected_sample_ids": lists["selected_sample_ids"],
+        "reserve_sample_ids": lists["reserve_sample_ids"],
+        "features": features,
+    })).hexdigest()
+    if (not isinstance(preview, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", preview)
+            or preview != expected_preview):
+        raise RuntimeError("selection manifest canonical digest mismatch")
+    return {
+        "experiment_id": experiment_id,
+        "selected_sample_ids": lists["selected_sample_ids"],
+        "reserve_sample_ids": lists["reserve_sample_ids"],
+        "reserve_selection_order": list(reserve_order),
+        "candidate_sample_ids": lists["candidate_sample_ids"],
+        "artifact_sha256_preview": preview,
+        "inputs": normalized_inputs,
+    }
+
+
+def _validate_confirmation_candidate_semantics(validated, registry, hybrid_split):
+    """Bind a byte-valid selection to the frozen registry and sealed splits."""
+    clean_candidates = {
+        item.get("sample_id")
+        for item in registry.get("entries", [])
+        if item.get("status") == "clean_candidate"
+    }
+    sealed_exposure = set()
+    for name in ("dev", "val", "test", "unused_reserve"):
+        values = (hybrid_split.get("splits") or {}).get(name, [])
+        if not isinstance(values, list):
+            raise RuntimeError(f"hybrid split {name} is not a list")
+        sealed_exposure.update(values)
+    candidate_set = set(validated["candidate_sample_ids"])
+    expected_candidates = (
+        clean_candidates - CONFIRMATION_DOCUMENTED_DEVELOPER_EXPOSURE
+    )
+    if candidate_set != expected_candidates:
+        raise RuntimeError(
+            "selection candidates do not exactly match registry clean_candidate "
+            "minus documented developer exposure"
+        )
+    if candidate_set & sealed_exposure:
+        raise RuntimeError(
+            "selection candidates overlap a sealed dev/val/test/reserve split"
+        )
+
+
+def _load_verified_confirmation_selector(repo_root, entry):
+    """Import the committed selector only after its path and digest are verified."""
+    path = repo_root / entry["path"]
+    if (not path.is_file() or _sha256(path) != entry["sha256"]):
+        raise RuntimeError("selection selector script bytes are not verified")
+    module_name = (
+        "_anchorpatch_confirmation_selector_"
+        + entry["sha256"][:16]
+    )
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("selection selector script cannot be imported")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _require_equal_selection_field(field, actual, expected):
+    if actual != expected:
+        raise RuntimeError(
+            f"selection manifest recompute mismatch: {field}")
+
+
+def _current_experiment_exclusion(
+        repo_root, current_experiment_dir, experiment_id):
+    if current_experiment_dir is None:
+        return None
+    current = Path(current_experiment_dir).resolve()
+    if current.name != experiment_id:
+        raise RuntimeError(
+            "current confirmation out_dir does not match selection experiment_id"
+        )
+    try:
+        current.relative_to(repo_root)
+    except ValueError:
+        return None
+    return current
+
+
+@contextlib.contextmanager
+def _selector_excluding_current_experiment(selector, excluded_dir):
+    if excluded_dir is None:
+        yield
+        return
+    original_walk = getattr(selector, "_walk_experiment_paths", None)
+    if not callable(original_walk):
+        raise RuntimeError(
+            "selection selector cannot exclude current experiment evidence"
+        )
+
+    def filtered_walk(repo):
+        for path in original_walk(repo):
+            try:
+                path.resolve().relative_to(excluded_dir)
+            except ValueError:
+                yield path
+
+    selector._walk_experiment_paths = filtered_walk
+    try:
+        yield
+    finally:
+        selector._walk_experiment_paths = original_walk
+
+
+def _validate_confirmation_recomputed_selection(
+        payload, validated, repo_root, selector, registry, hybrid_split,
+        current_experiment_dir=None):
+    """Recompute the committed selector facts without trusting artifact fields."""
+    excluded_dir = _current_experiment_exclusion(
+        repo_root, current_experiment_dir,
+        validated.get("experiment_id") or payload.get("experiment_id"))
+    samples_root = repo_root / "data" / "samples_delegate52"
+    with _selector_excluding_current_experiment(selector, excluded_dir):
+        all_ids = selector.sample_ids(samples_root)
+        all_set = set(all_ids)
+        any_provider = selector.scan_any_provider_exposure(repo_root, all_set)
+        actual_method = selector.scan_method_exposure(repo_root, all_set)
+    policy = payload.get("exposure_policy") or {}
+    strict = policy.get("strict_any_provider_call") or {}
+    method_policy = policy.get("method_developer_unseen") or {}
+    for field in ("sample_ids", "sample_count", "evidence_manifest_sha256"):
+        _require_equal_selection_field(
+            f"strict_any_provider_call.{field}",
+            strict.get(field), any_provider.get(field))
+    for field in ("api_call_files", "api_raw_request_files"):
+        _require_equal_selection_field(
+            f"strict_any_provider_call.{field}",
+            strict.get(field), any_provider.get(field))
+
+    registry_sets = selector.load_registry_sets(registry)
+    split = selector.split_sets(hybrid_split)
+    method_holdout_pool, policy_method_exposed, clean_with_method_exposure = (
+        selector.method_holdout_candidates(
+            all_set, registry_sets, split, actual_method["sample_ids"])
+    )
+    method_expected = {
+        "actual_method_scan_count": actual_method["sample_count"],
+        "actual_method_scan_sample_ids": actual_method["sample_ids"],
+        "actual_method_path_manifest_sha256": actual_method[
+            "path_manifest_sha256"],
+        "clean_candidate_with_method_exposure_count": len(
+            clean_with_method_exposure),
+        "clean_candidate_with_method_exposure_ids": sorted(
+            clean_with_method_exposure),
+        "excluded_sample_count": len(policy_method_exposed),
+        "excluded_sample_ids": sorted(policy_method_exposed),
+    }
+    for field, expected in method_expected.items():
+        _require_equal_selection_field(
+            f"method_developer_unseen.{field}",
+            method_policy.get(field), expected)
+
+    runtime = payload.get("runtime_evaluator_smoke") or {}
+    runnable = runtime.get("runnable_sample_ids")
+    if runnable is None:
+        runnable = all_ids
+    _require_equal_selection_field(
+        "runtime_evaluator_smoke.runnable_sample_ids",
+        sorted(runnable), all_ids)
+    runnable_candidates = sorted(method_holdout_pool & set(runnable))
+    features = {
+        sample_id: selector.sample_feature(repo_root, sample_id)
+        for sample_id in runnable_candidates
+    }
+    selector.add_length_bins(features)
+    selected_n, reserve_n, count_rule = selector.selection_counts(
+        len(runnable_candidates))
+    reserve, reserve_order, _tie_rank = selector.stratified_reserve(
+        runnable_candidates, features, reserve_n, 42)
+    selected = sorted(set(runnable_candidates) - set(reserve))
+    if len(selected) != selected_n:
+        raise RuntimeError("selection recompute produced invalid counts")
+    candidate_rule = payload.get("candidate_rule") or {}
+    recomputed_rule = {
+        "seed": 42,
+        "rule": count_rule,
+        "candidate_count": len(runnable_candidates),
+        "selected_count": len(selected),
+        "reserve_count": len(reserve),
+        "strict_unseen_candidate_count": len(
+            all_set - set(any_provider["sample_ids"])),
+    }
+    for field, expected in recomputed_rule.items():
+        _require_equal_selection_field(
+            f"candidate_rule.{field}", candidate_rule.get(field), expected)
+    _require_equal_selection_field(
+        "candidate_sample_ids", payload.get("candidate_sample_ids"),
+        runnable_candidates)
+    _require_equal_selection_field(
+        "selected_sample_ids", validated["selected_sample_ids"], selected)
+    _require_equal_selection_field(
+        "reserve_sample_ids", validated["reserve_sample_ids"], reserve)
+    _require_equal_selection_field(
+        "reserve_selection_order", validated["reserve_selection_order"],
+        reserve_order)
+    _require_equal_selection_field(
+        "features", payload.get("features"), features)
+    return {
+        "excluded_current_experiment_dir": (
+            excluded_dir.relative_to(repo_root).as_posix()
+            if excluded_dir is not None else None
+        ),
+    }
+
+
+def _validate_mixed_confirmation_recomputed_selection(
+        payload, validated, repo_root, selector,
+        current_experiment_dir=None):
+    excluded_dir = _current_experiment_exclusion(
+        repo_root, current_experiment_dir, validated["experiment_id"])
+    recomputed = selector.build_split(
+        repo_root,
+        skip_runtime_smoke=True,
+        exclude_experiment_dir=excluded_dir,
+    )
+    for field in (
+            "candidate_rule", "candidate_sample_ids", "selected_sample_ids",
+            "reserve_sample_ids", "cohorts", "features",
+            "artifact_sha256_preview"):
+        _require_equal_selection_field(
+            field, payload.get(field), recomputed.get(field))
+    expected_audit = recomputed.get("exposure_audit") or {}
+    actual_audit = payload.get("exposure_audit") or {}
+    for field in (
+            "strict_any_provider_call", "base_method_unseen_count",
+            "source_level_hp_exposure", "method_unseen_candidate_count",
+            "method_exposed_candidate_count_after_recent_exclusion",
+            "actual_hp_api_historical_mandatory_count",
+            "actual_hp_api_historical_mandatory_ids",
+            "recent_campaign_sample_count", "recent_campaign_sample_ids",
+            "recent_campaign_samples", "actual_method_scan_count",
+            "actual_method_scan_sample_ids",
+            "actual_method_path_manifest_sha256"):
+        _require_equal_selection_field(
+            f"exposure_audit.{field}", actual_audit.get(field),
+            expected_audit.get(field))
+    for field in (
+            "base_selector_script", "registry", "hybrid_split",
+            "recent_campaign_manifests", "sample_count",
+            "sample_content_manifest_sha256"):
+        _require_equal_selection_field(
+            f"inputs.{field}", (payload.get("inputs") or {}).get(field),
+            (recomputed.get("inputs") or {}).get(field))
+    return {
+        "excluded_current_experiment_dir": (
+            excluded_dir.relative_to(repo_root).as_posix()
+            if excluded_dir is not None else None
+        ),
+        "recomputed_selected_count": len(
+            recomputed["selected_sample_ids"]),
+    }
+
+
+def _require_unique_key_values_for_confirmation(keys, selected_labels):
+    """Fail closed if two confirmation key labels map to the same secret value."""
+    digests = {}
+    for label in selected_labels:
+        value = keys[label]
+        if not isinstance(value, str) or not value:
+            raise RuntimeError("confirmation key value is empty or invalid")
+        digest = hashlib.sha256(value.encode("utf-8")).digest()
+        if digest in digests:
+            raise RuntimeError(
+                "confirmation key labels must map to physically unique key values"
+            )
+        digests[digest] = label
+
+
+def _resolve_selection_path(path_value):
+    if not isinstance(path_value, (str, os.PathLike)) or not str(path_value):
+        raise RuntimeError("confirmation requires --selection_manifest")
+    raw = Path(path_value)
+    if raw.is_absolute():
+        candidates = [raw]
+    else:
+        candidates = [Path.cwd() / raw, Path(_ROOT) / raw,
+                      Path(_ROOT).parent / raw]
+    existing = []
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.is_file() and resolved not in existing:
+            existing.append(resolved)
+    if len(existing) != 1:
+        raise RuntimeError(
+            "selection manifest path is missing or ambiguous"
+        )
+    repo_root = Path(_ROOT).parent.resolve()
+    try:
+        existing[0].relative_to(repo_root)
+    except ValueError as exc:
+        raise RuntimeError(
+            "selection manifest must be inside the repository"
+        ) from exc
+    return existing[0], repo_root
+
+
+def _load_confirmation_selection(path_value, current_experiment_dir=None):
+    """Load an exact committed selection artifact and return dispatch metadata."""
+    path, repo_root = _resolve_selection_path(path_value)
+    relative = path.relative_to(repo_root).as_posix()
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", relative],
+        cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False,
+    )
+    if tracked.returncode != 0:
+        raise RuntimeError(
+            "selection manifest must be committed before confirmation"
+        )
+    committed = subprocess.run(
+        ["git", "show", f"HEAD:{relative}"], cwd=repo_root,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+    )
+    file_bytes = path.read_bytes()
+    if committed.returncode != 0 or committed.stdout != file_bytes:
+        raise RuntimeError(
+            "selection manifest bytes differ from the committed Git blob"
+        )
+    try:
+        payload = json.loads(file_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("selection manifest is not valid UTF-8 JSON") from exc
+    available = {
+        child.name for child in Path(SAMPLES_ROOT).iterdir()
+        if child.is_dir() and (child / "sample.json").is_file()
+    }
+    validated = _validate_confirmation_selection_payload(
+        payload, available_samples=available)
+    required_inputs = (
+        ("selector_script", "base_selector_script", "registry", "hybrid_split")
+        if validated.get("selection_kind") == "mixed100"
+        else ("selector_script", "registry", "hybrid_split")
+    )
+    for name in required_inputs:
+        entry = validated["inputs"][name]
+        input_path = repo_root / entry["path"]
+        if (not input_path.is_file()
+                or _sha256(input_path) != entry["sha256"]):
+            raise RuntimeError(
+                f"selection manifest {name} bytes changed after selection"
+            )
+    selector = _load_verified_confirmation_selector(
+        repo_root, validated["inputs"]["selector_script"])
+    if validated.get("selection_kind") == "mixed100":
+        for entry in validated["inputs"]["recent_campaign_manifests"].values():
+            input_path = repo_root / entry["path"]
+            if (not input_path.is_file()
+                    or _sha256(input_path) != entry["sha256"]):
+                raise RuntimeError(
+                    "mixed selection recent campaign manifest changed")
+        recompute_record = _validate_mixed_confirmation_recomputed_selection(
+            payload, validated, repo_root, selector,
+            current_experiment_dir=current_experiment_dir)
+    else:
+        registry = _read_json(
+            repo_root / validated["inputs"]["registry"]["path"])
+        hybrid_split = _read_json(
+            repo_root / validated["inputs"]["hybrid_split"]["path"])
+        _validate_confirmation_candidate_semantics(
+            validated, registry, hybrid_split)
+        sample_entry = validated["inputs"]["sample_json_manifest"]
+        sample_files = {
+            sample_id: _sha256(
+                repo_root / sample_entry["path"] / sample_id / "sample.json")
+            for sample_id in sorted(available)
+        }
+        current_sample_digest = hashlib.sha256(
+            _canonical_json_bytes(sample_files)).hexdigest()
+        if (len(sample_files) != sample_entry["sample_count"]
+                or current_sample_digest != sample_entry["sha256"]):
+            raise RuntimeError(
+                "selection manifest sample JSON digest changed after selection")
+        recompute_record = _validate_confirmation_recomputed_selection(
+            payload, validated, repo_root, selector, registry, hybrid_split,
+            current_experiment_dir=current_experiment_dir)
+    record = {
+        "experiment_id": validated["experiment_id"],
+        "schema": payload["schema"],
+        "path": relative,
+        "sha256": hashlib.sha256(file_bytes).hexdigest(),
+        "artifact_sha256_preview": validated["artifact_sha256_preview"],
+        "candidate_count": len(validated["candidate_sample_ids"]),
+        "selected_count": len(validated["selected_sample_ids"]),
+        "reserve_count": len(validated["reserve_sample_ids"]),
+        "reserve_selection_order": validated["reserve_selection_order"],
+        "seed": payload["candidate_rule"]["seed"],
+        "inputs": validated["inputs"],
+        "recompute": recompute_record,
+    }
+    if validated.get("selection_kind") == "mixed100":
+        record["cohorts"] = copy.deepcopy(validated["cohorts"])
+    return validated["selected_sample_ids"], record
+
+
+def _argument_value(args, name, default=None):
+    return vars(args).get(name, default)
+
+
+def _resolve_confirmation_selection(args, out_dir=None):
+    """Make the committed selection the sole authority for confirmation files."""
+    if _argument_value(args, "campaign_role") != "confirmation":
+        if _argument_value(args, "selection_manifest"):
+            raise RuntimeError(
+                "--selection_manifest is only valid for confirmation"
+            )
+        return None
+    cached = _argument_value(args, "_selection_manifest_record")
+    selected = _argument_value(args, "_selection_samples")
+    verified = (
+        _argument_value(args, "_selection_manifest_verified_token")
+        is _CONFIRMATION_SELECTION_VERIFIED_TOKEN
+    )
+    if not verified or cached is None or selected is None:
+        selected, cached = _load_confirmation_selection(
+            _argument_value(args, "selection_manifest"),
+            current_experiment_dir=out_dir)
+        args._selection_samples = list(selected)
+        args._selection_manifest_record = dict(cached)
+        args._selection_manifest_verified_token = (
+            _CONFIRMATION_SELECTION_VERIFIED_TOKEN
+        )
+    manual = _argument_value(args, "samples")
+    if manual not in (None, []) and list(manual) != list(selected):
+        raise RuntimeError(
+            "confirmation samples must come only from --selection_manifest"
+        )
+    args.samples = list(selected)
+    if (out_dir is not None
+            and cached.get("experiment_id")
+            != os.path.basename(os.path.abspath(out_dir))):
+        raise RuntimeError(
+            "selection manifest experiment_id must match --out_dir basename"
+        )
+    return dict(cached)
 
 
 def _read_jsonl(path):
@@ -464,6 +1474,167 @@ def _actual_sample_progress(out_dir, sample, methods):
     return progress
 
 
+def _record_mentions_sample(record, sample):
+    """Return whether an append-only campaign record names one sample."""
+    if not isinstance(record, dict):
+        return False
+    if record.get("sample") == sample or record.get("sample_id") == sample:
+        return True
+    samples = record.get("samples")
+    if isinstance(samples, list) and sample in samples:
+        return True
+    for field in (
+            "semantic_call_id", "semantic_root_id",
+            "parent_semantic_call_id"):
+        value = record.get(field)
+        if isinstance(value, str):
+            parts = value.split("/")
+            if len(parts) >= 2 and parts[1] == sample:
+                return True
+    return False
+
+
+def _confirmation_pending_evidence(out_dir, sample, methods):
+    """List durable evidence that a nominally pending worker ever started.
+
+    Task plans and the dispatch manifest are intentionally absent: they are
+    pre-created for all 68 confirmation samples before wave one starts.  Every
+    execution-side artifact is fail-closed, including an empty result,
+    checkpoint, raw-call directory, console log, or worker barrier.
+    """
+    evidence = []
+    safe_sample = "".join(
+        char if char.isalnum() or char in "._-" else "_"
+        for char in sample
+    )
+    for method in methods:
+        for suffix in (".jsonl", ".ckpt.json"):
+            path = os.path.join(out_dir, method, f"{sample}{suffix}")
+            if os.path.exists(path):
+                evidence.append(os.path.relpath(path, out_dir))
+        docs_path = os.path.join(out_dir, "docs", method, safe_sample)
+        if os.path.exists(docs_path):
+            evidence.append(os.path.relpath(docs_path, out_dir))
+        raw_path = os.path.join(out_dir, "api_raw", method, safe_sample)
+        if os.path.exists(raw_path):
+            evidence.append(os.path.relpath(raw_path, out_dir))
+        log_path = os.path.join(
+            out_dir, "logs", f"{method}__{safe_sample}.log")
+        if os.path.exists(log_path):
+            evidence.append(os.path.relpath(log_path, out_dir))
+
+    record_files = (
+        "sample_outcomes.jsonl", "run_metadata.jsonl", "api_calls.jsonl",
+        "api_anomalies.jsonl",
+    )
+    for filename in record_files:
+        path = os.path.join(out_dir, filename)
+        for row_number, record in enumerate(_read_jsonl(path), 1):
+            if _record_mentions_sample(record, sample):
+                evidence.append(f"{filename}:{row_number}")
+
+    attempt_path = os.path.join(out_dir, "api_attempt_ledger.jsonl")
+    for row_number, record in enumerate(_read_jsonl(attempt_path), 1):
+        identity = _parse_semantic_call_id(record.get("semantic_call_id"))
+        if identity is None:
+            raise RuntimeError(
+                "confirmation pending audit cannot map attempt ledger row "
+                f"{row_number}"
+            )
+        if identity["sample"] == sample:
+            evidence.append(f"api_attempt_ledger.jsonl:{row_number}")
+
+    dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+    for row_number, record in enumerate(_read_jsonl(dispatch_path), 1):
+        event = record.get("event")
+        # wave_start and resume_start describe queued intent only.  A durable
+        # per-worker launch_intent is appended before Popen and is the earliest
+        # execution evidence.  wave_complete, unlike wave_start, proves that
+        # the worker wave drained and must therefore have an outcome.
+        mentions = record.get("sample") == sample
+        if event == "wave_complete":
+            mentions = mentions or sample in (record.get("samples") or [])
+        if event == "campaign_incomplete":
+            mentions = mentions or any(
+                sample in (record.get(field) or [])
+                for field in (
+                    "infrastructure_incomplete_samples",
+                    "completed_samples",
+                )
+            )
+        if mentions:
+            evidence.append(f"dispatch_log.jsonl:{row_number}")
+
+    journal_dir = Path(out_dir, "api_journal")
+    if journal_dir.is_dir():
+        for path in sorted(journal_dir.glob("*.json")):
+            payload = _read_json(path)
+            semantic_call_id = (
+                payload.get("semantic_call_id")
+                if isinstance(payload, dict) else None
+            )
+            identity = _parse_semantic_call_id(semantic_call_id)
+            expected_name = (
+                hashlib.sha256(semantic_call_id.encode("utf-8"))
+                .hexdigest()[:24] + ".response.json"
+                if identity is not None else None
+            )
+            if (not isinstance(payload, dict)
+                    or payload.get("schema")
+                    != API_RESPONSE_JOURNAL_SCHEMA
+                    or identity is None
+                    or path.name != expected_name):
+                raise RuntimeError(
+                    "confirmation pending audit cannot map response journal: "
+                    f"{path.name}"
+                )
+            if identity["sample"] == sample:
+                evidence.append(os.path.relpath(path, out_dir))
+
+    barrier_dir = Path(out_dir, "worker_barriers")
+    if barrier_dir.is_dir():
+        for path in sorted(barrier_dir.glob("*.json")):
+            if _record_mentions_sample(_read_json(path), sample):
+                evidence.append(os.path.relpath(path, out_dir))
+
+    active_path = os.path.join(out_dir, "active_worker_set.json")
+    if os.path.isfile(active_path):
+        active = _read_json(active_path)
+        workers = active.get("workers") if isinstance(active, dict) else None
+        if (isinstance(workers, dict)
+                and any(
+                    isinstance(worker, dict)
+                    and worker.get("sample") == sample
+                    for worker in workers.values()
+                )):
+            evidence.append("active_worker_set.json")
+
+    dispatch_dir = Path(out_dir, "dispatch_logs")
+    if dispatch_dir.is_dir():
+        evidence.extend(
+            os.path.relpath(path, out_dir)
+            for path in sorted(dispatch_dir.glob(
+                f"{safe_sample}__*.console.log"))
+        )
+    if _worker_lease_is_held(out_dir, sample):
+        evidence.append(os.path.relpath(
+            _worker_lease_path(out_dir, sample), out_dir) + ":held")
+    return sorted(set(evidence))
+
+
+def _verify_confirmation_pending_samples(out_dir, assignments):
+    """Allow only samples proven never launched in a queued confirmation."""
+    for item in assignments:
+        sample = item["sample"]
+        evidence = _confirmation_pending_evidence(
+            out_dir, sample, item.get("methods") or [])
+        if evidence:
+            raise RuntimeError(
+                "confirmation resume cannot prove pending sample was never "
+                f"started: {sample}; evidence={evidence}"
+            )
+
+
 def _verified_infrastructure_incomplete(out_dir, sample, item):
     """Return the exact failure evidence or fail closed.
 
@@ -564,18 +1735,6 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
             or metadata[0].get("samples") != [sample]):
         raise RuntimeError(
             f"worker {sample} infrastructure run metadata mismatch")
-    expected_metadata_resume = None
-    if generation_index > 0:
-        expected_metadata_resume = _canonical_resume_authorization({
-            "parent_semantic_call_id": parent_semantic_call_id,
-            "semantic_root_id": semantic_root_id,
-            "generation_index": generation_index,
-        })
-    if (metadata[0].get("transport_resume_authorization")
-            != expected_metadata_resume):
-        raise RuntimeError(
-            f"worker {sample} infrastructure resume metadata mismatch")
-
     api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
     api_matches = [
         (index, row) for index, row in enumerate(api_rows, 1)
@@ -586,6 +1745,34 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
         raise RuntimeError(
             f"worker {sample} infrastructure API evidence is not unique")
     api_index, api_row = api_matches[0]
+    metadata_resume = metadata[0].get("transport_resume_authorization")
+    if generation_index == 0 and metadata_resume is not None:
+        consumed_prior_resume = (
+            isinstance(metadata_resume, dict)
+            and _resume_authorization_consumed_before(
+                metadata_resume, api_rows, api_index, sample=sample,
+                worker_launch_id=worker_id, out_dir=out_dir,
+            )
+        )
+        if not consumed_prior_resume:
+            raise RuntimeError(
+                f"worker {sample} infrastructure resume metadata mismatch")
+    elif generation_index > 0:
+        try:
+            _validate_resume_authorization(metadata_resume)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"worker {sample} infrastructure resume metadata mismatch"
+            ) from exc
+        if (metadata_resume.get("parent_semantic_call_id")
+                != parent_semantic_call_id
+                or metadata_resume.get("semantic_root_id") != semantic_root_id
+                or metadata_resume.get("semantic_call_id") != semantic_call_id
+                or metadata_resume.get("generation_index") != generation_index
+                or metadata_resume.get("request_fingerprint")
+                != request_fingerprint):
+            raise RuntimeError(
+                f"worker {sample} infrastructure resume metadata mismatch")
     if (api_row.get("schema") != API_CALL_SCHEMA
             or api_row.get("transport_revision") != TRANSPORT_REVISION
             or api_row.get("transport_resume_policy")
@@ -651,6 +1838,18 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
         raise RuntimeError(
             f"worker {sample} infrastructure attempt lineage mismatch")
     failed_state = lineage["generations"][generation_index]["state"]
+    if generation_index > 0:
+        expected_metadata_resume = _canonical_resume_authorization({
+            "parent_semantic_call_id": parent_semantic_call_id,
+            "semantic_root_id": semantic_root_id,
+            "semantic_call_id": semantic_call_id,
+            "generation_index": generation_index,
+            "request_fingerprint": request_fingerprint,
+            "next_attempt_index": failed_state.get("first_attempt_index"),
+        })
+        if metadata_resume != expected_metadata_resume:
+            raise RuntimeError(
+                f"worker {sample} infrastructure resume metadata mismatch")
     if (not failed_state.get("call_failed")
             or failed_state.get("last_attempt_status")
             != "retryable_error"
@@ -702,7 +1901,8 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
 
 
 def _select_invocation_assignments(out_dir, assignments, *, resume,
-                                   target_round_trips):
+                                   target_round_trips,
+                                   allow_pristine_pending=False):
     """Select all samples for a new campaign, only incomplete ones on resume."""
     if not resume:
         if read_sample_outcomes(out_dir):
@@ -711,18 +1911,23 @@ def _select_invocation_assignments(out_dir, assignments, *, resume,
         return list(assignments), {}
     latest = _latest_sample_outcomes(
         out_dir, [item["sample"] for item in assignments])
-    missing = [
-        item["sample"] for item in assignments
-        if item["sample"] not in latest
+    missing_assignments = [
+        item for item in assignments if item["sample"] not in latest
     ]
+    missing = [item["sample"] for item in missing_assignments]
     if missing:
-        raise RuntimeError(
-            f"resume is limited to explicitly incomplete samples; "
-            f"missing outcomes: {missing}")
+        if not allow_pristine_pending:
+            raise RuntimeError(
+                f"resume is limited to explicitly incomplete samples; "
+                f"missing outcomes: {missing}")
+        _verify_confirmation_pending_samples(out_dir, missing_assignments)
     selected = []
     authorizations = {}
     for item in assignments:
         sample = item["sample"]
+        if sample not in latest:
+            selected.append(item)
+            continue
         outcome = latest[sample]
         if outcome["status"] == "finished":
             progress = _actual_sample_progress(
@@ -1064,7 +2269,7 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
     commit, tree_state = _git_identity()
     if tree_state != "clean":
         raise RuntimeError("formal campaign requires a clean Git worktree")
-    return {
+    manifest = {
         "schema": SCHEMA,
         "experiment_id": os.path.basename(os.path.abspath(out_dir)),
         "run_git_commit": commit,
@@ -1089,14 +2294,60 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
         "task_plans": task_plans,
         "upstream_smoke_gate": upstream_smoke_gate,
     }
+    if args.campaign_role == "confirmation":
+        waves = _partition_assignment_waves(
+            assignments, CONFIRMATION_SLOTS_PER_KEY)
+        manifest["config"].update({
+            "slots_per_key": CONFIRMATION_SLOTS_PER_KEY,
+            "key_count": CONFIRMATION_KEY_COUNT,
+            "wave_count": len(waves),
+        })
+        manifest["selection_manifest"] = dict(
+            _argument_value(args, "_selection_manifest_record") or {})
+        analysis_policy = (
+            MIXED_CONFIRMATION_ANALYSIS_POLICY
+            if manifest["selection_manifest"].get("schema")
+            == MIXED_CONFIRMATION_SELECTION_SCHEMA
+            else CONFIRMATION_ANALYSIS_POLICY
+        )
+        manifest["analysis_policy"] = copy.deepcopy(analysis_policy)
+        manifest["assignment_waves"] = [
+            {
+                "wave_index": index,
+                "sample_ids": [item["sample"] for item in wave],
+                "worker_count": len(wave),
+                "key_worker_counts": dict(sorted(
+                    {
+                        label: sum(
+                            item["key_label"] == label for item in wave)
+                        for label in {item["key_label"] for item in wave}
+                    }.items()
+                )),
+                "hybridpatch_first": sum(
+                    item["methods"][0] == "hybridpatch" for item in wave),
+                "fullrewrite_first": sum(
+                    item["methods"][0] == "fullrewrite" for item in wave),
+            }
+            for index, wave in enumerate(waves, 1)
+        ]
+    return manifest
 
 
 def _manifest_identity(manifest):
-    value = dict(manifest)
+    value = copy.deepcopy(manifest)
     value["assignments"] = [
         {"sample": item["sample"], "methods": item["methods"]}
         for item in manifest.get("assignments") or []
     ]
+    if "assignment_waves" in value:
+        normalized_waves = []
+        for wave in value.get("assignment_waves") or []:
+            normalized = dict(wave)
+            counts = normalized.get("key_worker_counts")
+            if isinstance(counts, dict):
+                normalized["key_worker_counts"] = sorted(counts.values())
+            normalized_waves.append(normalized)
+        value["assignment_waves"] = normalized_waves
     return value
 
 
@@ -1137,6 +2388,16 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         else set(required_complete_samples or [])
     )
     active_samples = set(active_samples or [])
+    default_methods = list(config["method_set"])
+    methods_by_sample = {
+        sample: list(default_methods) for sample in config["samples"]
+    }
+    for assignment in manifest.get("assignments") or []:
+        sample = assignment.get("sample")
+        methods = assignment.get("methods")
+        if (sample in expected_samples and isinstance(methods, list)
+                and methods):
+            methods_by_sample[sample] = list(methods)
     active_worker_rows = {}
     try:
         active_payload = _read_json(_active_worker_set_path(out_dir))
@@ -1538,6 +2799,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             )
 
     calls_by_step = {}
+    journal_backed_success_steps = set()
     provider_call_rows = 0
     for semantic_root_id, root_group in semantic_root_groups.items():
         signatures = {
@@ -1765,7 +3027,14 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                     errors.append(
                         f"missing/mismatched response journal: {semantic_call_id}"
                     )
+                elif provider_rows[0][1].get(
+                        "classification") == "provider/API failure":
+                    errors.append(
+                        f"provider failure cannot back response journal: "
+                        f"{semantic_call_id}"
+                    )
                 else:
+                    journal_backed_success_steps.add(step)
                     journal_call_id = journal["call_id"]
                     for index, row in replay_rows:
                         if (not row.get("response_replayed")
@@ -1829,6 +3098,12 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                         f"committed row requires exactly one primary "
                         f"semantic call: {method}/{sample}/RT{rt}/{direction}"
                     )
+                if step not in journal_backed_success_steps:
+                    errors.append(
+                        "committed row requires a response-journal-backed "
+                        "successful semantic call: "
+                        f"{method}/{sample}/RT{rt}/{direction}"
+                    )
                 if method == "hybridpatch":
                     bdpatch = row.get("bdpatch")
                     count = (
@@ -1871,7 +3146,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                         )
                     else:
                         preservation += count
-                if rt == target_rt and direction == "backward":
+                if direction == "backward":
                     evaluation = row.get("evaluation")
                     score = (
                         evaluation.get("score")
@@ -1881,6 +3156,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                         isinstance(score, (int, float))
                         and not isinstance(score, bool)
                         and math.isfinite(float(score))
+                        and 0.0 <= float(score) <= 1.0
                     )
                     error_ok = (
                         isinstance(evaluation, dict)
@@ -1889,7 +3165,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                     )
                     if not score_ok and not error_ok:
                         errors.append(
-                            f"unscoreable exact backward RT{target_rt}: "
+                            f"unscoreable backward RT{rt}: "
                             f"{method}/{sample}"
                         )
             partial = [
@@ -1962,6 +3238,35 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                      or outcome.get("invocation_id")
                      != record.get("invocation_id"))):
             errors.append(f"sample outcome/run metadata mismatch: {sample}")
+        if (record.get("status") == "finished"
+                and isinstance(outcome, dict)
+                and sample not in active_samples):
+            expected_sample_methods = methods_by_sample.get(
+                sample, default_methods)
+            worker_id = record.get("worker_launch_id")
+            worker_pid = record.get("worker_pid")
+            if outcome.get("schema") != "anchorpatch.sample_outcome/1":
+                errors.append(
+                    f"finished sample outcome schema mismatch: {sample}")
+            if (not isinstance(worker_id, str) or not worker_id
+                    or not _is_exact_int(worker_pid) or worker_pid <= 0
+                    or outcome.get("worker_launch_id") != worker_id
+                    or outcome.get("worker_pid") != worker_pid):
+                errors.append(
+                    f"finished sample worker provenance mismatch: {sample}")
+            if outcome.get("methods") != expected_sample_methods:
+                errors.append(
+                    f"finished sample method order mismatch: {sample}")
+            try:
+                actual_progress = _actual_sample_progress(
+                    out_dir, sample, expected_sample_methods)
+            except RuntimeError as exc:
+                errors.append(str(exc))
+            else:
+                if outcome.get("checkpoint_progress") != actual_progress:
+                    errors.append(
+                        "finished sample checkpoint evidence drift: "
+                        f"{sample}")
     if completion_samples:
         missing_metadata = completion_samples - set(latest_by_sample)
         if missing_metadata:
@@ -1994,12 +3299,39 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                     )
                 except ValueError:
                     timestamp_ok = False
-            exit_ok = (isinstance(exit_row, dict)
-                    and exit_row.get("sample") == launch.get("sample")
-                    and exit_row.get("pid") == launch.get("pid")
-                    and isinstance(exit_row.get("returncode"), int)
-                    and not isinstance(exit_row.get("returncode"), bool)
-                    and timestamp_ok)
+            terminal_metadata = None
+            for record in reversed(metadata_by_worker.get(worker_id, [])):
+                if record.get("status") in {
+                        "finished", "infrastructure_incomplete"}:
+                    terminal_metadata = record
+                    break
+            basic_exit_ok = (
+                isinstance(exit_row, dict)
+                and exit_row.get("sample") == launch.get("sample")
+                and exit_row.get("pid") == launch.get("pid")
+                and isinstance(exit_row.get("returncode"), int)
+                and not isinstance(exit_row.get("returncode"), bool)
+                and isinstance(terminal_metadata, dict)
+                and terminal_metadata.get("worker_pid") == launch.get("pid")
+                and terminal_metadata.get("samples") == [launch.get("sample")]
+                and timestamp_ok
+            )
+            if basic_exit_ok and terminal_metadata.get("status") == "finished":
+                exit_ok = (
+                    exit_row.get("returncode") == 0
+                    and exit_row.get("disposition") == "finished"
+                )
+            elif (basic_exit_ok
+                  and terminal_metadata.get("status")
+                  == "infrastructure_incomplete"):
+                exit_ok = (
+                    exit_row.get("returncode") != 0
+                    and exit_row.get("disposition")
+                    == "infrastructure_incomplete"
+                    and isinstance(exit_row.get("evidence"), dict)
+                )
+            else:
+                exit_ok = False
             reconciliation_time_ok = False
             if isinstance(reconciliation, dict):
                 try:
@@ -2199,6 +3531,80 @@ def evaluate_smoke_cost_gate(smoke_dir, main_out_dir):
     }
 
 
+def evaluate_confirmation_known_usage_gate(
+        out_dir, manifest, wave_index, *, phase="post_wave"):
+    """Stop confirmation when known committed USD exceeds its wave threshold."""
+    config = manifest.get("config") or {}
+    samples = config.get("samples") or []
+    methods = config.get("method_set") or []
+    total_rows = 0
+    usage_rows = 0
+    total_usd = 0.0
+    failure_codes = []
+    for sample in samples:
+        for method in methods:
+            rows = _read_jsonl(os.path.join(out_dir, method, f"{sample}.jsonl"))
+            total_rows += len(rows)
+            for row in rows:
+                usd = row.get("total_usd")
+                if (isinstance(usd, (int, float))
+                        and not isinstance(usd, bool)
+                        and math.isfinite(float(usd)) and usd >= 0):
+                    total_usd += float(usd)
+                    usage_rows += 1
+                else:
+                    failure_codes.append("committed_usage_unknown")
+    threshold_policy = (
+        (manifest.get("analysis_policy") or {})
+        .get("known_committed_usage_wave_boundary_stop", {})
+    )
+    threshold = float(threshold_policy.get(
+        "usd_threshold", CONFIRMATION_KNOWN_USAGE_LIMIT_USD))
+    if total_usd > threshold + 1e-9:
+        failure_codes.append("known_committed_usage_threshold_exceeded")
+    failure_codes = sorted(set(failure_codes))
+    report = {
+        "schema": "anchorpatch.confirmation_known_usage_gate/1",
+        "created_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+        "wave_index": wave_index,
+        "phase": phase,
+        "rows_observed": total_rows,
+        "usage_rows": usage_rows,
+        "known_committed_usage_usd": total_usd,
+        "known_committed_usage_threshold_usd": threshold,
+        "failure_codes": failure_codes,
+        "decision": "GO" if not failure_codes else "NO_GO",
+    }
+    append_jsonl_locked(
+        os.path.join(out_dir, "confirmation_known_usage_gate.jsonl"),
+        report,
+    )
+    if failure_codes:
+        try:
+            record_campaign_stop_condition(
+                out_dir,
+                "known_committed_usage_wave_boundary_stop",
+                wave_index=wave_index,
+                phase=phase,
+                known_committed_usage_usd=total_usd,
+                known_committed_usage_threshold_usd=threshold,
+                failure_codes=failure_codes,
+                rows_observed=total_rows,
+                usage_rows=usage_rows,
+            )
+        except BaseException as exc:
+            raise RuntimeError(
+                "confirmation known committed usage wave-boundary stop "
+                "failed to persist latch"
+            ) from exc
+        raise RuntimeError(
+            "confirmation known committed usage wave-boundary stop NO_GO: "
+            + ", ".join(failure_codes)
+        )
+    return report
+
+
 def _terminate_workers(running):
     errors = []
     for item in running.values():
@@ -2320,7 +3726,182 @@ def _record_worker_exit(out_dir, running, sample, item, returncode,
     return "infrastructure_incomplete"
 
 
+def _run_worker_wave(
+        args, out_dir, inspection_manifest, task_plans, keys, assignments,
+        resume_authorizations, dispatch_log, running, incomplete_samples,
+        completed_samples, total_assignment_count):
+    """Launch, authorize, and drain one bounded worker wave."""
+    if running:
+        raise RuntimeError("cannot start a worker wave while another is active")
+    launch_specs = {}
+    for item in assignments:
+        sample = item["sample"]
+        worker_id = f"paired-{sample}-{uuid.uuid4().hex[:12]}"
+        ready_path, ack_path = _worker_barrier_paths(out_dir, worker_id)
+        launch_specs[sample] = {
+            "sample": sample,
+            "worker_launch_id": worker_id,
+            "ready_path": ready_path,
+            "ack_path": ack_path,
+        }
+    _write_active_worker_set(
+        out_dir, inspection_manifest, launch_specs.values())
+    for item in assignments:
+        sample = item["sample"]
+        label = item["key_label"]
+        launch_spec = launch_specs[sample]
+        worker_id = launch_spec["worker_launch_id"]
+        ready_path = launch_spec["ready_path"]
+        ack_path = launch_spec["ack_path"]
+        command = [
+            sys.executable, os.path.join("src", "experiment_runner.py"),
+            "--sample", sample,
+            "--methods", *item["methods"],
+            "--num_round_trips", str(args.num_round_trips),
+            "--seed", str(args.seed),
+            "--model", "minimax-m3",
+            "--max_tokens", "131072",
+            "--out_dir", out_dir,
+            "--stop_on_preservation_violation",
+            "--notes", f"{args.notes}, key={label}",
+        ]
+        environment = dict(
+            os.environ,
+            OPENCODE_API_KEY=keys[label],
+            OPENCODE_TRANSPORT="anthropic_sdk_v2",
+            MINIMAX_TRANSPORT="opencode",
+            MINIMAX_HARD_TIMEOUT="7200",
+            PYTHONUTF8="1",
+            ANCHORPATCH_WORKER_LAUNCH_ID=worker_id,
+            ANCHORPATCH_WORKER_LOCK_PATH=_worker_lease_path(
+                out_dir, sample
+            ),
+            ANCHORPATCH_WORKER_READY_PATH=os.path.abspath(ready_path),
+            ANCHORPATCH_WORKER_ACK_PATH=os.path.abspath(ack_path),
+            ANCHORPATCH_ACTIVE_WORKER_SET_PATH=os.path.abspath(
+                _active_worker_set_path(out_dir)
+            ),
+            ANCHORPATCH_START_BARRIER_TIMEOUT=str(args.start_timeout),
+            ANCHORPATCH_EXPECTED_GIT_COMMIT=(
+                inspection_manifest["run_git_commit"]
+            ),
+            ANCHORPATCH_EXPECTED_GIT_TREE_STATE="clean",
+            ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256=(
+                task_plans[sample]["sha256"]
+            ),
+            ANCHORPATCH_EXPECTED_TASK_PLAN_PATH=os.path.abspath(
+                os.path.join(out_dir, task_plans[sample]["path"])
+            ),
+        )
+        environment.pop(
+            "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID", None)
+        environment.pop(
+            "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX", None)
+        environment.pop(
+            "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT", None)
+        environment.pop(
+            "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX", None)
+        authorization = resume_authorizations.get(sample)
+        if authorization is not None:
+            _validate_resume_authorization(authorization)
+            environment[
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID"
+            ] = authorization["parent_semantic_call_id"]
+            environment[
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX"
+            ] = str(authorization["generation_index"])
+            environment[
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT"
+            ] = authorization["request_fingerprint"]
+            environment[
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX"
+            ] = str(authorization["next_attempt_index"])
+        append_jsonl_locked(
+            dispatch_log,
+            {
+                "event": "launch_intent", "sample": sample,
+                "key_label": label, "methods": item["methods"],
+                "worker_launch_id": worker_id,
+                "console_log": item["console_log"],
+            },
+        )
+        log_path = os.path.join(out_dir, item["console_log"])
+        log_handle = open(log_path, "a", encoding="utf-8")
+        process = subprocess.Popen(
+            command, cwd=_ROOT, env=environment,
+            stdout=log_handle, stderr=subprocess.STDOUT,
+        )
+        running[sample] = {
+            "sample": sample,
+            "process": process,
+            "log": log_handle,
+            "key_label": label,
+            "methods": list(item["methods"]),
+            "target_round_trips": args.num_round_trips,
+            "resume_authorization": authorization,
+            "worker_launch_id": worker_id,
+            "ready_path": ready_path,
+            "ack_path": ack_path,
+            "exit_recorded": False,
+        }
+        append_jsonl_locked(
+            dispatch_log,
+            {
+                "event": "launch", "sample": sample,
+                "key_label": label, "methods": item["methods"],
+                "pid": process.pid, "worker_launch_id": worker_id,
+                "console_log": item["console_log"],
+            },
+        )
+
+    if running:
+        _authorize_workers(
+            out_dir, running, task_plans, dispatch_log,
+            args.start_timeout,
+        )
+    last_report = 0.0
+    while running:
+        time.sleep(args.poll_interval)
+        inspection = inspect_campaign(
+            out_dir, inspection_manifest,
+            active_samples=set(running),
+        )
+        if inspection["errors"]:
+            raise RuntimeError("; ".join(inspection["errors"]))
+        for sample, item in list(running.items()):
+            returncode = item["process"].poll()
+            if returncode is None:
+                continue
+            disposition = _record_worker_exit(
+                out_dir, running, sample, item, returncode,
+                dispatch_log)
+            _write_active_worker_set(
+                out_dir, inspection_manifest, running.values())
+            if disposition == "infrastructure_incomplete":
+                incomplete_samples.add(sample)
+                continue
+            completed_samples.add(sample)
+            sample_inspection = inspect_campaign(
+                out_dir, inspection_manifest,
+                active_samples=set(running),
+                required_complete_samples={sample},
+            )
+            if sample_inspection["errors"]:
+                raise RuntimeError(
+                    "; ".join(sample_inspection["errors"])
+                )
+        if time.time() - last_report >= args.progress_interval:
+            print(
+                f"PROGRESS running={len(running)}/{total_assignment_count} "
+                f"api_calls={inspection['api_calls']} preservation=0",
+                flush=True,
+            )
+            last_report = time.time()
+    _write_active_worker_set(out_dir, inspection_manifest, [])
+
+
 def _launch_under_lease(args, out_dir):
+    _resolve_confirmation_selection(args, out_dir=out_dir)
     _validate_campaign_grid(args)
     _require_formal_opencode_transport("minimax-m3")
     upstream_smoke_gate = None
@@ -2329,15 +3910,34 @@ def _launch_under_lease(args, out_dir):
             args.smoke_dir, out_dir)
     keys = dict(read_keys(os.path.abspath(args.keys_file)))
     selected_labels = list(args.key_labels or sorted(keys))
+    if (args.campaign_role == "confirmation"
+            and len(selected_labels) != CONFIRMATION_KEY_COUNT):
+        raise RuntimeError(
+            "confirmation requires exactly 13 unique key labels"
+        )
     missing_labels = [label for label in selected_labels if label not in keys]
     if missing_labels:
         raise RuntimeError(f"unknown key labels: {missing_labels}")
+    if args.campaign_role == "confirmation":
+        _require_unique_key_values_for_confirmation(keys, selected_labels)
     slots_per_key = getattr(args, "slots_per_key", 1)
     if not _is_exact_int(slots_per_key):
         slots_per_key = 1
+    selection_record = _argument_value(
+        args, "_selection_manifest_record", {}) or {}
+    assignment_samples = list(args.samples)
+    if (args.campaign_role == "confirmation"
+            and selection_record.get("schema")
+            == MIXED_CONFIRMATION_SELECTION_SCHEMA):
+        assignment_samples = _mixed_confirmation_sample_order(
+            args.samples, selected_labels, slots_per_key,
+            selection_record)
     assignments = build_key_assignments(
-        args.samples, selected_labels, slots_per_key,
-        alternate_within_key=(args.campaign_role == "supplemental"),
+        assignment_samples, selected_labels, slots_per_key,
+        alternate_within_key=(
+            args.campaign_role in {"supplemental", "confirmation"}
+        ),
+        allow_queue=(args.campaign_role == "confirmation"),
     )
 
     task_plans = prepare_task_plans(
@@ -2358,7 +3958,10 @@ def _launch_under_lease(args, out_dir):
         dry_assignments, _dry_authorizations = (
             _select_invocation_assignments(
                 out_dir, assignments, resume=args.resume,
-                target_round_trips=args.num_round_trips)
+                target_round_trips=args.num_round_trips,
+                allow_pristine_pending=(
+                    args.campaign_role == "confirmation"),
+            )
         )
         dry_active = {item["sample"] for item in dry_assignments}
         dry_complete = set(args.samples) - dry_active
@@ -2448,30 +4051,83 @@ def _launch_under_lease(args, out_dir):
         launch_assignments, resume_authorizations = (
             _select_invocation_assignments(
                 out_dir, assignments, resume=args.resume,
-                target_round_trips=args.num_round_trips)
+                target_round_trips=args.num_round_trips,
+                allow_pristine_pending=(
+                    args.campaign_role == "confirmation"),
+            )
         )
         completed_samples = {
             item["sample"] for item in assignments
             if item not in launch_assignments
         }
         if args.resume:
-            append_jsonl_locked(
-                dispatch_log,
-                {
-                    "event": "resume_start",
-                    "reason": args.resume_reason,
-                    "workers_stopped_confirmed": bool(
-                        args.confirm_workers_stopped
-                    ),
-                    "audited_stale_invocations": audited_stale,
-                    "closed_stale_invocations": stale,
-                    "launch_samples": [
+            resume_record = {
+                "event": "resume_start",
+                "reason": args.resume_reason,
+                "workers_stopped_confirmed": bool(
+                    args.confirm_workers_stopped
+                ),
+                "audited_stale_invocations": audited_stale,
+                "closed_stale_invocations": stale,
+                "launch_samples": [
+                    item["sample"] for item in launch_assignments
+                ],
+                "skipped_finished_samples": sorted(completed_samples),
+                "transport_authorizations": resume_authorizations,
+            }
+            if args.campaign_role == "confirmation":
+                resume_record.update({
+                    "launch_pending_samples": [
                         item["sample"] for item in launch_assignments
+                        if item["sample"] not in resume_authorizations
                     ],
-                    "skipped_finished_samples": sorted(completed_samples),
-                    "transport_authorizations": resume_authorizations,
-                },
-            )
+                    "launch_infrastructure_incomplete_samples": sorted(
+                        resume_authorizations
+                    ),
+                })
+            append_jsonl_locked(dispatch_log, resume_record)
+        if args.campaign_role == "confirmation":
+            waves = _partition_assignment_waves(
+                launch_assignments, CONFIRMATION_SLOTS_PER_KEY)
+            for wave_index, wave in enumerate(waves, 1):
+                evaluate_confirmation_known_usage_gate(
+                    out_dir, inspection_manifest, wave_index,
+                    phase="pre_wave")
+                append_jsonl_locked(
+                    dispatch_log,
+                    {
+                        "event": "wave_start",
+                        "wave_index": wave_index,
+                        "wave_count": len(waves),
+                        "samples": [item["sample"] for item in wave],
+                    },
+                )
+                _run_worker_wave(
+                    args, out_dir, inspection_manifest, task_plans, keys,
+                    wave, resume_authorizations, dispatch_log, running,
+                    incomplete_samples, completed_samples, len(assignments),
+                )
+                append_jsonl_locked(
+                    dispatch_log,
+                    {
+                        "event": "wave_complete",
+                        "wave_index": wave_index,
+                        "wave_count": len(waves),
+                        "samples": [item["sample"] for item in wave],
+                        "infrastructure_incomplete_samples": sorted(
+                            incomplete_samples
+                        ),
+                    },
+                )
+                evaluate_confirmation_known_usage_gate(
+                    out_dir, inspection_manifest, wave_index,
+                    phase="post_wave")
+            evaluate_confirmation_known_usage_gate(
+                out_dir, inspection_manifest, len(waves),
+                phase="pre_final")
+            # Confirmation has already drained every queued wave.  Leave the
+            # legacy single-cohort block below byte-for-byte operationally idle.
+            launch_assignments = []
         launch_specs = {}
         for item in launch_assignments:
             sample = item["sample"]
@@ -2748,13 +4404,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out_dir", required=True)
     parser.add_argument(
-        "--campaign_role", choices=("smoke", "main", "supplemental"),
+        "--campaign_role",
+        choices=("smoke", "main", "supplemental", "confirmation"),
         required=True)
     parser.add_argument(
         "--smoke_dir",
         help="required completed 2-sample smoke directory for main",
     )
-    parser.add_argument("--samples", nargs="+", required=True)
+    parser.add_argument("--samples", nargs="+")
+    parser.add_argument(
+        "--selection_manifest",
+        help="committed method-unseen selection JSON for confirmation",
+    )
     parser.add_argument("--num_round_trips", type=int, required=True)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -2779,6 +4440,23 @@ def main():
              "per-sample process lease before closing stale metadata",
     )
     args = parser.parse_args()
+    manual_samples = args.samples
+    if args.campaign_role == "confirmation":
+        if manual_samples:
+            parser.error(
+                "confirmation samples come only from --selection_manifest"
+            )
+        try:
+            _resolve_confirmation_selection(args, out_dir=args.out_dir)
+        except RuntimeError as exc:
+            parser.error(str(exc))
+    else:
+        if not args.samples:
+            parser.error("--samples is required for this campaign role")
+        if args.selection_manifest:
+            parser.error(
+                "--selection_manifest is only valid for confirmation"
+            )
     if args.campaign_role == "smoke":
         if args.samples != SMOKE_SAMPLES or args.num_round_trips != 2:
             parser.error(
@@ -2793,7 +4471,7 @@ def main():
             )
         if not args.smoke_dir:
             parser.error("main requires --smoke_dir")
-    else:
+    elif args.campaign_role == "supplemental":
         if (args.samples != SUPPLEMENTAL_SAMPLES
                 or args.num_round_trips != 10):
             parser.error(
@@ -2803,6 +4481,26 @@ def main():
             parser.error("--smoke_dir is not valid for supplemental")
         if args.slots_per_key != 4:
             parser.error("supplemental requires --slots_per_key 4")
+    else:
+        selection_record = _argument_value(
+            args, "_selection_manifest_record", {}) or {}
+        expected_count = (
+            MIXED_CONFIRMATION_SAMPLE_COUNT
+            if selection_record.get("schema")
+            == MIXED_CONFIRMATION_SELECTION_SCHEMA
+            else CONFIRMATION_SAMPLE_COUNT
+        )
+        if (expected_count not in {
+                CONFIRMATION_SAMPLE_COUNT, MIXED_CONFIRMATION_SAMPLE_COUNT}
+                or len(args.samples) != expected_count
+                or args.num_round_trips != 10):
+            parser.error(
+                "confirmation requires the committed selection with 10 round trips"
+            )
+        if args.smoke_dir:
+            parser.error("--smoke_dir is not valid for confirmation")
+        if args.slots_per_key != CONFIRMATION_SLOTS_PER_KEY:
+            parser.error("confirmation requires --slots_per_key 4")
     if args.num_round_trips < 1:
         parser.error("--num_round_trips must be >= 1")
     if args.poll_interval < 1 or args.progress_interval < 1:

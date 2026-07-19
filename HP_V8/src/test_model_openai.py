@@ -1,9 +1,12 @@
 """Zero-API regression tests for the OpenCode Go Anthropic transport."""
 
+import copy
 import json
 import os
+import pathlib
 import sys
 import tempfile
+import textwrap
 import threading
 import unittest
 from datetime import datetime
@@ -781,18 +784,24 @@ class IntegrationContractTests(unittest.TestCase):
 
     def _append_exhausted_response_generation(
             self, recorder, semantic_call_id, call_id,
-            request_fingerprint, attempt_indices):
+            request_fingerprint, attempt_indices, *,
+            parent_semantic_call_id=None,
+            call_kind="hybridpatch_primary"):
         generation = int(semantic_call_id.rsplit("/g", 1)[1])
+        parent_field = (
+            {"parent_semantic_call_id": parent_semantic_call_id}
+            if parent_semantic_call_id is not None else {}
+        )
         recorder._append_ledger(
             semantic_call_id, "semantic_request", call_id=call_id,
-            call_kind="hybridpatch_primary",
-            request_fingerprint=request_fingerprint)
+            call_kind=call_kind, request_fingerprint=request_fingerprint,
+            **parent_field)
 
         for local_index, attempt_index in enumerate(attempt_indices, 1):
             recorder._append_ledger(
                 semantic_call_id, "attempt_start",
                 attempt_index=attempt_index, call_id=call_id,
-                call_kind="hybridpatch_primary",
+                call_kind=call_kind,
                 attempt_kind=(
                     "transport_initial"
                     if generation == 0 and local_index == 1
@@ -801,21 +810,21 @@ class IntegrationContractTests(unittest.TestCase):
                     else "transport_recovery_initial"
                     if local_index == 1
                     else "transport_recovery_retry"),
-                request_fingerprint=request_fingerprint)
+                request_fingerprint=request_fingerprint, **parent_field)
             recorder._append_ledger(
                 semantic_call_id, "generation_progress",
                 attempt_index=attempt_index, call_id=call_id,
-                delta_type="text_delta")
+                delta_type="text_delta", **parent_field)
             recorder._append_ledger(
                 semantic_call_id, "attempt_end",
                 attempt_index=attempt_index, call_id=call_id,
-                **self._failed_attempt_end_fields())
+                **self._failed_attempt_end_fields(), **parent_field)
             recorder._append_ledger(
                 semantic_call_id, "attempt_budget",
                 attempt_index=attempt_index, call_id=call_id,
                 budget_class="response_slot",
                 response_slots_used=local_index,
-                transient_failure_count=0)
+                transient_failure_count=0, **parent_field)
         recorder._append_ledger(
             semantic_call_id, "call_failed", call_id=call_id,
             status="provider_failure", error_type="incomplete_stream",
@@ -823,7 +832,42 @@ class IntegrationContractTests(unittest.TestCase):
             transient_failure_count=0,
             http_attempts_used=attempt_indices[-1],
             attempt_index=attempt_indices[-1],
-            request_fingerprint=request_fingerprint)
+            request_fingerprint=request_fingerprint, **parent_field)
+
+    def _append_successful_response_generation(
+            self, recorder, semantic_call_id, call_id,
+            request_fingerprint, attempt_index, *,
+            parent_semantic_call_id=None,
+            call_kind="hybridpatch_primary"):
+        generation = int(semantic_call_id.rsplit("/g", 1)[1])
+        parent_field = (
+            {"parent_semantic_call_id": parent_semantic_call_id}
+            if parent_semantic_call_id is not None else {}
+        )
+        recorder._append_ledger(
+            semantic_call_id, "semantic_request", call_id=call_id,
+            call_kind=call_kind, request_fingerprint=request_fingerprint,
+            **parent_field)
+        recorder._append_ledger(
+            semantic_call_id, "attempt_start", call_id=call_id,
+            attempt_index=attempt_index, call_kind=call_kind,
+            attempt_kind=(
+                "transport_initial" if generation == 0
+                else "transport_recovery_initial"),
+            request_fingerprint=request_fingerprint, **parent_field)
+        recorder._append_ledger(
+            semantic_call_id, "generation_progress", call_id=call_id,
+            attempt_index=attempt_index, delta_type="text_delta",
+            **parent_field)
+        recorder._append_ledger(
+            semantic_call_id, "attempt_end", call_id=call_id,
+            attempt_index=attempt_index,
+            **self._successful_attempt_end_fields(), **parent_field)
+        recorder._append_ledger(
+            semantic_call_id, "response_committed", call_id=call_id,
+            attempt_index=attempt_index, response_slots_used=1,
+            transient_failure_count=0, http_attempts_used=attempt_index,
+            request_fingerprint=request_fingerprint, **parent_field)
 
     @staticmethod
     def _write_active_inspection_fixture(
@@ -1042,6 +1086,102 @@ class IntegrationContractTests(unittest.TestCase):
                 "checkpoint_progress": progress,
             })
 
+    @staticmethod
+    def _api_call_fixture_row(*, root, exact_id, request_id, fingerprint,
+                              worker_id, worker_pid, parent=None,
+                              failure=False, http_attempts=1):
+        method, sample, rt_segment, direction, call_kind = root.split("/")
+        generation = int(exact_id.rsplit("/g", 1)[1])
+        return {
+            "schema": "anchorpatch.api_call/4",
+            "sample": sample, "method": method,
+            "rt_index": int(rt_segment[2:]), "direction": direction,
+            "call_kind": call_kind,
+            "step_id": "/".join(root.split("/")[:4]),
+            "semantic_root_id": root,
+            "semantic_call_id": exact_id,
+            "generation_index": generation,
+            "parent_semantic_call_id": parent,
+            "request_id": request_id,
+            "worker_launch_id": worker_id, "worker_pid": worker_pid,
+            "provider_called": True, "response_replayed": False,
+            "replayed_from_call_id": None,
+            "transport_revision": "opencode_anthropic_sdk/4",
+            "transport_resume_policy": "exact_payload_new_semantic_call/1",
+            "transport_recovery_index": generation,
+            "request_fingerprint": fingerprint,
+            "classification": "provider/API failure" if failure else None,
+            "count_as_method_failure": False,
+            "error_type": "incomplete_stream" if failure else None,
+            "max_response_slots": 2,
+            "response_slots_used": 2 if failure else 1,
+            "max_transient_failures": 3,
+            "transient_failure_count": 0,
+            "http_attempts_used": http_attempts,
+        }
+
+    @staticmethod
+    def _write_success_journal(out_dir, *, root, exact_id, request_id,
+                               fingerprint, parent=None, http_attempts=1):
+        generation = int(exact_id.rsplit("/g", 1)[1])
+        digest = hashlib.sha256(exact_id.encode("utf-8")).hexdigest()[:24]
+        os.makedirs(os.path.join(out_dir, "api_journal"), exist_ok=True)
+        run_meta.write_json_atomic(
+            os.path.join(out_dir, "api_journal", f"{digest}.response.json"), {
+                "schema": "anchorpatch.api_response_journal/4",
+                "semantic_root_id": root,
+                "semantic_call_id": exact_id,
+                "generation_index": generation,
+                "parent_semantic_call_id": parent,
+                "call_id": request_id,
+                "request_fingerprint": fingerprint,
+                "result": {
+                    "message": "complete",
+                    "stream_complete": True,
+                    "stop_reason": "end_turn",
+                    "input_tokens": 5, "output_tokens": 1,
+                    "transport_revision": "opencode_anthropic_sdk/4",
+                    "transport_resume_policy": (
+                        "exact_payload_new_semantic_call/1"),
+                    "call_kind": root.split("/")[-1],
+                    "semantic_root_id": root,
+                    "semantic_call_id": exact_id,
+                    "generation_index": generation,
+                    "parent_semantic_call_id": parent,
+                    "max_response_slots": 2,
+                    "response_slots_used": 1,
+                    "max_transient_failures": 3,
+                    "transient_failure_count": 0,
+                    "http_attempts_used": http_attempts,
+                },
+            })
+
+    @staticmethod
+    def _write_completed_method_prefix(out_dir, sample, method,
+                                       completed_round_trips):
+        if completed_round_trips <= 0:
+            return
+        method_dir = os.path.join(out_dir, method)
+        os.makedirs(method_dir, exist_ok=True)
+        rows = []
+        for rt_index in range(1, completed_round_trips + 1):
+            for direction in ("forward", "backward"):
+                rows.append({
+                    "sample_id": sample, "method": method,
+                    "round_trip_num": rt_index,
+                    "round_trip_direction": direction,
+                })
+        with open(
+            os.path.join(method_dir, f"{sample}.jsonl"),
+            "w", encoding="utf-8",
+        ) as handle:
+            for row in rows:
+                handle.write(json.dumps(row) + "\n")
+        run_meta.write_json_atomic(
+            os.path.join(method_dir, f"{sample}.ckpt.json"),
+            {"completed_round_trips": completed_round_trips},
+        )
+
     def test_transport_exhaustion_isolates_one_worker_and_sibling_completes(self):
         with tempfile.TemporaryDirectory() as out_dir:
             self._write_infrastructure_fixture(out_dir)
@@ -1203,6 +1343,225 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(
                 dispatch_rows[-1]["infrastructure_incomplete_samples"],
                 ["sample-a"])
+
+    def test_confirmation_incomplete_worker_does_not_block_later_wave(self):
+        samples = ["sample-a", "sample-b", "sample-c"]
+        lifecycle = []
+
+        def make_task_plans(out_dir, sample_ids, *_args):
+            lifecycle.append("all_plans")
+            plans = {}
+            for sample in sample_ids:
+                path = os.path.join(out_dir, f"{sample}.task_plan.json")
+                utils_relay_plan.save_relay_task_plan(path, ["target"])
+                plans[sample] = {
+                    "path": os.path.basename(path),
+                    "sha256": paired_dispatch._sha256(path),
+                    "forward_state_sequence": ["target"],
+                }
+            return plans
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            args = mock.Mock(
+                campaign_role="confirmation", smoke_dir=None,
+                samples=list(samples), key_labels=["KEY_01", "KEY_02"],
+                keys_file="unused.env", num_round_trips=10, seed=42,
+                slots_per_key=1, dry_run=False, resume=False,
+                start_timeout=0.1, poll_interval=0,
+                progress_interval=9999, notes="unit",
+                selection_manifest="selection.json",
+            )
+            selection_record = {
+                "experiment_id": os.path.basename(out_dir),
+                "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+                "path": "HP_V8/analysis/selection.json",
+                "sha256": "1" * 64,
+                "artifact_sha256_preview": "2" * 64,
+                "candidate_count": 85, "selected_count": 68,
+                "reserve_count": 17, "seed": 42,
+            }
+            launched_waves = []
+
+            def fake_wave(
+                    _args, _out_dir, _manifest, _plans, _keys, assignments,
+                    _authorizations, _dispatch_log, _running, incomplete,
+                    completed, _total):
+                self.assertEqual(lifecycle, ["all_plans"])
+                manifest = paired_dispatch._read_json(os.path.join(
+                    out_dir, "dispatch_manifest.json"))
+                self.assertEqual(set(manifest["task_plans"]), set(samples))
+                wave_samples = [item["sample"] for item in assignments]
+                launched_waves.append(wave_samples)
+                if len(launched_waves) == 1:
+                    incomplete.add("sample-a")
+                    completed.add("sample-b")
+                else:
+                    completed.update(wave_samples)
+
+            with mock.patch.object(
+                    paired_dispatch, "CONFIRMATION_SAMPLE_COUNT", 3), \
+                    mock.patch.object(
+                        paired_dispatch, "CONFIRMATION_KEY_COUNT", 2), \
+                    mock.patch.object(
+                        paired_dispatch, "CONFIRMATION_SLOTS_PER_KEY", 1), \
+                    mock.patch.object(
+                        paired_dispatch, "_require_formal_opencode_transport"), \
+                    mock.patch.object(
+                        paired_dispatch, "read_keys",
+                        return_value={"KEY_01": "redacted-a",
+                                      "KEY_02": "redacted-b"}), \
+                    mock.patch.object(
+                        paired_dispatch, "prepare_task_plans",
+                        side_effect=make_task_plans), \
+                    mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "code_fingerprint",
+                        return_value={"unit": "test"}), \
+                    mock.patch.object(
+                        paired_dispatch, "inspect_campaign",
+                        return_value={"errors": [], "api_calls": 3,
+                                      "preservation_violations": 0}), \
+                    mock.patch.object(
+                        paired_dispatch, "_load_confirmation_selection",
+                        return_value=(list(samples), selection_record)) as load_selection, \
+                    mock.patch.object(
+                        paired_dispatch, "_run_worker_wave",
+                        side_effect=fake_wave):
+                result = paired_dispatch._launch_under_lease(args, out_dir)
+                load_selection.assert_called_once_with(
+                    "selection.json", current_experiment_dir=out_dir)
+
+            self.assertEqual(result, 2)
+            self.assertEqual(launched_waves, [
+                ["sample-a", "sample-b"], ["sample-c"]])
+            dispatch_rows = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "dispatch_log.jsonl"))
+            self.assertEqual(
+                [row["event"] for row in dispatch_rows
+                 if row["event"].startswith("wave_")],
+                ["wave_start", "wave_complete",
+                 "wave_start", "wave_complete"],
+            )
+
+        lifecycle.clear()
+        with tempfile.TemporaryDirectory() as out_dir:
+            args = mock.Mock(
+                campaign_role="confirmation", smoke_dir=None,
+                samples=list(samples), key_labels=["KEY_01", "KEY_02"],
+                keys_file="unused.env", num_round_trips=10, seed=42,
+                slots_per_key=1, dry_run=False, resume=False,
+                start_timeout=0.1, poll_interval=0,
+                progress_interval=9999, notes="unit",
+                selection_manifest="selection.json",
+            )
+            selection_record = {
+                "experiment_id": os.path.basename(out_dir),
+                "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+                "path": "HP_V8/analysis/selection.json",
+                "sha256": "1" * 64,
+                "artifact_sha256_preview": "2" * 64,
+                "candidate_count": 85, "selected_count": 68,
+                "reserve_count": 17, "seed": 42,
+            }
+            stopped_waves = []
+
+            def preservation_stop(
+                    _args, wave_out_dir, _manifest, _plans, _keys,
+                    assignments, *_rest):
+                stopped_waves.append(
+                    [item["sample"] for item in assignments])
+                run_meta.record_campaign_stop_condition(
+                    wave_out_dir, "preservation_violation",
+                    preservation_violations=1)
+                raise RuntimeError("preservation_violations=1")
+
+            with mock.patch.object(
+                    paired_dispatch, "CONFIRMATION_SAMPLE_COUNT", 3), \
+                    mock.patch.object(
+                        paired_dispatch, "CONFIRMATION_KEY_COUNT", 2), \
+                    mock.patch.object(
+                        paired_dispatch, "CONFIRMATION_SLOTS_PER_KEY", 1), \
+                    mock.patch.object(
+                        paired_dispatch, "_require_formal_opencode_transport"), \
+                    mock.patch.object(
+                        paired_dispatch, "read_keys",
+                        return_value={"KEY_01": "redacted-a",
+                                      "KEY_02": "redacted-b"}), \
+                    mock.patch.object(
+                        paired_dispatch, "prepare_task_plans",
+                        side_effect=make_task_plans), \
+                    mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "code_fingerprint",
+                        return_value={"unit": "test"}), \
+                    mock.patch.object(
+                        paired_dispatch, "inspect_campaign",
+                        return_value={"errors": [], "api_calls": 0,
+                                      "preservation_violations": 0}), \
+                    mock.patch.object(
+                        paired_dispatch, "_load_confirmation_selection",
+                        return_value=(list(samples), selection_record)) as load_selection, \
+                    mock.patch.object(
+                        paired_dispatch, "_run_worker_wave",
+                        side_effect=preservation_stop):
+                result = paired_dispatch._launch_under_lease(args, out_dir)
+                load_selection.assert_called_once_with(
+                    "selection.json", current_experiment_dir=out_dir)
+
+            self.assertEqual(result, 1)
+            self.assertEqual(stopped_waves, [["sample-a", "sample-b"]])
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir)[0][
+                    "condition"], "preservation_violation")
+
+    def test_confirmation_duplicate_key_value_fails_before_provider(self):
+        samples = [f"sample-{index:03d}" for index in range(68)]
+        labels = [f"KEY_{index:02d}" for index in range(1, 14)]
+        key_values = {
+            label: f"secret-value-{index}"
+            for index, label in enumerate(labels)
+        }
+        key_values["KEY_02"] = key_values["KEY_01"]
+        with tempfile.TemporaryDirectory() as out_dir:
+            args = mock.Mock(
+                campaign_role="confirmation", smoke_dir=None,
+                samples=[], key_labels=labels, keys_file="unused.env",
+                num_round_trips=10, seed=42, slots_per_key=4,
+                dry_run=False, resume=False, start_timeout=0.1,
+                poll_interval=0, progress_interval=9999, notes="unit",
+                selection_manifest="selection.json",
+            )
+            selection_record = {
+                "experiment_id": os.path.basename(out_dir),
+                "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+                "path": "HP_V8/analysis/selection.json",
+                "sha256": "1" * 64,
+                "artifact_sha256_preview": "2" * 64,
+                "candidate_count": 85, "selected_count": 68,
+                "reserve_count": 17, "seed": 42,
+            }
+            with mock.patch.object(
+                    paired_dispatch, "_require_formal_opencode_transport"), \
+                    mock.patch.object(
+                        paired_dispatch, "_load_confirmation_selection",
+                        return_value=(samples, selection_record)), \
+                    mock.patch.object(
+                        paired_dispatch, "read_keys",
+                        return_value=key_values), \
+                    mock.patch.object(
+                        paired_dispatch, "prepare_task_plans",
+                        side_effect=AssertionError(
+                            "duplicate keys must fail before task plans")), \
+                    mock.patch.object(
+                        paired_dispatch.subprocess, "Popen",
+                        side_effect=AssertionError(
+                            "duplicate keys must fail before provider")):
+                with self.assertRaisesRegex(RuntimeError, "physically unique"):
+                    paired_dispatch._launch_under_lease(args, out_dir)
 
     def test_fresh_campaign_dry_run_writes_empty_active_set_and_passes(self):
         def make_task_plans(out_dir, samples, *_args):
@@ -1426,6 +1785,511 @@ class IntegrationContractTests(unittest.TestCase):
                 if item["sample"] == "sample-b":
                     provider_post(item["sample"])
             provider_post.assert_not_called()
+
+    def test_resume_real_g001_exhaustion_is_verified_then_g002_forbidden(self):
+        sample = "sample-a"
+        methods = ["hybridpatch", "fullrewrite"]
+        worker_old, worker_new = "worker-old", "worker-new"
+        old_pid, new_pid = 101, 202
+        old_invocation, new_invocation = "inv-old", "inv-new"
+        root = f"hybridpatch/{sample}/rt01/forward/hybridpatch_primary"
+        g000, g001 = f"{root}/g000", f"{root}/g001"
+        fingerprint = "fingerprint-recovery"
+        progress = {
+            method: {"completed_round_trips": 0, "committed_rows": 0}
+            for method in methods
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            old_recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", sample, None, "minimax-m3",
+                mock.Mock())
+            old_recorder.worker_launch_id = worker_old
+            old_recorder.set_step(1, "forward", "target")
+            self._append_exhausted_response_generation(
+                old_recorder, g000, "failed-g000", fingerprint, (1, 2))
+            new_recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", sample, None, "minimax-m3",
+                mock.Mock())
+            new_recorder.worker_launch_id = worker_new
+            new_recorder.set_step(1, "forward", "target")
+            self._append_exhausted_response_generation(
+                new_recorder, g001, "failed-g001", fingerprint, (3, 4),
+                parent_semantic_call_id=g000)
+            for row in (
+                self._api_call_fixture_row(
+                    root=root, exact_id=g000, request_id="failed-g000",
+                    fingerprint=fingerprint, worker_id=worker_old,
+                    worker_pid=old_pid, failure=True, http_attempts=2),
+                self._api_call_fixture_row(
+                    root=root, exact_id=g001, request_id="failed-g001",
+                    fingerprint=fingerprint, worker_id=worker_new,
+                    worker_pid=new_pid, parent=g000, failure=True,
+                    http_attempts=4),
+            ):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "api_calls.jsonl"), row)
+            resume_authorization = {
+                "parent_semantic_call_id": g000,
+                "semantic_root_id": root,
+                "semantic_call_id": g001,
+                "generation_index": 1,
+                "request_fingerprint": fingerprint,
+                "next_attempt_index": 3,
+            }
+            for row in (
+                {
+                    "schema": "anchorpatch.run_metadata/3",
+                    "invocation_id": old_invocation,
+                    "worker_launch_id": worker_old,
+                    "worker_pid": old_pid,
+                    "samples": [sample],
+                    "status": "infrastructure_incomplete",
+                    "transport_resume_authorization": None,
+                },
+                {
+                    "schema": "anchorpatch.run_metadata/3",
+                    "invocation_id": new_invocation,
+                    "worker_launch_id": worker_new,
+                    "worker_pid": new_pid,
+                    "samples": [sample],
+                    "status": "infrastructure_incomplete",
+                    "transport_resume_authorization": (
+                        paired_dispatch._canonical_resume_authorization(
+                            resume_authorization)),
+                },
+            ):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "run_metadata.jsonl"), row)
+            for created_at, worker, pid, invocation, exact_id, parent, \
+                    request_id, generation, next_attempt in (
+                        (
+                            "2026-07-18T00:00:00+08:00",
+                            worker_old, old_pid, old_invocation, g000, None,
+                            "failed-g000", 0, 3,
+                        ),
+                        (
+                            "2026-07-18T00:00:01+08:00",
+                            worker_new, new_pid, new_invocation, g001, g000,
+                            "failed-g001", 1, 5,
+                        ),
+                    ):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "sample_outcomes.jsonl"), {
+                        "schema": "anchorpatch.sample_outcome/1",
+                        "created_at": created_at,
+                        "sample": sample,
+                        "status": "infrastructure_incomplete",
+                        "worker_launch_id": worker,
+                        "worker_pid": pid,
+                        "invocation_id": invocation,
+                        "methods": methods,
+                        "method": "hybridpatch",
+                        "rt_index": 1,
+                        "direction": "forward",
+                        "call_kind": "hybridpatch_primary",
+                        "semantic_root_id": root,
+                        "semantic_call_id": exact_id,
+                        "request_id": request_id,
+                        "generation_index": generation,
+                        "parent_semantic_call_id": parent,
+                        "request_fingerprint": fingerprint,
+                        "error_type": "incomplete_stream",
+                        "classification": "provider/API failure",
+                        "response_slots_used": 2,
+                        "transient_failure_count": 0,
+                        "http_attempts_used": next_attempt - 1,
+                        "next_attempt_index": next_attempt,
+                        "transport_recovery_index": generation,
+                        "checkpoint_progress": progress,
+                    })
+
+            evidence = paired_dispatch._verified_infrastructure_incomplete(
+                out_dir, sample, {
+                    "worker_launch_id": worker_new,
+                    "worker_pid": new_pid,
+                    "methods": methods,
+                    "target_round_trips": 1,
+                })
+            self.assertEqual(evidence["generation_index"], 1)
+            self.assertEqual(evidence["next_attempt_index"], 5)
+            with self.assertRaisesRegex(RuntimeError, "g002\\+ is forbidden"):
+                paired_dispatch._select_invocation_assignments(
+                    out_dir, [{"sample": sample, "methods": methods}],
+                    resume=True, target_round_trips=1)
+
+    def test_later_g000_exhaustion_allows_consumed_resume_metadata(self):
+        sample = "sample-a"
+        methods = ["hybridpatch", "fullrewrite"]
+        worker_old, worker_new = "worker-old", "worker-new"
+        old_pid, new_pid = 101, 202
+        old_invocation, new_invocation = "inv-old", "inv-new"
+        recovered_root = (
+            f"hybridpatch/{sample}/rt01/forward/hybridpatch_primary")
+        recovered_g000 = f"{recovered_root}/g000"
+        recovered_g001 = f"{recovered_root}/g001"
+        backward_root = (
+            f"hybridpatch/{sample}/rt01/backward/hybridpatch_primary")
+        backward_g000 = f"{backward_root}/g000"
+        later_root = f"hybridpatch/{sample}/rt02/forward/hybridpatch_primary"
+        later_g000 = f"{later_root}/g000"
+        recovered_fp = "fingerprint-recovered"
+        backward_fp = "fingerprint-backward"
+        later_fp = "fingerprint-later"
+        with tempfile.TemporaryDirectory() as out_dir:
+            old_recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", sample, None, "minimax-m3",
+                mock.Mock())
+            old_recorder.worker_launch_id = worker_old
+            old_recorder.set_step(1, "forward", "target")
+            self._append_exhausted_response_generation(
+                old_recorder, recovered_g000, "failed-g000",
+                recovered_fp, (1, 2))
+            new_recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", sample, None, "minimax-m3",
+                mock.Mock())
+            new_recorder.worker_launch_id = worker_new
+            new_recorder.set_step(1, "forward", "target")
+            self._append_successful_response_generation(
+                new_recorder, recovered_g001, "recovered-g001",
+                recovered_fp, 3, parent_semantic_call_id=recovered_g000)
+            self._write_success_journal(
+                out_dir, root=recovered_root, exact_id=recovered_g001,
+                request_id="recovered-g001", fingerprint=recovered_fp,
+                parent=recovered_g000, http_attempts=3)
+            new_recorder.set_step(1, "backward", "target")
+            self._append_successful_response_generation(
+                new_recorder, backward_g000, "backward-g000",
+                backward_fp, 1)
+            self._write_success_journal(
+                out_dir, root=backward_root, exact_id=backward_g000,
+                request_id="backward-g000", fingerprint=backward_fp,
+                http_attempts=1)
+            new_recorder.set_step(2, "forward", "target-2")
+            self._append_exhausted_response_generation(
+                new_recorder, later_g000, "failed-later-g000",
+                later_fp, (1, 2))
+            for row in (
+                self._api_call_fixture_row(
+                    root=recovered_root, exact_id=recovered_g000,
+                    request_id="failed-g000", fingerprint=recovered_fp,
+                    worker_id=worker_old, worker_pid=old_pid,
+                    failure=True, http_attempts=2),
+                self._api_call_fixture_row(
+                    root=recovered_root, exact_id=recovered_g001,
+                    request_id="recovered-g001", fingerprint=recovered_fp,
+                    worker_id=worker_new, worker_pid=new_pid,
+                    parent=recovered_g000, http_attempts=3),
+                self._api_call_fixture_row(
+                    root=backward_root, exact_id=backward_g000,
+                    request_id="backward-g000", fingerprint=backward_fp,
+                    worker_id=worker_new, worker_pid=new_pid,
+                    http_attempts=1),
+                self._api_call_fixture_row(
+                    root=later_root, exact_id=later_g000,
+                    request_id="failed-later-g000", fingerprint=later_fp,
+                    worker_id=worker_new, worker_pid=new_pid,
+                    failure=True, http_attempts=2),
+            ):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "api_calls.jsonl"), row)
+            resume_authorization = {
+                "parent_semantic_call_id": recovered_g000,
+                "semantic_root_id": recovered_root,
+                "semantic_call_id": recovered_g001,
+                "generation_index": 1,
+                "request_fingerprint": recovered_fp,
+                "next_attempt_index": 3,
+            }
+            for row in (
+                {
+                    "schema": "anchorpatch.run_metadata/3",
+                    "invocation_id": old_invocation,
+                    "worker_launch_id": worker_old,
+                    "worker_pid": old_pid,
+                    "samples": [sample],
+                    "status": "infrastructure_incomplete",
+                    "transport_resume_authorization": None,
+                },
+                {
+                    "schema": "anchorpatch.run_metadata/3",
+                    "invocation_id": new_invocation,
+                    "worker_launch_id": worker_new,
+                    "worker_pid": new_pid,
+                    "samples": [sample],
+                    "status": "infrastructure_incomplete",
+                    "transport_resume_authorization": (
+                        paired_dispatch._canonical_resume_authorization(
+                            resume_authorization)),
+                },
+            ):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "run_metadata.jsonl"), row)
+            self._write_completed_method_prefix(
+                out_dir, sample, "hybridpatch", 1)
+            progress = {
+                "hybridpatch": {
+                    "completed_round_trips": 1,
+                    "committed_rows": 2,
+                },
+                "fullrewrite": {
+                    "completed_round_trips": 0,
+                    "committed_rows": 0,
+                },
+            }
+            for created_at, worker, pid, invocation, root, exact_id, \
+                    request_id, fingerprint, rt, next_attempt in (
+                        (
+                            "2026-07-18T00:00:00+08:00",
+                            worker_old, old_pid, old_invocation,
+                            recovered_root, recovered_g000, "failed-g000",
+                            recovered_fp, 1, 3,
+                        ),
+                        (
+                            "2026-07-18T00:00:02+08:00",
+                            worker_new, new_pid, new_invocation,
+                            later_root, later_g000, "failed-later-g000",
+                            later_fp, 2, 3,
+                        ),
+                    ):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "sample_outcomes.jsonl"), {
+                        "schema": "anchorpatch.sample_outcome/1",
+                        "created_at": created_at,
+                        "sample": sample,
+                        "status": "infrastructure_incomplete",
+                        "worker_launch_id": worker,
+                        "worker_pid": pid,
+                        "invocation_id": invocation,
+                        "methods": methods,
+                        "method": "hybridpatch",
+                        "rt_index": rt,
+                        "direction": "forward",
+                        "call_kind": "hybridpatch_primary",
+                        "semantic_root_id": root,
+                        "semantic_call_id": exact_id,
+                        "request_id": request_id,
+                        "generation_index": 0,
+                        "parent_semantic_call_id": None,
+                        "request_fingerprint": fingerprint,
+                        "error_type": "incomplete_stream",
+                        "classification": "provider/API failure",
+                        "response_slots_used": 2,
+                        "transient_failure_count": 0,
+                        "http_attempts_used": next_attempt - 1,
+                        "next_attempt_index": next_attempt,
+                        "transport_recovery_index": 0,
+                        "checkpoint_progress": (
+                            {
+                                method: {
+                                    "completed_round_trips": 0,
+                                    "committed_rows": 0,
+                                }
+                                for method in methods
+                            }
+                            if worker == worker_old else progress
+                        ),
+                    })
+
+            process = mock.Mock(pid=new_pid)
+            process.poll.return_value = 7
+            sibling_process = mock.Mock(pid=303)
+            sibling_process.poll.return_value = None
+            running = {
+                sample: {
+                    "sample": sample,
+                    "process": process,
+                    "log": mock.Mock(),
+                    "key_label": "KEY_01",
+                    "worker_launch_id": worker_new,
+                    "methods": methods,
+                    "target_round_trips": 2,
+                    "exit_recorded": False,
+                },
+                "sample-b": {
+                    "sample": "sample-b",
+                    "process": sibling_process,
+                    "log": mock.Mock(),
+                    "key_label": "KEY_02",
+                    "worker_launch_id": "worker-sibling",
+                    "methods": ["fullrewrite", "hybridpatch"],
+                    "target_round_trips": 2,
+                    "exit_recorded": False,
+                },
+            }
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            disposition = paired_dispatch._record_worker_exit(
+                out_dir, running, sample, running[sample], 7, dispatch_log)
+            self.assertEqual(disposition, "infrastructure_incomplete")
+            self.assertNotIn(sample, running)
+            self.assertIn("sample-b", running)
+            provider_post = mock.Mock(
+                side_effect=AssertionError(
+                    "sibling/committed sample must not be posted here"))
+            for item in running.values():
+                if item["sample"] == sample:
+                    provider_post(item["sample"])
+            provider_post.assert_not_called()
+
+            sibling_methods = ["fullrewrite", "hybridpatch"]
+            sibling_progress = {}
+            for method in sibling_methods:
+                self._write_completed_method_prefix(
+                    out_dir, "sample-b", method, 2)
+                sibling_progress[method] = {
+                    "completed_round_trips": 2,
+                    "committed_rows": 4,
+                }
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "sample_outcomes.jsonl"), {
+                    "schema": "anchorpatch.sample_outcome/1",
+                    "created_at": "2026-07-18T00:00:03+08:00",
+                    "sample": "sample-b",
+                    "status": "finished",
+                    "worker_launch_id": "worker-sibling",
+                    "worker_pid": 303,
+                    "invocation_id": "inv-sibling",
+                    "methods": sibling_methods,
+                    "checkpoint_progress": sibling_progress,
+                })
+            selected, authorizations = (
+                paired_dispatch._select_invocation_assignments(
+                    out_dir,
+                    [
+                        {"sample": sample, "methods": methods},
+                        {
+                            "sample": "sample-b",
+                            "methods": sibling_methods,
+                        },
+                    ],
+                    resume=True, target_round_trips=2))
+            self.assertEqual([item["sample"] for item in selected], [sample])
+            self.assertEqual(
+                authorizations[sample]["parent_semantic_call_id"],
+                later_g000)
+
+    def test_confirmation_resume_selects_pristine_unstarted_wave_only(self):
+        finished_methods = ["hybridpatch", "fullrewrite"]
+        pending_methods = ["fullrewrite", "hybridpatch"]
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._write_finished_fixture(
+                out_dir, "sample-finished", finished_methods)
+            utils_relay_plan.save_relay_task_plan(
+                os.path.join(out_dir, "sample-pending.task_plan.json"),
+                ["target"],
+            )
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "dispatch_log.jsonl"), {
+                    "event": "wave_start", "wave_index": 2,
+                    "samples": ["sample-pending"],
+                })
+            lease_path = paired_dispatch._worker_lease_path(
+                out_dir, "sample-pending")
+            os.makedirs(os.path.dirname(lease_path), exist_ok=True)
+            open(lease_path, "a", encoding="utf-8").close()
+            assignments = [
+                {"sample": "sample-finished", "methods": finished_methods},
+                {"sample": "sample-pending", "methods": pending_methods},
+            ]
+            selected, authorizations = (
+                paired_dispatch._select_invocation_assignments(
+                    out_dir, assignments, resume=True,
+                    target_round_trips=1,
+                    allow_pristine_pending=True,
+                ))
+            self.assertEqual(
+                [item["sample"] for item in selected], ["sample-pending"])
+            self.assertEqual(authorizations, {})
+
+            provider_post = mock.Mock(
+                side_effect=AssertionError(
+                    "a committed sample must never produce a provider POST"))
+            for item in selected:
+                if item["sample"] == "sample-finished":
+                    provider_post(item["sample"])
+            provider_post.assert_not_called()
+
+            with self.assertRaisesRegex(RuntimeError, "missing outcomes"):
+                paired_dispatch._select_invocation_assignments(
+                    out_dir, assignments, resume=True,
+                    target_round_trips=1,
+                )
+
+    def test_confirmation_resume_rejects_pending_with_execution_evidence(self):
+        assignments = [{
+            "sample": "sample-pending",
+            "methods": ["hybridpatch", "fullrewrite"],
+        }]
+
+        def write_result(out_dir):
+            method_dir = os.path.join(out_dir, "hybridpatch")
+            os.makedirs(method_dir, exist_ok=True)
+            open(
+                os.path.join(method_dir, "sample-pending.jsonl"),
+                "w", encoding="utf-8",
+            ).close()
+
+        def write_metadata(out_dir):
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "run_metadata.jsonl"),
+                {"samples": ["sample-pending"], "status": "running"},
+            )
+
+        def write_api_call(out_dir):
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"),
+                {"sample": "sample-pending", "provider_called": True},
+            )
+
+        def write_attempt(out_dir):
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"),
+                {
+                    "semantic_call_id": (
+                        "hybridpatch/sample-pending/rt01/forward/"
+                        "hybridpatch_primary/g000"
+                    ),
+                    "event": "attempt_start",
+                },
+            )
+
+        def write_dispatch_launch(out_dir):
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "dispatch_log.jsonl"),
+                {"event": "launch", "sample": "sample-pending"},
+            )
+
+        def write_journal(out_dir):
+            semantic = (
+                "hybridpatch/sample-pending/rt01/forward/"
+                "hybridpatch_primary/g000"
+            )
+            digest = hashlib.sha256(semantic.encode("utf-8")).hexdigest()[:24]
+            journal_dir = os.path.join(out_dir, "api_journal")
+            os.makedirs(journal_dir, exist_ok=True)
+            run_meta.write_json_atomic(
+                os.path.join(journal_dir, f"{digest}.response.json"), {
+                    "schema": paired_dispatch.API_RESPONSE_JOURNAL_SCHEMA,
+                    "semantic_call_id": semantic,
+                })
+
+        writers = {
+            "result": write_result,
+            "metadata": write_metadata,
+            "api_call": write_api_call,
+            "attempt": write_attempt,
+            "dispatch_launch": write_dispatch_launch,
+            "journal": write_journal,
+        }
+        for label, writer in writers.items():
+            with self.subTest(evidence=label), \
+                    tempfile.TemporaryDirectory() as out_dir:
+                writer(out_dir)
+                with self.assertRaisesRegex(RuntimeError, "never started"):
+                    paired_dispatch._select_invocation_assignments(
+                        out_dir, assignments, resume=True,
+                        target_round_trips=10,
+                        allow_pristine_pending=True,
+                    )
 
     def test_resume_rejects_g002_after_g001_exhaustion(self):
         assignments = [{
@@ -2582,6 +3446,7 @@ class IntegrationContractTests(unittest.TestCase):
                 {
                     "event": "worker_exit", "worker_launch_id": "worker-a",
                     "sample": "sample", "pid": 101, "returncode": 0,
+                    "disposition": "finished",
                     "created_at": "2026-07-17T00:00:00+08:00",
                 },
             ):
@@ -2590,6 +3455,63 @@ class IntegrationContractTests(unittest.TestCase):
             with mock.patch.object(
                 paired_dispatch, "_git_identity", return_value=("1" * 40, "clean")
             ):
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertEqual(inspection["errors"], [])
+
+                outcome_path = os.path.join(out_dir, "sample_outcomes.jsonl")
+                with open(outcome_path, encoding="utf-8") as handle:
+                    outcome_rows = [
+                        json.loads(line) for line in handle if line.strip()
+                    ]
+                original_outcome_rows = copy.deepcopy(outcome_rows)
+
+                def write_outcome_rows():
+                    run_meta._write_jsonl_atomic(outcome_path, outcome_rows)
+
+                outcome_rows[0]["checkpoint_progress"] = None
+                write_outcome_rows()
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertTrue(any(
+                    "finished sample checkpoint evidence drift" in error
+                    for error in inspection["errors"]
+                ), inspection["errors"])
+                outcome_rows[:] = copy.deepcopy(original_outcome_rows)
+                outcome_rows[0]["worker_pid"] = 202
+                write_outcome_rows()
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertTrue(any(
+                    "finished sample worker provenance mismatch" in error
+                    for error in inspection["errors"]
+                ), inspection["errors"])
+                outcome_rows[:] = copy.deepcopy(original_outcome_rows)
+                write_outcome_rows()
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertEqual(inspection["errors"], [])
+
+                with open(dispatch_path, encoding="utf-8") as handle:
+                    dispatch_rows = [
+                        json.loads(line) for line in handle if line.strip()
+                    ]
+                original_dispatch_rows = copy.deepcopy(dispatch_rows)
+                worker_exit = next(
+                    row for row in dispatch_rows
+                    if row.get("event") == "worker_exit"
+                )
+                worker_exit["returncode"] = 7
+                worker_exit["disposition"] = "campaign_fatal"
+                run_meta._write_jsonl_atomic(dispatch_path, dispatch_rows)
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertTrue(any(
+                    "worker exit provenance incomplete" in error
+                    for error in inspection["errors"]
+                ), inspection["errors"])
+                dispatch_rows[:] = copy.deepcopy(original_dispatch_rows)
+                run_meta._write_jsonl_atomic(dispatch_path, dispatch_rows)
                 inspection = paired_dispatch.inspect_campaign(
                     out_dir, manifest, require_complete=True)
                 self.assertEqual(inspection["errors"], [])
@@ -2650,13 +3572,20 @@ class IntegrationContractTests(unittest.TestCase):
                 write_hybrid_rows()
                 inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
                 self.assertTrue(any(
-                    "unscoreable exact backward RT1" in error
+                    "unscoreable backward RT1" in error
                     for error in inspection["errors"]
                 ))
                 backward_row["evaluation"] = {"error": "context_mismatch"}
                 write_hybrid_rows()
                 inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
                 self.assertEqual(inspection["errors"], [])
+                backward_row["evaluation"] = {"score": 1.5}
+                write_hybrid_rows()
+                inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+                self.assertTrue(any(
+                    "unscoreable backward RT1" in error
+                    for error in inspection["errors"]
+                ))
                 backward_row["evaluation"] = {"score": 1.0}
 
                 original_bdpatch = dict(hybrid_result_rows[0]["bdpatch"])
@@ -2728,6 +3657,147 @@ class IntegrationContractTests(unittest.TestCase):
                 hybrid_result_rows[0]["bdpatch"]["exec_log"][
                     "preservation_violations"] = 0
                 write_hybrid_rows()
+
+                failed_semantic = api_rows[0]["semantic_call_id"]
+                failed_api_rows = [dict(row) for row in api_rows]
+                failed_api_rows[0].update({
+                    "classification": "provider/API failure",
+                    "error_type": "incomplete_stream",
+                    "response_slots_used": 2,
+                    "http_attempts_used": 2,
+                })
+
+                def failed_attempt_records(api_row):
+                    base = {
+                        "schema": "anchorpatch.api_attempt/4",
+                        "step_id": (
+                            f"{api_row['method']}/{api_row['sample']}/"
+                            f"rt{api_row['rt_index']:02d}/"
+                            f"{api_row['direction']}"
+                        ),
+                        "semantic_root_id": api_row["semantic_root_id"],
+                        "semantic_call_id": api_row["semantic_call_id"],
+                        "generation_index": api_row["generation_index"],
+                        "parent_semantic_call_id": (
+                            api_row["parent_semantic_call_id"]
+                        ),
+                        "worker_launch_id": api_row["worker_launch_id"],
+                    }
+                    rows = [{
+                        **base,
+                        "event": "semantic_request",
+                        "call_id": api_row["request_id"],
+                        "call_kind": api_row["call_kind"],
+                        "request_fingerprint": (
+                            api_row["request_fingerprint"]
+                        ),
+                    }]
+                    for attempt_index in (1, 2):
+                        rows.extend([
+                            {
+                                **base,
+                                "event": "attempt_start",
+                                "call_id": api_row["request_id"],
+                                "attempt_index": attempt_index,
+                                "call_kind": api_row["call_kind"],
+                                "attempt_kind": (
+                                    "transport_initial"
+                                    if attempt_index == 1
+                                    else "transport_retry"
+                                ),
+                                "request_fingerprint": (
+                                    api_row["request_fingerprint"]
+                                ),
+                            },
+                            {
+                                **base,
+                                "event": "generation_progress",
+                                "call_id": api_row["request_id"],
+                                "attempt_index": attempt_index,
+                                "delta_type": "text_delta",
+                            },
+                            {
+                                **base,
+                                "event": "attempt_end",
+                                "call_id": api_row["request_id"],
+                                "attempt_index": attempt_index,
+                                **self._failed_attempt_end_fields(),
+                            },
+                            {
+                                **base,
+                                "event": "attempt_budget",
+                                "call_id": api_row["request_id"],
+                                "attempt_index": attempt_index,
+                                "budget_class": "response_slot",
+                                "response_slots_used": attempt_index,
+                                "transient_failure_count": 0,
+                            },
+                        ])
+                    rows.append({
+                        **base,
+                        "event": "call_failed",
+                        "call_id": api_row["request_id"],
+                        "attempt_index": 2,
+                        "status": "provider_failure",
+                        "error_type": "incomplete_stream",
+                        "response_slots_used": 2,
+                        "transient_failure_count": 0,
+                        "http_attempts_used": 2,
+                        "request_fingerprint": (
+                            api_row["request_fingerprint"]
+                        ),
+                    })
+                    return rows
+
+                failed_attempt_rows = []
+                for row in attempt_rows:
+                    if row["semantic_call_id"] == failed_semantic:
+                        continue
+                    failed_attempt_rows.append(row)
+                failed_attempt_rows.extend(
+                    failed_attempt_records(failed_api_rows[0]))
+                failed_journal_rows = [
+                    item for item in journal_rows
+                    if item[0] != failed_semantic
+                ]
+                run_meta._write_jsonl_atomic(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    failed_api_rows)
+                run_meta._write_jsonl_atomic(
+                    os.path.join(out_dir, "api_attempt_ledger.jsonl"),
+                    failed_attempt_rows)
+                journal_dir = os.path.join(out_dir, "api_journal")
+                failed_digest = hashlib.sha256(
+                    failed_semantic.encode("utf-8")).hexdigest()[:24]
+                os.remove(os.path.join(
+                    journal_dir, f"{failed_digest}.response.json"))
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest)
+                self.assertTrue(any(
+                    "committed row requires a response-journal-backed "
+                    "successful semantic call" in error
+                    for error in inspection["errors"]
+                ), inspection["errors"])
+                run_meta._write_jsonl_atomic(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    api_rows)
+                run_meta._write_jsonl_atomic(
+                    os.path.join(out_dir, "api_attempt_ledger.jsonl"),
+                    attempt_rows)
+                for semantic_call_id, journal in failed_journal_rows:
+                    digest = hashlib.sha256(
+                        semantic_call_id.encode("utf-8")).hexdigest()[:24]
+                    run_meta.write_json_atomic(
+                        os.path.join(
+                            journal_dir, f"{digest}.response.json"),
+                        journal)
+                for semantic_call_id, journal in journal_rows:
+                    digest = hashlib.sha256(
+                        semantic_call_id.encode("utf-8")).hexdigest()[:24]
+                    run_meta.write_json_atomic(
+                        os.path.join(
+                            journal_dir, f"{digest}.response.json"),
+                        journal)
 
                 original = api_rows[0]
                 replay = dict(original)
@@ -2912,6 +3982,797 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertEqual(
             sum(item["methods"][0] == "fullrewrite" for item in legacy), 5)
 
+    def test_confirmation_selection_digest_and_partition_are_strict(self):
+        candidates = [f"sample-{index:03d}" for index in range(85)]
+        selected = candidates[:68]
+        reserve = candidates[68:]
+        features = {
+            sample: {"domain": f"domain-{index % 7}"}
+            for index, sample in enumerate(candidates)
+        }
+        payload = {
+            "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+            "experiment_id": paired_dispatch.CONFIRMATION_EXPERIMENT_ID,
+            "candidate_rule": {
+                "seed": 42, "candidate_count": 85,
+                "selected_count": 68, "reserve_count": 17,
+                "rule": "candidate_count_below100_select_about80_percent",
+                "strict_unseen_candidate_count": 0,
+            },
+            "candidate_sample_ids": candidates,
+            "selected_sample_ids": selected,
+            "reserve_sample_ids": reserve,
+            "reserve_selection_order": list(reversed(reserve)),
+            "features": features,
+            "exposure_policy": {
+                "strict_any_provider_call": {"sample_count": 234},
+                "method_developer_unseen": {
+                    "excluded_sample_count": 149,
+                    "registry_clean_candidate_count": 86,
+                    "split_test_count": 20,
+                    "clean_candidate_with_method_exposure_count": 1,
+                    "clean_candidate_with_method_exposure_ids": ["python1"],
+                    "documented_developer_content_exposure": {
+                        "python1": "docs/FINDINGS.md:370-399",
+                    },
+                },
+            },
+            "runtime_evaluator_smoke": {
+                "checked_count": 234, "runnable_count": 234,
+                "failed_count": 0,
+            },
+            "inputs": {
+                "selector_script": {
+                    "path": "tools/build_unseen_confirmation_split.py",
+                    "sha256": "1" * 64,
+                },
+                "registry": {
+                    "path": "data/CONTAMINATION_REGISTRY.json",
+                    "sha256": "2" * 64,
+                },
+                "hybrid_split": {
+                    "path": "data/hybrid_split.json",
+                    "sha256": "3" * 64,
+                },
+                "samples_root": "data/samples_delegate52",
+                "sample_count": 234,
+                "sample_json_manifest_sha256": "4" * 64,
+            },
+        }
+        payload["artifact_sha256_preview"] = hashlib.sha256(
+            paired_dispatch._canonical_json_bytes({
+                "candidate_sample_ids": candidates,
+                "selected_sample_ids": selected,
+                "reserve_sample_ids": reserve,
+                "features": features,
+            })
+        ).hexdigest()
+        validated = paired_dispatch._validate_confirmation_selection_payload(
+            payload, available_samples=candidates)
+        self.assertEqual(validated["selected_sample_ids"], selected)
+        self.assertEqual(validated["reserve_sample_ids"], reserve)
+        registry = {
+            "entries": [
+                {"sample_id": sample, "status": "clean_candidate"}
+                for sample in [*candidates, "python1"]
+            ]
+        }
+        sealed_split = {
+            "splits": {
+                "dev": [], "val": [], "test": [], "unused_reserve": []
+            }
+        }
+        paired_dispatch._validate_confirmation_candidate_semantics(
+            validated, registry, sealed_split)
+        bad_split = json.loads(json.dumps(sealed_split))
+        bad_split["splits"]["test"] = [candidates[0]]
+        with self.assertRaisesRegex(RuntimeError, "sealed"):
+            paired_dispatch._validate_confirmation_candidate_semantics(
+                validated, registry, bad_split)
+        bad_registry = json.loads(json.dumps(registry))
+        bad_registry["entries"].pop(0)
+        with self.assertRaisesRegex(RuntimeError, "clean_candidate"):
+            paired_dispatch._validate_confirmation_candidate_semantics(
+                validated, bad_registry, sealed_split)
+        args = mock.Mock(
+            campaign_role="confirmation", samples=selected,
+            selection_manifest="selection.json")
+        with self.assertRaisesRegex(RuntimeError, "match --out_dir"):
+            with mock.patch.object(
+                    paired_dispatch, "_load_confirmation_selection",
+                    return_value=(
+                        selected, {"experiment_id": "exp_confirmation"})):
+                paired_dispatch._resolve_confirmation_selection(
+                    args, out_dir="different_experiment")
+
+        mutations = []
+        bad = json.loads(json.dumps(payload))
+        bad["schema"] = "anchorpatch.method_unseen_confirmation_split/0"
+        mutations.append((bad, "schema"))
+        bad = json.loads(json.dumps(payload))
+        bad["candidate_rule"]["seed"] = 7
+        mutations.append((bad, "seed42"))
+        bad = json.loads(json.dumps(payload))
+        bad["reserve_sample_ids"][0] = bad["selected_sample_ids"][0]
+        mutations.append((bad, "partition"))
+        bad = json.loads(json.dumps(payload))
+        bad["artifact_sha256_preview"] = "0" * 64
+        mutations.append((bad, "digest"))
+        for value, message in mutations:
+            with self.subTest(message=message), self.assertRaisesRegex(
+                    RuntimeError, message):
+                paired_dispatch._validate_confirmation_selection_payload(
+                    value, available_samples=candidates)
+
+    def test_confirmation_selection_prefill_does_not_bypass_loader(self):
+        selected = ["sample-a", "sample-b"]
+        verified_record = {
+            "experiment_id": "exp_verified",
+            "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+            "path": "HP_V8/analysis/selection.json",
+            "sha256": "1" * 64,
+        }
+        args = mock.Mock(
+            campaign_role="confirmation", samples=[],
+            selection_manifest="selection.json")
+        args._selection_samples = ["forged"]
+        args._selection_manifest_record = {"experiment_id": "forged"}
+        with mock.patch.object(
+                paired_dispatch, "_load_confirmation_selection",
+                return_value=(selected, verified_record)) as load_selection:
+            resolved = paired_dispatch._resolve_confirmation_selection(
+                args, out_dir="exp_verified")
+            load_selection.assert_called_once_with(
+                "selection.json", current_experiment_dir="exp_verified")
+        self.assertEqual(resolved, verified_record)
+        self.assertEqual(args.samples, selected)
+
+        with mock.patch.object(
+                paired_dispatch, "_load_confirmation_selection",
+                side_effect=AssertionError("verified cache should be reused")):
+            self.assertEqual(
+                paired_dispatch._resolve_confirmation_selection(
+                    args, out_dir="exp_verified"),
+                verified_record)
+
+    def test_confirmation_selection_recompute_detects_swap_and_evidence_drift(self):
+        candidates = [f"sample-{index}" for index in range(5)]
+        selected = candidates[:4]
+        reserve = candidates[4:]
+        features = {
+            sample: {
+                "sample_id": sample,
+                "domain": "unit",
+                "formats": [".txt"],
+                "format_group": ".txt",
+                "task_types": ["local_edit"],
+                "file_count": 1,
+                "file_count_bin": "1",
+                "doc_bytes": 100 + index,
+                "context_files": ["a.txt"],
+                "doc_length_bin": "q1",
+            }
+            for index, sample in enumerate(candidates)
+        }
+
+        class FakeSelector:
+            @staticmethod
+            def sample_ids(_samples_root):
+                return list(candidates)
+
+            @staticmethod
+            def scan_any_provider_exposure(_repo, _all_samples):
+                return {
+                    "sample_ids": list(candidates),
+                    "sample_count": len(candidates),
+                    "evidence_manifest_sha256": "any-evidence",
+                    "api_call_files": 1,
+                    "api_raw_request_files": 0,
+                }
+
+            @staticmethod
+            def scan_method_exposure(_repo, _all_samples):
+                return {
+                    "sample_ids": [],
+                    "sample_count": 0,
+                    "path_manifest_sha256": "method-evidence",
+                }
+
+            @staticmethod
+            def load_registry_sets(_registry):
+                return {
+                    "contaminated": set(),
+                    "unsupported_generation_domain": set(),
+                    "clean_candidate": set(candidates),
+                    "reserved_holdout_candidate": set(),
+                }
+
+            @staticmethod
+            def split_sets(_hybrid_split):
+                return {}
+
+            @staticmethod
+            def method_holdout_candidates(
+                    _all_samples, registry_sets, _split, _method_exposure):
+                return set(registry_sets["clean_candidate"]), set(), set()
+
+            @staticmethod
+            def sample_feature(_repo, sample_id):
+                return copy.deepcopy(features[sample_id])
+
+            @staticmethod
+            def add_length_bins(_features):
+                return None
+
+            @staticmethod
+            def selection_counts(candidate_count):
+                self.assertEqual(candidate_count, 5)
+                return 4, 1, "candidate_count_below100_select_about80_percent"
+
+            @staticmethod
+            def stratified_reserve(
+                    _candidate_ids, _features, reserve_n, seed):
+                self.assertEqual((reserve_n, seed), (1, 42))
+                return list(reserve), list(reserve), {}
+
+        payload = {
+            "exposure_policy": {
+                "strict_any_provider_call": {
+                    "sample_ids": list(candidates),
+                    "sample_count": len(candidates),
+                    "evidence_manifest_sha256": "any-evidence",
+                    "api_call_files": 1,
+                    "api_raw_request_files": 0,
+                },
+                "method_developer_unseen": {
+                    "actual_method_scan_count": 0,
+                    "actual_method_scan_sample_ids": [],
+                    "actual_method_path_manifest_sha256": "method-evidence",
+                    "clean_candidate_with_method_exposure_count": 0,
+                    "clean_candidate_with_method_exposure_ids": [],
+                    "excluded_sample_count": 0,
+                    "excluded_sample_ids": [],
+                },
+            },
+            "runtime_evaluator_smoke": {
+                "runnable_sample_ids": list(candidates),
+            },
+            "candidate_rule": {
+                "seed": 42,
+                "rule": "candidate_count_below100_select_about80_percent",
+                "candidate_count": 5,
+                "selected_count": 4,
+                "reserve_count": 1,
+                "strict_unseen_candidate_count": 0,
+            },
+            "candidate_sample_ids": list(candidates),
+            "selected_sample_ids": list(selected),
+            "reserve_sample_ids": list(reserve),
+            "reserve_selection_order": list(reserve),
+            "features": copy.deepcopy(features),
+        }
+        validated = {
+            "selected_sample_ids": list(selected),
+            "reserve_sample_ids": list(reserve),
+            "reserve_selection_order": list(reserve),
+        }
+        paired_dispatch._validate_confirmation_recomputed_selection(
+            payload, validated, pathlib.Path("."), FakeSelector, {}, {})
+
+        swapped_payload = copy.deepcopy(payload)
+        swapped_payload["selected_sample_ids"] = [
+            *candidates[:3], candidates[4]]
+        swapped_payload["reserve_sample_ids"] = [candidates[3]]
+        swapped_validated = {
+            "selected_sample_ids": swapped_payload["selected_sample_ids"],
+            "reserve_sample_ids": swapped_payload["reserve_sample_ids"],
+            "reserve_selection_order": swapped_payload["reserve_sample_ids"],
+        }
+        with self.assertRaisesRegex(RuntimeError, "selected_sample_ids"):
+            paired_dispatch._validate_confirmation_recomputed_selection(
+                swapped_payload, swapped_validated, pathlib.Path("."),
+                FakeSelector, {}, {})
+
+        drifted_payload = copy.deepcopy(payload)
+        drifted_payload["exposure_policy"]["strict_any_provider_call"][
+            "evidence_manifest_sha256"] = "changed"
+        with self.assertRaisesRegex(RuntimeError, "evidence_manifest_sha256"):
+            paired_dispatch._validate_confirmation_recomputed_selection(
+                drifted_payload, validated, pathlib.Path("."),
+                FakeSelector, {}, {})
+
+    def test_confirmation_selection_loader_excludes_current_experiment_only(self):
+        all_samples = [f"sample-{index:03d}" for index in range(234)]
+        candidates = all_samples[:85]
+        selected = candidates[:68]
+        reserve = candidates[68:]
+        excluded = all_samples[85:]
+
+        def feature(sample_id):
+            return {
+                "sample_id": sample_id,
+                "domain": "unit",
+                "formats": [".txt"],
+                "format_group": ".txt",
+                "task_types": ["local_edit"],
+                "file_count": 1,
+                "file_count_bin": "1",
+                "doc_bytes": 100,
+                "context_files": ["a.txt"],
+                "doc_length_bin": "q1",
+            }
+
+        selector_source = textwrap.dedent("""
+            from collections import defaultdict
+            import hashlib
+            import json
+
+            def compact_json_bytes(value):
+                return json.dumps(
+                    value, ensure_ascii=False, sort_keys=True,
+                    separators=(",", ":")).encode("utf-8")
+
+            def sha256_file(path):
+                h = hashlib.sha256()
+                with path.open("rb") as handle:
+                    h.update(handle.read())
+                return h.hexdigest()
+
+            def sample_ids(samples_root):
+                return sorted(
+                    path.parent.name
+                    for path in samples_root.glob("*/sample.json")
+                    if path.parent.is_dir())
+
+            def _walk_experiment_paths(repo):
+                root = repo / "HP_V8"
+                if root.exists():
+                    yield from root.rglob("*")
+
+            def scan_any_provider_exposure(repo, all_samples):
+                samples = set()
+                evidence = defaultdict(list)
+                api_call_files = 0
+                api_call_sources = []
+                for path in _walk_experiment_paths(repo):
+                    if not path.is_file() or path.name != "api_calls.jsonl":
+                        continue
+                    api_call_files += 1
+                    rel = path.relative_to(repo).as_posix()
+                    api_call_sources.append({
+                        "path": rel, "sha256": sha256_file(path)})
+                    with path.open(encoding="utf-8") as handle:
+                        for line in handle:
+                            try:
+                                row = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            sample = row.get("sample") or row.get("sample_id")
+                            if sample in all_samples:
+                                samples.add(sample)
+                                if len(evidence[sample]) < 3:
+                                    evidence[sample].append(rel)
+                return {
+                    "sample_ids": sorted(samples),
+                    "sample_count": len(samples),
+                    "evidence_examples": dict(sorted(evidence.items())),
+                    "api_call_files": api_call_files,
+                    "api_raw_request_files": 0,
+                    "evidence_manifest_sha256": hashlib.sha256(
+                        compact_json_bytes({
+                            "api_call_sources": sorted(
+                                api_call_sources,
+                                key=lambda item: item["path"]),
+                            "api_raw_request_paths": [],
+                        })).hexdigest(),
+                }
+
+            def scan_method_exposure(_repo, _all_samples):
+                return {
+                    "sample_ids": [],
+                    "sample_count": 0,
+                    "evidence_examples": {},
+                    "path_manifest_sha256": hashlib.sha256(
+                        compact_json_bytes({
+                            "matched_paths": [],
+                            "matched_api_call_sources": [],
+                        })).hexdigest(),
+                }
+
+            def load_registry_sets(registry):
+                clean = {
+                    item["sample_id"] for item in registry["entries"]
+                    if item.get("status") == "clean_candidate"}
+                return {
+                    "contaminated": set(),
+                    "unsupported_generation_domain": set(),
+                    "clean_candidate": clean,
+                    "reserved_holdout_candidate": set(),
+                }
+
+            def split_sets(_hybrid_split):
+                return {}
+
+            def method_holdout_candidates(
+                    all_samples, registry_sets, _split, _method_exposure):
+                pool = set(registry_sets["clean_candidate"]) - {"python1"}
+                exposed = set(all_samples) - pool
+                return pool, exposed, {"python1"}
+
+            def sample_feature(_repo, sample_id):
+                return {
+                    "sample_id": sample_id,
+                    "domain": "unit",
+                    "formats": [".txt"],
+                    "format_group": ".txt",
+                    "task_types": ["local_edit"],
+                    "file_count": 1,
+                    "file_count_bin": "1",
+                    "doc_bytes": 100,
+                    "context_files": ["a.txt"],
+                    "doc_length_bin": "q1",
+                }
+
+            def add_length_bins(_features):
+                return None
+
+            def selection_counts(candidate_count):
+                assert candidate_count == 85
+                return 68, 17, "candidate_count_below100_select_about80_percent"
+
+            def stratified_reserve(_candidate_ids, _features, reserve_n, seed):
+                assert (reserve_n, seed) == (17, 42)
+                reserve = [f"sample-{index:03d}" for index in range(68, 85)]
+                return reserve, reserve, {}
+        """)
+
+        with tempfile.TemporaryDirectory() as root_dir:
+            repo_root = pathlib.Path(root_dir)
+            samples_root = repo_root / "data" / "samples_delegate52"
+            for sample in all_samples:
+                sample_dir = samples_root / sample
+                sample_dir.mkdir(parents=True, exist_ok=True)
+                (sample_dir / "sample.json").write_text(
+                    "{}", encoding="utf-8")
+            sample_files = {
+                sample: paired_dispatch._sha256(
+                    samples_root / sample / "sample.json")
+                for sample in all_samples
+            }
+            sample_digest = hashlib.sha256(
+                paired_dispatch._canonical_json_bytes(sample_files)
+            ).hexdigest()
+
+            tools_dir = repo_root / "tools"
+            tools_dir.mkdir()
+            selector_path = tools_dir / "build_unseen_confirmation_split.py"
+            selector_path.write_text(selector_source, encoding="utf-8")
+            registry_path = repo_root / "data" / "CONTAMINATION_REGISTRY.json"
+            registry = {
+                "entries": [
+                    {"sample_id": sample, "status": "clean_candidate"}
+                    for sample in [*candidates, "python1"]
+                ]
+            }
+            paired_dispatch.write_json_atomic(registry_path, registry)
+            split_path = repo_root / "data" / "hybrid_split.json"
+            paired_dispatch.write_json_atomic(split_path, {
+                "splits": {
+                    "dev": [], "val": [], "test": [],
+                    "unused_reserve": [],
+                }
+            })
+
+            history_dir = repo_root / "HP_V8" / "exp_history"
+            history_dir.mkdir(parents=True)
+            history_api = history_dir / "api_calls.jsonl"
+            with history_api.open("w", encoding="utf-8") as handle:
+                for sample in all_samples:
+                    handle.write(json.dumps({
+                        "sample": sample,
+                        "method": "fullrewrite",
+                    }) + "\n")
+            strict_digest = hashlib.sha256(
+                paired_dispatch._canonical_json_bytes({
+                    "api_call_sources": [{
+                        "path": history_api.relative_to(repo_root).as_posix(),
+                        "sha256": paired_dispatch._sha256(history_api),
+                    }],
+                    "api_raw_request_paths": [],
+                })
+            ).hexdigest()
+            method_digest = hashlib.sha256(
+                paired_dispatch._canonical_json_bytes({
+                    "matched_paths": [],
+                    "matched_api_call_sources": [],
+                })
+            ).hexdigest()
+            features = {sample: feature(sample) for sample in candidates}
+            payload = {
+                "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+                "experiment_id": paired_dispatch.CONFIRMATION_EXPERIMENT_ID,
+                "candidate_rule": {
+                    "seed": 42,
+                    "candidate_count": 85,
+                    "selected_count": 68,
+                    "reserve_count": 17,
+                    "rule": (
+                        "candidate_count_below100_select_about80_percent"),
+                    "strict_unseen_candidate_count": 0,
+                },
+                "candidate_sample_ids": candidates,
+                "selected_sample_ids": selected,
+                "reserve_sample_ids": reserve,
+                "reserve_selection_order": reserve,
+                "features": features,
+                "exposure_policy": {
+                    "strict_any_provider_call": {
+                        "sample_ids": all_samples,
+                        "sample_count": 234,
+                        "evidence_manifest_sha256": strict_digest,
+                        "api_call_files": 1,
+                        "api_raw_request_files": 0,
+                    },
+                    "method_developer_unseen": {
+                        "actual_method_scan_count": 0,
+                        "actual_method_scan_sample_ids": [],
+                        "actual_method_path_manifest_sha256": method_digest,
+                        "excluded_sample_count": 149,
+                        "excluded_sample_ids": excluded,
+                        "registry_clean_candidate_count": 86,
+                        "split_test_count": 20,
+                        "clean_candidate_with_method_exposure_count": 1,
+                        "clean_candidate_with_method_exposure_ids": ["python1"],
+                        "documented_developer_content_exposure": {
+                            "python1": "docs/FINDINGS.md:370-399",
+                        },
+                    },
+                },
+                "runtime_evaluator_smoke": {
+                    "checked_count": 234,
+                    "runnable_count": 234,
+                    "failed_count": 0,
+                    "runnable_sample_ids": all_samples,
+                },
+                "inputs": {
+                    "selector_script": {
+                        "path": "tools/build_unseen_confirmation_split.py",
+                        "sha256": paired_dispatch._sha256(selector_path),
+                    },
+                    "registry": {
+                        "path": "data/CONTAMINATION_REGISTRY.json",
+                        "sha256": paired_dispatch._sha256(registry_path),
+                    },
+                    "hybrid_split": {
+                        "path": "data/hybrid_split.json",
+                        "sha256": paired_dispatch._sha256(split_path),
+                    },
+                    "samples_root": "data/samples_delegate52",
+                    "sample_count": 234,
+                    "sample_json_manifest_sha256": sample_digest,
+                },
+            }
+            payload["artifact_sha256_preview"] = hashlib.sha256(
+                paired_dispatch._canonical_json_bytes({
+                    "candidate_sample_ids": candidates,
+                    "selected_sample_ids": selected,
+                    "reserve_sample_ids": reserve,
+                    "features": features,
+                })
+            ).hexdigest()
+            selection_path = (
+                repo_root / "HP_V8" / "analysis"
+                / "selection.json")
+            selection_path.parent.mkdir(parents=True)
+            paired_dispatch.write_json_atomic(selection_path, payload)
+            current_dir = (
+                repo_root / "HP_V8"
+                / paired_dispatch.CONFIRMATION_EXPERIMENT_ID)
+            current_dir.mkdir()
+            with (current_dir / "api_calls.jsonl").open(
+                    "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({
+                    "sample": all_samples[0],
+                    "method": "fullrewrite",
+                }) + "\n")
+
+            class Completed:
+                returncode = 0
+                stdout = b""
+                stderr = b""
+
+            def fake_git(command, **_kwargs):
+                result = Completed()
+                if command[:2] == ["git", "show"]:
+                    result.stdout = selection_path.read_bytes()
+                return result
+
+            with mock.patch.object(
+                    paired_dispatch, "_resolve_selection_path",
+                    return_value=(selection_path, repo_root)), \
+                    mock.patch.object(
+                        paired_dispatch.subprocess, "run",
+                        side_effect=fake_git), \
+                    mock.patch.object(
+                        paired_dispatch, "SAMPLES_ROOT", str(samples_root)):
+                selected_ids, record = paired_dispatch._load_confirmation_selection(
+                    str(selection_path), current_experiment_dir=current_dir)
+                self.assertEqual(selected_ids, selected)
+                self.assertEqual(
+                    record["recompute"]["excluded_current_experiment_dir"],
+                    current_dir.relative_to(repo_root).as_posix())
+
+                other_dir = repo_root / "HP_V8" / "exp_new_history"
+                other_dir.mkdir()
+                with (other_dir / "api_calls.jsonl").open(
+                        "w", encoding="utf-8") as handle:
+                    handle.write(json.dumps({
+                        "sample": all_samples[1],
+                        "method": "fullrewrite",
+                    }) + "\n")
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "strict_any_provider_call.evidence_manifest_sha256"):
+                    paired_dispatch._load_confirmation_selection(
+                        str(selection_path),
+                        current_experiment_dir=current_dir)
+
+    def test_confirmation_queues_sixty_eight_as_balanced_52_and_16_waves(self):
+        samples = [f"sample-{index:03d}" for index in range(68)]
+        labels = [f"KEY_{index:02d}" for index in range(1, 14)]
+        assignments = paired_dispatch.build_key_assignments(
+            samples, labels, 4, alternate_within_key=True,
+            allow_queue=True)
+        waves = paired_dispatch._partition_assignment_waves(assignments, 4)
+        self.assertEqual([len(wave) for wave in waves], [52, 16])
+        self.assertEqual(
+            sum(item["methods"][0] == "hybridpatch"
+                for item in assignments), 34)
+        self.assertEqual(
+            sum(item["methods"][0] == "fullrewrite"
+                for item in assignments), 34)
+        self.assertEqual([
+            (
+                sum(item["methods"][0] == "hybridpatch" for item in wave),
+                sum(item["methods"][0] == "fullrewrite" for item in wave),
+            )
+            for wave in waves
+        ], [(26, 26), (8, 8)])
+        for wave in waves:
+            by_key = {}
+            for item in wave:
+                by_key[item["key_label"]] = (
+                    by_key.get(item["key_label"], 0) + 1
+                )
+            self.assertTrue(all(count <= 4 for count in by_key.values()))
+        with self.assertRaisesRegex(RuntimeError, "concurrency capacity"):
+            paired_dispatch.build_key_assignments(samples, labels, 4)
+
+        args = mock.Mock(
+            campaign_role="confirmation", smoke_dir=None, samples=samples,
+            num_round_trips=10, seed=42, slots_per_key=4,
+        )
+        args._selection_manifest_record = {
+            "experiment_id": "out",
+            "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+            "path": "HP_V8/analysis/selection.json",
+            "sha256": "1" * 64,
+            "artifact_sha256_preview": "2" * 64,
+            "candidate_count": 85, "selected_count": 68,
+            "reserve_count": 17, "seed": 42,
+            "inputs": {
+                "selector_script": {"path": "tools/selector.py",
+                                    "sha256": "3" * 64},
+                "registry": {"path": "data/registry.json",
+                             "sha256": "4" * 64},
+                "hybrid_split": {"path": "data/split.json",
+                                 "sha256": "5" * 64},
+                "sample_json_manifest": {
+                    "path": "data/samples_delegate52",
+                    "sample_count": 234, "sha256": "6" * 64,
+                },
+            },
+        }
+        paired_dispatch._validate_campaign_grid(args)
+        with mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")), \
+                mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"unit": "test"}):
+            manifest = paired_dispatch.build_manifest(
+                "out", samples, assignments, {}, args)
+        self.assertEqual(
+            [wave["worker_count"] for wave in manifest["assignment_waves"]],
+            [52, 16])
+        self.assertEqual(
+            manifest["selection_manifest"]["sha256"], "1" * 64)
+        self.assertEqual(
+            manifest["analysis_policy"],
+            paired_dispatch.CONFIRMATION_ANALYSIS_POLICY)
+        self.assertEqual(
+            manifest["analysis_policy"]["evaluator_error_policy"][
+                "error_row_score"],
+            0.0)
+        self.assertEqual(
+            set(manifest["selection_manifest"]["inputs"]),
+            {"selector_script", "registry", "hybrid_split",
+             "sample_json_manifest"})
+        self.assertEqual(manifest["config"]["slots_per_key"], 4)
+
+    def test_mixed_confirmation_selection_and_balanced_100_grid(self):
+        repo_root = pathlib.Path(paired_dispatch._ROOT).parent
+        selection_path = (
+            repo_root / "HP_V8" / "analysis"
+            / "20260719_hybridv8_transportv4_mixed_confirmation100"
+            / "selection.json"
+        )
+        payload = json.loads(selection_path.read_text(encoding="utf-8"))
+        validated = paired_dispatch._validate_confirmation_selection_payload(
+            payload,
+            available_samples=set(payload["candidate_sample_ids"]),
+        )
+        self.assertEqual(validated["selection_kind"], "mixed100")
+        self.assertEqual(len(validated["selected_sample_ids"]), 100)
+        self.assertEqual(
+            len(payload["cohorts"]["method_unseen"]["selected_sample_ids"]),
+            60,
+        )
+        self.assertEqual(
+            len(payload["cohorts"]["historical_hp_method_exposed"]
+                ["selected_sample_ids"]),
+            40,
+        )
+        samples = validated["selected_sample_ids"]
+        labels = [f"KEY_{index:02d}" for index in range(1, 14)]
+        selection_record = {
+            "schema": paired_dispatch.MIXED_CONFIRMATION_SELECTION_SCHEMA,
+            "cohorts": validated["cohorts"],
+        }
+        assignment_samples = paired_dispatch._mixed_confirmation_sample_order(
+            samples, labels, 4, selection_record)
+        assignments = paired_dispatch.build_key_assignments(
+            assignment_samples, labels, 4, alternate_within_key=True,
+            allow_queue=True)
+        waves = paired_dispatch._partition_assignment_waves(assignments, 4)
+        self.assertEqual([len(wave) for wave in waves], [52, 48])
+        self.assertEqual(
+            sum(item["methods"][0] == "hybridpatch"
+                for item in assignments),
+            50,
+        )
+        self.assertEqual(
+            sum(item["methods"][0] == "fullrewrite"
+                for item in assignments),
+            50,
+        )
+        for cohort, expected in (
+                (set(validated["cohorts"]["method_unseen"]), 30),
+                (set(validated["cohorts"]
+                     ["historical_hp_method_exposed"]), 20)):
+            cohort_assignments = [
+                item for item in assignments if item["sample"] in cohort]
+            self.assertEqual(
+                sum(item["methods"][0] == "hybridpatch"
+                    for item in cohort_assignments),
+                expected,
+            )
+            self.assertEqual(
+                sum(item["methods"][0] == "fullrewrite"
+                    for item in cohort_assignments),
+                expected,
+            )
+        args = mock.Mock(
+            campaign_role="confirmation", smoke_dir=None, samples=samples,
+            num_round_trips=10, seed=42, slots_per_key=4,
+        )
+        args._selection_manifest_record = {
+            "selected_count": 100,
+            "schema": paired_dispatch.MIXED_CONFIRMATION_SELECTION_SCHEMA,
+            "experiment_id": paired_dispatch.MIXED_CONFIRMATION_EXPERIMENT_ID,
+        }
+        paired_dispatch._validate_campaign_grid(args)
+
     def test_preflight_require_plans_fails_on_missing_frozen_plan(self):
         with tempfile.TemporaryDirectory() as out_dir, \
                 tempfile.TemporaryDirectory() as plans_from, \
@@ -3026,6 +4887,70 @@ class IntegrationContractTests(unittest.TestCase):
             )
             self.assertEqual(found_path, path)
             self.assertEqual(found_manifest, prior)
+
+    def test_confirmation_resume_identity_ignores_wave_key_label_names(self):
+        prior = {
+            "schema": paired_dispatch.SCHEMA,
+            "experiment_id": "exp_test",
+            "run_git_commit": "1" * 40,
+            "git_tree_state": "clean",
+            "code_fingerprint": {"x": "y"},
+            "config": {
+                "campaign_role": "confirmation",
+                "samples": ["sample-a", "sample-b"],
+            },
+            "assignments": [
+                {
+                    "sample": "sample-a", "key_label": "KEY_01",
+                    "methods": ["hybridpatch", "fullrewrite"],
+                    "console_log": (
+                        "dispatch_logs/sample-a__KEY_01.console.log"),
+                },
+                {
+                    "sample": "sample-b", "key_label": "KEY_02",
+                    "methods": ["fullrewrite", "hybridpatch"],
+                    "console_log": (
+                        "dispatch_logs/sample-b__KEY_02.console.log"),
+                },
+            ],
+            "assignment_waves": [{
+                "wave_index": 1,
+                "sample_ids": ["sample-a", "sample-b"],
+                "worker_count": 2,
+                "key_worker_counts": {"KEY_01": 1, "KEY_02": 1},
+                "hybridpatch_first": 1,
+                "fullrewrite_first": 1,
+            }],
+            "task_plans": {
+                "sample-a": {"sha256": "a" * 64},
+                "sample-b": {"sha256": "b" * 64},
+            },
+        }
+        rotated = json.loads(json.dumps(prior))
+        for index, label in enumerate(("KEY_11", "KEY_12")):
+            rotated["assignments"][index]["key_label"] = label
+            rotated["assignments"][index]["console_log"] = (
+                f"dispatch_logs/sample-{chr(ord('a') + index)}__"
+                f"{label}.console.log"
+            )
+        rotated["assignment_waves"][0]["key_worker_counts"] = {
+            "KEY_11": 1, "KEY_12": 1}
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = os.path.join(out_dir, "dispatch_manifest.json")
+            run_meta.write_json_atomic(path, prior)
+            found_path, found_manifest = (
+                paired_dispatch.write_or_verify_manifest(
+                    out_dir, rotated, resume=True)
+            )
+            self.assertEqual(found_path, path)
+            self.assertEqual(found_manifest, prior)
+
+            bad_rotation = json.loads(json.dumps(rotated))
+            bad_rotation["assignment_waves"][0]["key_worker_counts"] = {
+                "KEY_11": 2}
+            with self.assertRaises(RuntimeError):
+                paired_dispatch.write_or_verify_manifest(
+                    out_dir, bad_rotation, resume=True)
 
     def test_dispatch_worker_lease_and_stale_metadata_closure(self):
         with tempfile.TemporaryDirectory() as out_dir:
@@ -4098,6 +6023,280 @@ class IntegrationContractTests(unittest.TestCase):
                     gate.assert_not_called()
                     read_keys.assert_not_called()
                     popen.assert_not_called()
+
+    def test_confirmation_known_usage_gate_enforces_limit_and_known_rows(self):
+        manifest = {
+            "schema": paired_dispatch.SCHEMA,
+            "config": {
+                "campaign_role": "confirmation",
+                "samples": ["sample"],
+                "method_set": ["hybridpatch"],
+            },
+            "analysis_policy": copy.deepcopy(
+                paired_dispatch.CONFIRMATION_ANALYSIS_POLICY),
+        }
+
+        def write_result_rows(out_dir, rows):
+            method_dir = os.path.join(out_dir, "hybridpatch")
+            os.makedirs(method_dir, exist_ok=True)
+            with open(
+                os.path.join(method_dir, "sample.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                for row in rows:
+                    handle.write(json.dumps(row) + "\n")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            write_result_rows(out_dir, [{"total_usd": 129.5}])
+            report = paired_dispatch.evaluate_confirmation_known_usage_gate(
+                out_dir, manifest, wave_index=1)
+            self.assertEqual(report["decision"], "GO")
+            self.assertEqual(report["rows_observed"], 1)
+            self.assertEqual(report["usage_rows"], 1)
+            self.assertEqual(report["known_committed_usage_usd"], 129.5)
+            reports = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "confirmation_known_usage_gate.jsonl"))
+            self.assertEqual(reports[-1]["decision"], "GO")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            write_result_rows(out_dir, [{}])
+            with self.assertRaisesRegex(
+                    RuntimeError, "committed_usage_unknown"):
+                paired_dispatch.evaluate_confirmation_known_usage_gate(
+                    out_dir, manifest, wave_index=1)
+            reports = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "confirmation_known_usage_gate.jsonl"))
+            self.assertIn(
+                "committed_usage_unknown", reports[-1]["failure_codes"])
+            stop = run_meta.read_campaign_stop_conditions(out_dir)[0]
+            self.assertEqual(
+                stop["condition"],
+                "known_committed_usage_wave_boundary_stop")
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            write_result_rows(out_dir, [{"total_usd": 131.0}])
+            with self.assertRaisesRegex(
+                    RuntimeError,
+                    "known_committed_usage_threshold_exceeded"):
+                paired_dispatch.evaluate_confirmation_known_usage_gate(
+                    out_dir, manifest, wave_index=2)
+            reports = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "confirmation_known_usage_gate.jsonl"))
+            self.assertIn(
+                "known_committed_usage_threshold_exceeded",
+                reports[-1]["failure_codes"])
+            stop = run_meta.read_campaign_stop_conditions(out_dir)[0]
+            self.assertEqual(
+                stop["condition"],
+                "known_committed_usage_wave_boundary_stop")
+
+    def test_confirmation_known_usage_no_go_blocks_resume_before_popen(self):
+        samples = [f"sample-{index:03d}" for index in range(68)]
+        labels = [f"KEY_{index:02d}" for index in range(1, 14)]
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            args = mock.Mock()
+            args.campaign_role = "confirmation"
+            args.samples = []
+            args.selection_manifest = "selection.json"
+            args.smoke_dir = None
+            args.num_round_trips = 10
+            args.seed = 42
+            args.slots_per_key = 4
+            args.keys_file = "keys.env"
+            args.key_labels = labels
+            args.resume = True
+            args.resume_reason = "retry after known usage stop"
+            args.confirm_workers_stopped = True
+            args.dry_run = False
+            args.start_timeout = 1
+            args.poll_interval = 0.01
+            args.progress_interval = 999
+            args.notes = "unit"
+            args.skip_distractor = False
+
+            method_dir = os.path.join(out_dir, "fullrewrite")
+            os.makedirs(method_dir, exist_ok=True)
+            with open(
+                os.path.join(method_dir, f"{samples[0]}.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                handle.write(json.dumps({"total_usd": 131.0}) + "\n")
+
+            selection_record = {
+                "experiment_id": os.path.basename(os.path.abspath(out_dir)),
+                "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+                "path": "selection.json",
+                "sha256": "1" * 64,
+            }
+            task_plans = {
+                sample: {
+                    "path": f"{sample}.task_plan.json",
+                    "sha256": "2" * 64,
+                    "forward_state_sequence": ["state"],
+                }
+                for sample in samples
+            }
+
+            def use_current_manifest(_out_dir, manifest, *, resume):
+                self.assertTrue(resume)
+                return os.path.join(out_dir, "dispatch_manifest.json"), manifest
+
+            def select_all(_out_dir, assignments, **_kwargs):
+                return list(assignments), {}
+
+            with mock.patch.object(
+                    paired_dispatch, "_require_formal_opencode_transport"), \
+                    mock.patch.object(
+                        paired_dispatch, "_load_confirmation_selection",
+                        return_value=(samples, selection_record)), \
+                    mock.patch.object(
+                        paired_dispatch, "read_keys",
+                        return_value={
+                            label: f"unit-key-value-{index}"
+                            for index, label in enumerate(labels)
+                        }), \
+                    mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "code_fingerprint",
+                        return_value={"unit": "test"}), \
+                    mock.patch.object(
+                        paired_dispatch, "prepare_task_plans",
+                        return_value=task_plans), \
+                    mock.patch.object(
+                        paired_dispatch, "write_or_verify_manifest",
+                        side_effect=use_current_manifest), \
+                    mock.patch.object(
+                        paired_dispatch, "inspect_campaign",
+                        return_value={
+                            "errors": [], "api_calls": 0,
+                            "preservation_violations": 0,
+                        }), \
+                    mock.patch.object(
+                        paired_dispatch,
+                        "_select_invocation_assignments",
+                        side_effect=select_all), \
+                    mock.patch.object(
+                        paired_dispatch.subprocess, "Popen") as popen:
+                self.assertEqual(
+                    paired_dispatch._launch_under_lease(args, out_dir), 1)
+                popen.assert_not_called()
+            reports = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "confirmation_known_usage_gate.jsonl"))
+            self.assertEqual(reports[-1]["phase"], "pre_wave")
+            self.assertIn(
+                "known_committed_usage_threshold_exceeded",
+                reports[-1]["failure_codes"])
+            stop = run_meta.read_campaign_stop_conditions(out_dir)[0]
+            self.assertEqual(
+                stop["condition"],
+                "known_committed_usage_wave_boundary_stop")
+
+    def test_confirmation_known_usage_blocks_all_finished_empty_resume(self):
+        samples = [f"sample-{index:03d}" for index in range(68)]
+        labels = [f"KEY_{index:02d}" for index in range(1, 14)]
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            args = mock.Mock()
+            args.campaign_role = "confirmation"
+            args.samples = []
+            args.selection_manifest = "selection.json"
+            args.smoke_dir = None
+            args.num_round_trips = 10
+            args.seed = 42
+            args.slots_per_key = 4
+            args.keys_file = "keys.env"
+            args.key_labels = labels
+            args.resume = True
+            args.resume_reason = "finish gate after crash"
+            args.confirm_workers_stopped = True
+            args.dry_run = False
+            args.start_timeout = 1
+            args.poll_interval = 0.01
+            args.progress_interval = 999
+            args.notes = "unit"
+            args.skip_distractor = False
+
+            method_dir = os.path.join(out_dir, "hybridpatch")
+            os.makedirs(method_dir, exist_ok=True)
+            with open(
+                os.path.join(method_dir, f"{samples[0]}.jsonl"),
+                "w", encoding="utf-8",
+            ) as handle:
+                handle.write(json.dumps({"total_usd": 131.0}) + "\n")
+
+            selection_record = {
+                "experiment_id": os.path.basename(os.path.abspath(out_dir)),
+                "schema": paired_dispatch.CONFIRMATION_SELECTION_SCHEMA,
+                "path": "selection.json",
+                "sha256": "1" * 64,
+            }
+            task_plans = {
+                sample: {
+                    "path": f"{sample}.task_plan.json",
+                    "sha256": "2" * 64,
+                    "forward_state_sequence": ["state"],
+                }
+                for sample in samples
+            }
+
+            def use_current_manifest(_out_dir, manifest, *, resume):
+                self.assertTrue(resume)
+                return os.path.join(out_dir, "dispatch_manifest.json"), manifest
+
+            def select_none(_out_dir, _assignments, **_kwargs):
+                return [], {}
+
+            with mock.patch.object(
+                    paired_dispatch, "_require_formal_opencode_transport"), \
+                    mock.patch.object(
+                        paired_dispatch, "_load_confirmation_selection",
+                        return_value=(samples, selection_record)), \
+                    mock.patch.object(
+                        paired_dispatch, "read_keys",
+                        return_value={
+                            label: f"unit-key-value-{index}"
+                            for index, label in enumerate(labels)
+                        }), \
+                    mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "code_fingerprint",
+                        return_value={"unit": "test"}), \
+                    mock.patch.object(
+                        paired_dispatch, "prepare_task_plans",
+                        return_value=task_plans), \
+                    mock.patch.object(
+                        paired_dispatch, "write_or_verify_manifest",
+                        side_effect=use_current_manifest), \
+                    mock.patch.object(
+                        paired_dispatch, "inspect_campaign",
+                        return_value={
+                            "errors": [], "api_calls": 0,
+                            "preservation_violations": 0,
+                        }), \
+                    mock.patch.object(
+                        paired_dispatch,
+                        "_select_invocation_assignments",
+                        side_effect=select_none), \
+                    mock.patch.object(
+                        paired_dispatch.subprocess, "Popen") as popen:
+                self.assertEqual(
+                    paired_dispatch._launch_under_lease(args, out_dir), 1)
+                popen.assert_not_called()
+            reports = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "confirmation_known_usage_gate.jsonl"))
+            self.assertEqual(reports[-1]["phase"], "pre_final")
+            self.assertIn(
+                "known_committed_usage_threshold_exceeded",
+                reports[-1]["failure_codes"])
+            stop = run_meta.read_campaign_stop_conditions(out_dir)[0]
+            self.assertEqual(
+                stop["condition"],
+                "known_committed_usage_wave_boundary_stop")
 
     def test_runner_call_kinds_are_all_adaptive(self):
         calls = []

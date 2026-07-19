@@ -706,3 +706,49 @@
 - claim boundary: all 44 unique IDs are exposed, six IDs appear in both campaigns, and generation/commit/
   concurrency differ. The pooled 50-chain and deduplicated 44-ID views are descriptive diagnostics, not
   a new independent holdout, universal-superiority or metadata-lock causal-performance claim
+
+## 2026-07-19 - Before Experiment: HP_V8 method-unseen confirmation68
+
+- experiment: `exp_20260719_hybridv8_transportv4_method_unseen_confirmation68`; plan:
+  `docs/experiment_plans/exp_20260719_hybridv8_transportv4_method_unseen_confirmation68.md`
+- exposure audit: strict any-provider-call evidence covers 234/234 because the frozen FullRewrite baseline
+  called every sample, so absolute provider-unseen is zero. Under the repository's method/developer holdout
+  policy, the 2026-07-03 live HP/FR sealed test20 is now explicitly excluded together with dev/val/unused
+  and registry-contaminated samples. Registry `clean_candidate` has 86 samples, but `python1` has a documented
+  developer content/evaluator investigation and is excluded despite the stale clean label. The resulting 85
+  have zero intersection with sealed splits, scanned HP evidence or known content-level development exposure;
+  current evaluator runtime is 234/234 runnable.
+- selection: because `N=85<100`, seed42 marginal stratification over domain, format, semantic operation/task
+  type, file count and document length selected `round(0.8×85)=68` and froze 17 reserve before any API.
+  Reserve will not be run. Top-level `data/` stays read-only; the committed selection manifest is the overlay.
+- fixed comparison: HP_V8 vs FullRewrite, MiniMax-M3, transport-v4, seed42, distractor-on, 10RT, shared
+  task plans, exact 34/34 method-first balance. One campaign uses 52+16 bounded waves so each of
+  13 Keys has at most four concurrent paired workers and HP/FR remain concurrent.
+- reporting commitment: raw scores stay 0–1; the derived report uses percent and pp, fixed n=68 RT1–RT10,
+  every-sample RT10, W/L/T, CF, mean/median/concentration, pre-registered paired inference,
+  protocol/preservation and usage/retention. `python4`/`audiosyn1` sensitivities cannot replace headline.
+- launch status: `NO-GO` until selection/evaluator/orchestration tests, full zero-API regression/replay,
+  fresh read-only plan review, clean commit, formal dry-run, frozen plan hashes and 13-Key probes pass.
+- freeze: no HP_V8 method/prompt/protocol/executor/gate, FullRewrite, transport, evaluator or scoring
+  changes; no automatic reserve run and no post-result method tuning.
+
+## 2026-07-19 - Scope Replacement Before API: HP_V8 mixed confirmation100
+
+- authorization: the user replaced the blocked absolute-unseen request with an explicit two-cohort scope:
+  60 method/developer-unseen samples plus 40 historical HP/method-exposed samples absent from the latest
+  paired10 and supplement40 campaigns. The earlier confirmation68 plan remains zero-API and unlaunched.
+- experiment: `exp_20260719_hybridv8_transportv4_mixed_confirmation100`; plan:
+  `docs/experiment_plans/exp_20260719_hybridv8_transportv4_mixed_confirmation100.md`.
+- frozen selection: seed42, 81 unseen candidates -> selected60/reserve21; 109 historical candidates after
+  excluding the recent 44 unique IDs -> selected40/reserve69. All 17 eligible direct prior-HP-API samples
+  are included in the historical 40; the other 23 come from method/development exposure. Combined
+  selected100/reserve90 and zero overlap with the latest 10+40.
+- exposure correction: source-level self-test references move `json1`, `molecule1`, `obj3d1`, and
+  `starcatalog1` out of the unseen pool. This is not absolute provider-unseen because the frozen FR
+  baseline called all 234 samples.
+- fixed comparison: HP_V8 vs FullRewrite, MiniMax-M3, transport-v4, seed42, distractor-on, 10RT,
+  shared task plans, 50/50 method-first balance, 13 physically unique Keys, max four paired workers per
+  Key, 52+48 waves. HP_V8 method/prompt/protocol/executor/gate, transport, evaluator and scoring remain
+  frozen.
+- launch status: NO-GO until selection/preflight/tests, fresh read-only plan review, clean commit,
+  formal dry-run and 13-Key probes pass. No API call was made while changing scope.

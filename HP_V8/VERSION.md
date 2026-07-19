@@ -402,6 +402,67 @@ private-key 匹配。最终 `--records-only` validator 对 13 个 published reco
 source-linked 模式因 active research docs 已前进、而冻结 record 仍保存旧 source hash，报告
 21 个预期 stale-hash errors，本轮按冻结边界披露而不改写。
 
+## 2026-07-19 method-unseen confirmation68 预注册
+
+HP_V8 方法在本轮保持冻结：`hybridpatch/8`、prompt、plan/action schema、executor、
+validation gate、partial acceptance、preservation、FullRewrite、transport-v4、evaluator 和
+scoring 均不修改。新增代码只负责零 API 选择/运行前 evaluator 检查、百分制派生报告，以及
+paired dispatcher 的 confirmation selection gate 和同一 campaign 内有界波次；不改变任何
+模型请求或编辑语义。
+
+零 API 全历史扫描得到两种必须同时披露的口径：冻结 FullRewrite baseline 已留下
+234/234 的真实 provider request/response，所以绝对 provider-unseen 为 0；沿用仓库既有
+holdout policy、把 FR-only control 与 HP/开发曝光分开后，registry contaminated、sealed
+dev/val/test/unused 和扫描到的 HP 证据先排除 148。2026-07-03 已 live-tested 的 sealed test20
+明确不能回流；registry `clean_candidate` 有 86 个，但 `python1` 已有逐文件、依赖和 evaluator
+的开发内容调查，故额外排除。余下 85 个与 sealed/HP/已知内容级开发曝光零交集，且当前
+evaluator runtime-runnable 234/234。按用户规则 `N=85<100`，seed42 对 domain、format、
+semantic operation/task type、file count 和 document length 分层，API 前固定 selected68 与 reserve17。
+selection artifact SHA-256 为
+`6c1a4331ede14adadec660a76df221be32fd855dc07e6b7ec1fc19397e4f0214`；计划见
+[`docs/experiment_plans/exp_20260719_hybridv8_transportv4_method_unseen_confirmation68.md`](../docs/experiment_plans/exp_20260719_hybridv8_transportv4_method_unseen_confirmation68.md)。
+相同输入二次重建保持上述 selection SHA 不变；selected68 fresh-subprocess 真实 runner evaluator
+preflight 为 68/68 runtime-runnable、0 failure，报告 SHA-256
+`cde8c45e26c72c7c9a4469bc23bb2718fff33f77dcdcac3fdb216bfaf6489c0f`。
+
+正式配置预注册为 MiniMax-M3、transport-v4、seed42、distractor-on、HP_V8 对
+FullRewrite、68 samples × 10RT、34/34 方法首发平衡、13 Keys 且每 Key同时最多四个 paired
+workers。dispatcher 在一个 immutable manifest 下使用 52+16 两个 wave；sample-local
+基础设施失败不终止其他样本，preservation 或共享完整性失败仍全局停止。首次 API 调用前仍
+需通过完整零 API 回归、fresh-context 计划审阅、clean commit、formal dry-run、68 个 task
+plan 冻结和 13-Key 最小完整流 probe。本节是预注册状态，不包含任何效果结论；reserve17 不在本轮
+自动运行，结果也不得用于修改 HP_V8。
+
+## 2026-07-19 mixed confirmation100 预注册
+
+用户在 API 前明确替换了 confirmation68 的范围：新正式实验固定 60 个未参与 HP 方法开发/
+HP 实验的样本，加 40 个参与过 HP 方法或开发、但未进入最近 paired10 与 supplement40 的
+样本。旧 confirmation68 仅保留为零 API 审计，不启动 provider 调用。
+
+新实验编号为 `exp_20260719_hybridv8_transportv4_mixed_confirmation100`。seed42 分层得到
+method/developer-unseen `60/81`、historical-exposed `40/109`，combined selected100/reserve90；
+与最近两轮 44 个 unique sample 零交集。历史候选中只有 17 个带最近两轮之外的直接 HP API
+证据，17 个全部纳入；其余 23 个来自方法开发/封存曝光池。source-level self-test 审计把
+`json1`、`molecule1`、`obj3d1`、`starcatalog1` 从 unseen 池移入 exposed 池。冻结 FR baseline
+已调用全部 234 样本，所以本实验明确不是 absolute provider-unseen。
+
+冻结 selection SHA-256 为
+`26da1c3d27a1eb83d70af444197afde7a7f20ade20c6e232f2d6abe605d3d654`，selector SHA-256 为
+`8ed6da89d722021438db71a9b288bc520a2dee710173094b7dd9c9a60c2cf3ec`。selected100 的
+fresh-subprocess evaluator preflight 100/100 runtime-runnable、0 failure、全部 sample tree unchanged，
+报告 SHA-256 为 `6d0fa0bc600d59597afd8f3b7274ef24129745b6ccecbbed986ae76ac90ed085`。
+用户冻结顶层 `data/`，因此不回写旧 contamination registry；首次正式 POST 后以 committed
+selection/campaign manifest 作为 60 个首次 HP exposure 的派生 overlay。
+
+配置固定为 MiniMax-M3、transport-v4、HP_V8 对 FullRewrite、seed42、distractor-on、10RT、
+50/50 方法首发、13 个物理唯一 Keys、每 Key 最多四个 paired workers、52+48 两波。HP_V8
+方法、prompt、`hybridpatch/8`、executor、validation gate、FullRewrite、transport、evaluator
+和 scoring 均不改变。计划见
+[`docs/experiment_plans/exp_20260719_hybridv8_transportv4_mixed_confirmation100.md`](../docs/experiment_plans/exp_20260719_hybridv8_transportv4_mixed_confirmation100.md)。
+零 API 验证包括 executor 72、integrated dispatcher/transport 106、transport-core 47、analyzer
+5+9、process 14、evaluator-preflight 6、selection tests、V1–V8 matrix、splitters byte-exact 与
+V8 smoke 8-row raw replay，全部 PASS；只读计划审阅 `GO WITH FIXES` 的 required fixes 已闭合。
+
 ## 运行方式
 
 ```bash
