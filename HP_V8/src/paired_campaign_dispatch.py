@@ -62,8 +62,20 @@ MAIN_SAMPLES = [
     "treebank4", "obj3d2", "filesystem3", "jobboard3", "json2",
     "satellite4", "docker6", "mathlean2", "musicsheet2", "circuit2",
 ]
+SUPPLEMENTAL_SAMPLES = [
+    "crystal6", "docker3", "earncall1", "emails5", "filesystem2",
+    "filesystem3", "fonteng1", "fonteng5", "foodmenu1", "geodata1",
+    "geodata4", "geotrack5", "geotrack6", "hamradio6", "jobboard3",
+    "json2", "json4", "landmarks2", "landmarks3", "libcatalog2",
+    "libcatalog5", "mathlean4", "mathlean5", "obj3d2", "obj3d5",
+    "quantum1", "quantum5", "robotics1", "robotics3", "satellite4",
+    "screenplay4", "screenplay5", "spreadsheet1", "spreadsheet6",
+    "subtitles2", "subtitles6", "transit1", "transit2", "treebank2",
+    "treebank4",
+]
 SMOKE_GRID_STEPS = 16
 MAIN_GRID_STEPS = 400
+SUPPLEMENTAL_GRID_STEPS = 1600
 SMOKE_PROJECTED_COST_LIMIT_USD = 50.0
 
 
@@ -263,6 +275,52 @@ def method_order(index):
     return ["fullrewrite", "hybridpatch"]
 
 
+def build_key_assignments(
+        samples, key_labels, slots_per_key, *, alternate_within_key=False):
+    """Balance sample workers over keys and alternate each key's first arm.
+
+    A sample remains one audited worker that runs both paired methods.  The
+    concurrency limit is therefore expressed in sample workers per key.  The
+    first method alternates independently within every key so a multi-slot key
+    starts HybridPatch and FullRewrite work concurrently instead of creating
+    method-wide waves.
+    """
+    labels = list(key_labels)
+    if not labels or len(labels) != len(set(labels)):
+        raise RuntimeError("--key_labels must be a non-empty unique key pool")
+    if (not _is_exact_int(slots_per_key) or slots_per_key < 1):
+        raise RuntimeError("--slots_per_key must be >= 1")
+    if len(samples) > len(labels) * slots_per_key:
+        raise RuntimeError(
+            "sample count exceeds key concurrency capacity: "
+            f"{len(samples)} > {len(labels)} x {slots_per_key}"
+        )
+    schedule = [
+        label
+        for slot_index in range(slots_per_key)
+        for label in labels
+    ][:len(samples)]
+    per_key_indexes = {label: 0 for label in labels}
+    per_key_starts = {
+        label: index % 2 for index, label in enumerate(labels)
+    }
+    assignments = []
+    for sample, label in zip(samples, schedule):
+        order_index = (
+            per_key_indexes[label] + per_key_starts[label]
+            if alternate_within_key
+            else len(assignments)
+        )
+        assignments.append({
+            "sample": sample,
+            "key_label": label,
+            "methods": method_order(order_index),
+            "console_log": f"dispatch_logs/{sample}__{label}.console.log",
+        })
+        per_key_indexes[label] += 1
+    return assignments
+
+
 def _validate_campaign_grid(args):
     if args.seed != 42:
         raise RuntimeError("formal paired campaigns require seed=42")
@@ -280,6 +338,18 @@ def _validate_campaign_grid(args):
             )
         if not getattr(args, "smoke_dir", None):
             raise RuntimeError("main requires completed --smoke_dir")
+    elif args.campaign_role == "supplemental":
+        if (list(args.samples) != SUPPLEMENTAL_SAMPLES
+                or args.num_round_trips != 10):
+            raise RuntimeError(
+                "supplemental requires the fixed 1,600-step val40 grid"
+            )
+        if getattr(args, "smoke_dir", None):
+            raise RuntimeError("supplemental cannot declare --smoke_dir")
+        if getattr(args, "slots_per_key", None) != 4:
+            raise RuntimeError(
+                "supplemental requires --slots_per_key 4"
+            )
     else:
         raise RuntimeError(f"unsupported campaign role: {args.campaign_role}")
 
@@ -680,6 +750,11 @@ def _select_invocation_assignments(out_dir, assignments, *, resume,
         if not _is_exact_int(prior_generation) or prior_generation < 0:
             raise RuntimeError(
                 f"invalid semantic generation for incomplete sample: {sample}")
+        if prior_generation >= 1:
+            raise RuntimeError(
+                "recovery generation limit exhausted; g002+ is forbidden: "
+                f"{sample} generation={prior_generation}"
+            )
         next_generation = prior_generation + 1
         selected.append(item)
         authorizations[sample] = {
@@ -2253,22 +2328,17 @@ def _launch_under_lease(args, out_dir):
         upstream_smoke_gate = evaluate_smoke_cost_gate(
             args.smoke_dir, out_dir)
     keys = dict(read_keys(os.path.abspath(args.keys_file)))
-    selected_labels = list(args.key_labels or sorted(keys)[:len(args.samples)])
-    if len(selected_labels) != len(args.samples):
-        raise RuntimeError("--key_labels must map exactly one label per sample")
-    if len(set(selected_labels)) != len(selected_labels):
-        raise RuntimeError("--key_labels contains duplicates")
+    selected_labels = list(args.key_labels or sorted(keys))
     missing_labels = [label for label in selected_labels if label not in keys]
     if missing_labels:
         raise RuntimeError(f"unknown key labels: {missing_labels}")
-    assignments = []
-    for index, (sample, label) in enumerate(zip(args.samples, selected_labels)):
-        assignments.append({
-            "sample": sample,
-            "key_label": label,
-            "methods": method_order(index),
-            "console_log": f"dispatch_logs/{sample}__{label}.console.log",
-        })
+    slots_per_key = getattr(args, "slots_per_key", 1)
+    if not _is_exact_int(slots_per_key):
+        slots_per_key = 1
+    assignments = build_key_assignments(
+        args.samples, selected_labels, slots_per_key,
+        alternate_within_key=(args.campaign_role == "supplemental"),
+    )
 
     task_plans = prepare_task_plans(
         out_dir, args.samples, args.num_round_trips, args.seed)
@@ -2678,7 +2748,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out_dir", required=True)
     parser.add_argument(
-        "--campaign_role", choices=("smoke", "main"), required=True)
+        "--campaign_role", choices=("smoke", "main", "supplemental"),
+        required=True)
     parser.add_argument(
         "--smoke_dir",
         help="required completed 2-sample smoke directory for main",
@@ -2691,6 +2762,10 @@ def main():
             os.path.join(_ROOT, "..", ".env.frkeys")),
     )
     parser.add_argument("--key_labels", nargs="+", default=None)
+    parser.add_argument(
+        "--slots_per_key", type=int, default=1,
+        help="maximum concurrently launched paired sample workers per key",
+    )
     parser.add_argument("--notes", required=True)
     parser.add_argument("--poll_interval", type=float, default=5.0)
     parser.add_argument("--progress_interval", type=float, default=30.0)
@@ -2711,13 +2786,23 @@ def main():
             )
         if args.smoke_dir:
             parser.error("--smoke_dir is only valid for main")
-    else:
+    elif args.campaign_role == "main":
         if args.samples != MAIN_SAMPLES or args.num_round_trips != 10:
             parser.error(
                 "main requires the fixed 10-sample order with 10 round trips"
             )
         if not args.smoke_dir:
             parser.error("main requires --smoke_dir")
+    else:
+        if (args.samples != SUPPLEMENTAL_SAMPLES
+                or args.num_round_trips != 10):
+            parser.error(
+                "supplemental requires the fixed val40 order with 10 round trips"
+            )
+        if args.smoke_dir:
+            parser.error("--smoke_dir is not valid for supplemental")
+        if args.slots_per_key != 4:
+            parser.error("supplemental requires --slots_per_key 4")
     if args.num_round_trips < 1:
         parser.error("--num_round_trips must be >= 1")
     if args.poll_interval < 1 or args.progress_interval < 1:

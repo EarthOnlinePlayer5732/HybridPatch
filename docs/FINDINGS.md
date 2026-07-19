@@ -642,3 +642,42 @@ transport-v2 把所有异常压成“最多 3 个总 attempt”，无法回答�
 样本全部同条件重跑得到的无偏方法效应。回答同 transport-v3 方法效应时仍使用
 `Δ+0.008`。完整工件见 `Baseline/FR+Official/README.md` 与
 `val40_comparison.md`；构建入口为 `Baseline/build_fr_plus_official.py`。
+
+## 233. HP_V8 supplement40：metadata 锁是高并发本地故障；完整诊断中 HP 的长链优势扩大但高度异质
+
+### 现象与修复
+
+40-worker 首次启动在零结果提交前因 `portalocker.AlreadyLocked` 全局停止。原子写出的
+`campaign_stop.json` 本可无锁读取，但旧实现让每个 semantic call 的只读检查也争抢全局
+metadata writer lock；13 Keys×4 worker 使这条非方法路径成为系统瓶颈。唯一修复是无锁读取
+stop latch、真正 writer 使用有界重试锁。40 进程故障注入和完整零 API replay 通过后，新
+campaign 保持相同 task plans、模型、方法、prompt、protocol、executor、gate、evaluator、
+scoring 与 transport-v4 语义，从新 clean commit 重跑；旧启动 0 结果且不拼接。
+
+### 完整性与结果
+
+`exp_20260719_hybridv8_transportv4_supplement40_lockfix` 完成 1,600/1,600 行和 80 个 RT10
+checkpoint，独立复算 PASS 800/800 backward，preservation 0/797 applicable + 3 N/A。
+12 次 generation-started incomplete stream 均在同一 semantic call 的第二 response slot
+恢复，故没有 infrastructure-incomplete sample。
+
+固定 n=40 的 paired delta 从 RT1 `+0.051086` 增至 RT10 `+0.263959`；RT10 HP/FR 为
+`0.837339/0.573381`，但 sample SD=`0.402060`，且仍有 10 个 HP losses 与 20 个 HP
+CriticalFailure。六条大胜贡献约一半 RT10 总 delta，说明主要现象是部分任务上 FR 长链更快
+坍塌，不是 HP 在所有样本稳定保持。六个与 prior10 相同 task-plan 的 ID 也出现明显跨链
+波动，因此 50-chain pooled 和去重 44-ID 都只能是描述性视图。
+
+### 协议与成本边界
+
+HP route bounded/local/bulk/DSL=`579/148/54/16`；repair attempted/used/success=`104/88/78`；
+final protocol failure=`20/800`。soft burden `49/800` 与 prior10 的比例近似，且始终非阻塞，
+不能把得分差异归因于 burden 阈值。已知 HP/FR usage 为 33.062M/25.796M tokens，费用
+USD 26.581893/21.104516；12 个未知 final usage attempt 使账单只能给区间。
+
+### 结论边界
+
+所有 44 个唯一 ID 都已曝光，两 campaign 的 commit、日期、并发与模型随机链不同。允许的
+主张是：完整固定诊断范围内 HP 的 RT10 均值较高，且 applicable preservation violations=0；
+不允许外推未见集、普遍优越、统计显著性，也不把 score 变化因果归于 metadata lockfix。
+完整 RT1–RT10 表与脱敏证据见
+`HP_V8/analysis/exp_20260719_hybridv8_transportv4_supplement40_lockfix.md`。

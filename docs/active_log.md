@@ -625,3 +625,84 @@
   `245001818ba8afaa8974f6b48ff6b7f42ac13a17fdb6c030dcd1f2b09f8522f1`; generated record
   snapshot SHA-256 `d86e944e5ac5cd225c21670626a288861f958d3ed24026635dda5756ca9d5f53`;
   archive credential scan found zero exact Key, Authorization, Cookie or private-key matches
+
+## 2026-07-19 - Before Experiment: HP_V8 transport-v4 supplemental val40 RT10
+
+- experiment: `exp_20260719_hybridv8_transportv4_supplement40`; plan:
+  `docs/experiment_plans/exp_20260719_hybridv8_transportv4_supplement40.md`
+- scope: V6 val40 的同一 40 样本集合，采用 record canonical sorted order
+  (`val20 + unused_reserve20`)，40 exposed samples,
+  MiniMax-M3, HP_V8 vs FullRewrite, seed42, distractor-on, 10RT, transport
+  `opencode_anthropic_sdk/4`; diagnostic-only
+- grouping: raw output remains a new isolated campaign. After completion it will be reported beside the
+  completed snapshotfix paired10 and in a labeled combined supplemental view; six overlapping sample IDs
+  are disclosed and never silently treated as 50 independent sample identities
+- concurrency: 13 labeled Keys, each first tested at 4-way probe concurrency; formal dispatcher launches
+  one audited paired worker per sample, at most 4 workers per Key, and alternates the first method within
+  each Key so HP and FR run concurrently rather than as method-wide waves
+- reporting commitment: RT1 through RT10 HP, FR and paired delta tables are mandatory for supplement40,
+  prior10 and combined views; RT10-only or overall-average-only reporting is insufficient
+- launch gate: no formal API campaign until zero-API regression, runtime evaluator preflight, fresh-context
+  read-only plan review, clean commit, formal dry-run, exact task-plan check and 13-Key x4 probe all pass
+- plan review: fresh-context read-only review first returned GO WITH FIXES; after correcting V6 set/order
+  wording, making `--require_plans` fail before any probe, freezing fixed complete-chain RT denominators,
+  adding identity/log/budget fields and hard-rejecting `g002+` with regression coverage, final verdict is GO
+- stop/recovery: preservation or shared integrity failures stop globally; strictly evidenced provider
+  exhaustion isolates only that sample. Resume launches only incomplete samples from the first uncommitted
+  RT and never reissues committed forward/backward steps
+
+## 2026-07-19 - Failed Launch and Replacement: supplemental val40 metadata-lock contention
+
+- failed campaign: `exp_20260719_hybridv8_transportv4_supplement40`; clean commit
+  `139fbdcaa13958418d0027405821a19fb6c8b66a`; all preflight gates and 13-Key x4 probes passed
+- stop evidence: after the 40-worker barrier, the first terminal API row was a local
+  `runner_exception: AlreadyLocked`; the strict inspector correctly stopped all workers. There were zero
+  result rows, zero checkpoints and zero response commits. The attempt ledger retained 36 semantic
+  requests, 36 attempt starts and 34 generation-progress events, so provider-side cost is unknown rather
+  than zero
+- root cause: every semantic call's atomic stop-latch read unnecessarily acquired the shared metadata
+  writer lock. Windows high concurrency surfaced normal lock contention as `portalocker.AlreadyLocked`
+- replacement: preserve the failed directory as `failed_informative`; do not resume or splice it. Use new
+  plan `docs/experiment_plans/exp_20260719_hybridv8_transportv4_supplement40_lockfix.md`, new out_dir and
+  new clean commit
+- unique fix: lock-free reads of atomically published `campaign_stop.json`; true metadata writers use a
+  bounded retrying lock. Method protocol, prompts, executor, gate, FullRewrite, evaluator, scoring,
+  transport-v4 request/retry semantics, samples and task plans remain unchanged
+- relaunch gate: complete zero-API regression, fresh read-only plan review, new clean commit and formal
+  dry-run, then revalidate all 13 Keys at 4-way concurrency before any formal provider POST
+
+## 2026-07-19 - After Experiment: supplement40 lockfix complete
+
+- identity: `exp_20260719_hybridv8_transportv4_supplement40_lockfix`; clean commit
+  `effad42675b6d112c62e42d695617166e27f989c`; MiniMax-M3; transport
+  `opencode_anthropic_sdk/4`; seed42; distractor-on; fixed V6 val40 40-sample scope
+- launch: 13/13 Keys passed four-way liveness probes; dispatcher kept at most four workers per Key and
+  balanced HP-first/FR-first 20/20, so HP and FullRewrite ran concurrently rather than in method waves
+- completeness: 1,600/1,600 unique rows, 80/80 RT10 checkpoints, 40/40 latest outcomes and metadata
+  `finished`; 800/800 backward raw responses independently recomputed PASS; strict inspector
+  `errors=[]`; no duplicate, half-committed or unmapped evidence
+- exact trajectory: fixed-n=40 HP/FR at RT1 `0.962799/0.911714`, widening to RT10
+  `0.837339/0.573381` (delta `+0.263959`, sample SD `0.402060`, W/L/T `26/10/4`);
+  CriticalFailure@0.10 `20/360` vs `27/360`. Full RT1–RT10 tables for supplement40, prior10,
+  pooled 50 chains and deduplicated 44 IDs are in
+  `HP_V8/analysis/exp_20260719_hybridv8_transportv4_supplement40_lockfix.md`
+- HP telemetry: routes bounded/local/bulk/DSL `579/148/54/16` plus three no-route kept-context steps;
+  repair attempted/used/success `104/88/78`; final protocol failure `20/800`; soft burden `49/800`
+  and non-blocking; preservation `0` across 797 applicable steps plus three explicit N/A
+- transport/model: 12 incomplete-stream attempts lacked final usage and all recovered within the second
+  g000 response slot; terminal infrastructure failures 0. Ten complete thinking-only max-tokens primary
+  responses (HP 3, FR 7) remain model-content failures under the frozen policy
+- usage: known HP 33,061,891 tokens / USD 26.581893; FR 25,796,080 / USD 21.104516; total
+  58,857,971 / USD 47.686409. A deliberately pessimistic bound for the 12 unknown-usage attempts gives
+  USD 49.948204; failed-launch/probe reserve yields campaign-family upper USD 56.548204 < USD 75
+- review/retention: official prepare, two independent read-only reviews, generated-state finalize and
+  both validators PASS. Global generated records were restored to original bytes to preserve frozen
+  V3–V7/Baseline/transport records; the generated HP_V8 record is privately archived. Final raw archive
+  SHA-256 `79d5573ea606544559c68f6630df1c1f90de4679642bcec5f038f9e0e28b9c10`; 13-Key exact scan found
+  zero Key, Authorization, Cookie or private-key matches
+- final validation: `validate_experiment_records.py --records-only` PASS for all 13 published records.
+  The source-linked mode reports 21 expected stale-hash errors after active research docs changed; those
+  hashes are embedded in frozen V3–V7/Baseline/transport records and are disclosed rather than rewritten
+- claim boundary: all 44 unique IDs are exposed, six IDs appear in both campaigns, and generation/commit/
+  concurrency differ. The pooled 50-chain and deduplicated 44-ID views are descriptive diagnostics, not
+  a new independent holdout, universal-superiority or metadata-lock causal-performance claim

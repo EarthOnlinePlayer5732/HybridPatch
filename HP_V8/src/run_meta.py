@@ -113,9 +113,16 @@ def _read_campaign_stop_unlocked(out_dir):
 
 
 def read_campaign_stop_conditions(out_dir):
-    """Return the durable campaign-wide stop latch, failing closed on damage."""
-    with _campaign_metadata_lock(out_dir):
-        return _read_campaign_stop_unlocked(out_dir)
+    """Return the durable campaign-wide stop latch, failing closed on damage.
+
+    The latch writer publishes with ``os.replace`` while holding the campaign
+    metadata lock.  Readers therefore see either the old complete file or the
+    new complete file and do not need to join the exclusive writer lock.  This
+    matters because every provider call checks the latch twice; taking the
+    exclusive metadata lock for those reads can turn ordinary multi-worker
+    contention into ``portalocker.AlreadyLocked`` on Windows.
+    """
+    return _read_campaign_stop_unlocked(out_dir)
 
 
 def record_campaign_stop_condition(out_dir, condition, **details):
@@ -2477,12 +2484,20 @@ def _campaign_metadata_lock(out_dir):
     """Serialize campaign identity, shared timestamps, and invocation status."""
     os.makedirs(out_dir, exist_ok=True)
     lock_path = os.path.join(out_dir, ".run_metadata.lock")
-    with open(lock_path, "a+", encoding="utf-8") as lock_file:
-        portalocker.lock(lock_file, portalocker.LOCK_EX)
-        try:
-            yield os.path.join(out_dir, "run_metadata.jsonl")
-        finally:
-            portalocker.unlock(lock_file)
+    # ``portalocker.lock(..., LOCK_EX)`` can fail immediately with
+    # ``AlreadyLocked`` under normal cross-process contention on Windows.
+    # ``portalocker.Lock`` uses non-blocking attempts plus a bounded retry
+    # interval, so genuine metadata writers serialize instead of surfacing a
+    # local infrastructure error to the model-call recorder.
+    with portalocker.Lock(
+        lock_path,
+        mode="a+",
+        timeout=60,
+        check_interval=0.05,
+        flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+        encoding="utf-8",
+    ):
+        yield os.path.join(out_dir, "run_metadata.jsonl")
 
 
 def _existing_experiment_payload(out_dir):

@@ -335,6 +335,36 @@ verifier PASS 200/200，strict inspector 无错误，preservation 0/199 applicab
 该结果只作 diagnostic，不证明 HP 普遍优于 FR，也不把随机 provider 得分变化归因于
 snapshot fix。恢复机制、raw/ledger hash 和私有归档见 HP_V8 脱敏诊断报告与版本卡。
 
+### 5.13 HP_V8 transport-v4 supplement40（2026-07-19）——固定 val40 完整补充诊断
+
+首次 40-worker 启动在零结果提交前暴露 Windows metadata writer lock contention，旧目录以
+`failed_informative` 原样保留。唯一 lockfix 将原子 stop-latch 读取改为无锁，并让真正 writer
+使用有界重试锁；方法协议、prompt、executor、gate、FullRewrite、evaluator、scoring、
+transport-v4 和 task plans 均未改变。新 clean commit `effad426...` 完成 13-Key×4 probe 后，
+40 个配对 worker 同时运行 HP/FR，HP-first/FR-first 各 20。
+
+最终 1,600/1,600 唯一结果行、80 个 RT10 checkpoint、40 个 latest finished；raw 独立复算
+PASS 800/800 backward，strict inspector `errors=[]`，preservation 0/797 applicable + 3 N/A。
+12 个 generation-started incomplete streams 全在同一 semantic call 的第二 response slot 恢复，
+无 terminal infrastructure-incomplete sample。
+
+固定 n=40 的 HP−FR 差从 RT1 `+0.051086` 扩至 RT10 `+0.263959`；RT10 HP/FR 为
+`0.837339/0.573381`，sample SD `0.402060`，W/L/T `26/10/4`，CF@0.10 为
+`20/360` vs `27/360`。与 prior10 放在同一补充组时，50 条完整 campaign chain 的 RT10
+为 `0.818907/0.597876`（delta `+0.221032`）；六个重叠 ID 内先平均后，44-ID 视图为
+`0.819838/0.585641`（delta `+0.234197`）。四套固定 n 的 RT1–RT10 全表见 HP_V8
+脱敏报告；50-chain 不是 50 个独立身份。
+
+HP routes bounded/local/bulk/DSL=`579/148/54/16`，repair attempted/used/success=`104/88/78`，
+final protocol failure `20/800`，soft burden `49/800` 且全部继续执行。已知 usage：HP
+33.062M tokens / USD 26.581893，FR 25.796M / USD 21.104516；12 个未知 final usage
+attempt 的保守附加上界为 USD 2.261795，故本轮 archive-based 上界 USD 49.948204。
+
+所有 44 个 ID 都已曝光，差值异质且两个 campaign 的 commit、日期、并发和生成随机性不同；
+该结果只支持完整诊断观察，不支持 holdout 泛化、统计显著性、普遍优越或 lockfix 因果得分
+主张。生成态 finalize/validator PASS 后，全球 catalog/旧 records 恢复原字节；新 HP_V8
+record 与完整 raw 分别私有归档。
+
 ---
 
 ## 6. 追加约定（怎么继续写这份文档）

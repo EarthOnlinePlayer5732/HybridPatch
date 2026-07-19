@@ -156,7 +156,8 @@ def copy_plans(samples, plans_from, out_dir):
     return copied, missing
 
 
-def preflight(samples, keys, out_dir, plans_from, skip_probe=False, probe_concurrency=1):
+def preflight(samples, keys, out_dir, plans_from, skip_probe=False,
+              probe_concurrency=1, require_plans=False):
     ok = True
 
     # 1. domain evaluator import check (zero API; heavy deps surface here)
@@ -178,6 +179,12 @@ def preflight(samples, keys, out_dir, plans_from, skip_probe=False, probe_concur
     copied, missing = copy_plans(samples, plans_from, out_dir)
     print(f"[preflight] frozen task plans from {plans_from}: {copied} new, "
           f"{len(missing)} missing ({missing[:5] if missing else 'none'})")
+    if missing and require_plans:
+        print(
+            "[preflight] FAIL: --require_plans missing frozen plans for "
+            + ", ".join(missing)
+        )
+        return False
 
     # 3. per-key liveness/concurrency probe (tiny calls, adaptive thinking)
     if skip_probe:
@@ -335,7 +342,7 @@ def main():
     if args.preflight:
         sys.exit(0 if preflight(
             samples, keys, out_dir, args.plans_from,
-            args.skip_probe, args.probe_concurrency
+            args.skip_probe, args.probe_concurrency, args.require_plans
         ) else 1)
 
     copied, missing = copy_plans(samples, args.plans_from, out_dir)

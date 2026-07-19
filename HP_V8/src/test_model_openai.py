@@ -23,6 +23,7 @@ for path in (ROOT, HERE):
         sys.path.insert(0, path)
 
 import experiment_runner
+import fr_baseline_dispatch
 import model_openai
 import paired_campaign_dispatch as paired_dispatch
 import probe_fr_keys
@@ -1425,6 +1426,40 @@ class IntegrationContractTests(unittest.TestCase):
                 if item["sample"] == "sample-b":
                     provider_post(item["sample"])
             provider_post.assert_not_called()
+
+    def test_resume_rejects_g002_after_g001_exhaustion(self):
+        assignments = [{
+            "sample": "sample-a",
+            "methods": ["hybridpatch", "fullrewrite"],
+        }]
+        evidence = {
+            "generation_index": 1,
+            "semantic_call_id": (
+                "hybridpatch/sample-a/rt01/forward/"
+                "hybridpatch_primary/g001"
+            ),
+            "semantic_root_id": (
+                "hybridpatch/sample-a/rt01/forward/"
+                "hybridpatch_primary"
+            ),
+            "request_fingerprint": "fingerprint",
+            "next_attempt_index": 4,
+            "invocation_id": "invocation",
+        }
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_latest_sample_outcomes",
+                    return_value={
+                        "sample-a": {"status": "infrastructure_incomplete"}
+                    }), \
+                mock.patch.object(
+                    paired_dispatch, "_verified_infrastructure_incomplete",
+                    return_value=evidence):
+            with self.assertRaisesRegex(
+                    RuntimeError, "g002\\+ is forbidden"):
+                paired_dispatch._select_invocation_assignments(
+                    out_dir, assignments, resume=True,
+                    target_round_trips=10)
 
     def test_paired_dispatch_preflight_allows_missing_new_checkpoints(self):
         with tempfile.TemporaryDirectory() as out_dir:
@@ -2834,6 +2869,62 @@ class IntegrationContractTests(unittest.TestCase):
                     for error in inspection["errors"]
                 ))
 
+    def test_supplemental_key_pool_caps_four_and_mixes_method_starts(self):
+        labels = [f"KEY_{index:02d}" for index in range(1, 14)]
+        assignments = paired_dispatch.build_key_assignments(
+            paired_dispatch.SUPPLEMENTAL_SAMPLES, labels, 4,
+            alternate_within_key=True)
+        self.assertEqual(len(assignments), 40)
+        by_key = {label: [] for label in labels}
+        for item in assignments:
+            by_key[item["key_label"]].append(item)
+        self.assertEqual(
+            sorted(len(items) for items in by_key.values()),
+            [3] * 12 + [4],
+        )
+        for items in by_key.values():
+            self.assertLessEqual(len(items), 4)
+            self.assertEqual(
+                {item["methods"][0] for item in items},
+                {"hybridpatch", "fullrewrite"},
+            )
+        self.assertEqual(
+            sum(item["methods"][0] == "hybridpatch"
+                for item in assignments), 20)
+        self.assertEqual(
+            sum(item["methods"][0] == "fullrewrite"
+                for item in assignments), 20)
+
+        args = mock.Mock(
+            campaign_role="supplemental", smoke_dir=None,
+            samples=paired_dispatch.SUPPLEMENTAL_SAMPLES,
+            num_round_trips=10, seed=42, slots_per_key=4,
+        )
+        paired_dispatch._validate_campaign_grid(args)
+        args.slots_per_key = 3
+        with self.assertRaisesRegex(RuntimeError, "slots_per_key 4"):
+            paired_dispatch._validate_campaign_grid(args)
+
+        legacy = paired_dispatch.build_key_assignments(
+            paired_dispatch.MAIN_SAMPLES, labels[:10], 1)
+        self.assertEqual(
+            sum(item["methods"][0] == "hybridpatch" for item in legacy), 5)
+        self.assertEqual(
+            sum(item["methods"][0] == "fullrewrite" for item in legacy), 5)
+
+    def test_preflight_require_plans_fails_on_missing_frozen_plan(self):
+        with tempfile.TemporaryDirectory() as out_dir, \
+                tempfile.TemporaryDirectory() as plans_from, \
+                mock.patch.object(
+                    fr_baseline_dispatch.subprocess, "Popen") as popen:
+            passed = fr_baseline_dispatch.preflight(
+                ["treebank4"], [("KEY_01", "redacted")],
+                out_dir, plans_from, skip_probe=False,
+                require_plans=True,
+            )
+        self.assertFalse(passed)
+        popen.assert_not_called()
+
     def test_paired_dispatch_uses_exclusive_out_dir_lease(self):
         with tempfile.TemporaryDirectory() as out_dir:
             lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
@@ -2845,6 +2936,63 @@ class IntegrationContractTests(unittest.TestCase):
                         paired_dispatch.launch(mock.Mock(out_dir=out_dir))
                 finally:
                     portalocker.unlock(lease)
+
+    def test_campaign_stop_read_does_not_contend_on_metadata_writer_lock(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            lock_path = os.path.join(out_dir, ".run_metadata.lock")
+            with open(lock_path, "a+", encoding="utf-8") as writer:
+                portalocker.lock(
+                    writer, portalocker.LOCK_EX | portalocker.LOCK_NB)
+                try:
+                    errors = []
+                    results = []
+
+                    def read_latch():
+                        try:
+                            results.append(
+                                run_meta.read_campaign_stop_conditions(out_dir))
+                        except BaseException as exc:
+                            errors.append(exc)
+
+                    readers = [
+                        threading.Thread(target=read_latch, daemon=True)
+                        for _ in range(40)
+                    ]
+                    for reader in readers:
+                        reader.start()
+                    for reader in readers:
+                        reader.join(2)
+                finally:
+                    portalocker.unlock(writer)
+            self.assertTrue(all(not reader.is_alive() for reader in readers))
+            self.assertEqual(errors, [])
+            self.assertEqual(results, [[]] * 40)
+
+    def test_campaign_metadata_writer_waits_for_existing_writer(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            lock_path = os.path.join(out_dir, ".run_metadata.lock")
+            entered = threading.Event()
+            errors = []
+            with open(lock_path, "a+", encoding="utf-8") as first_writer:
+                portalocker.lock(
+                    first_writer, portalocker.LOCK_EX | portalocker.LOCK_NB)
+
+                def acquire_after_contention():
+                    try:
+                        with run_meta._campaign_metadata_lock(out_dir):
+                            entered.set()
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                contender = threading.Thread(
+                    target=acquire_after_contention, daemon=True)
+                contender.start()
+                self.assertFalse(entered.wait(0.15))
+                portalocker.unlock(first_writer)
+                contender.join(3)
+            self.assertFalse(contender.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(entered.is_set())
 
     def test_paired_dispatch_resume_allows_only_audited_key_rotation(self):
         prior = {

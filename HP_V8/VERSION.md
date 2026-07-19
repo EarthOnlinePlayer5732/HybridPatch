@@ -364,6 +364,44 @@ backward RS，均 PASS；observed protocol revisions 仅 `hybridpatch/8`；`git 
 一个当前 HEAD 已存在的历史错配：冻结 transport-v2 record 保存的是 5,184-byte 旧 transport
 log 哈希，而 HEAD 的同一日志已演进为 7,583 bytes。为不改写冻结记录，本轮只披露，不修补。
 
+## 2026-07-19 supplement40 lockfix 完整补充诊断
+
+首次 `exp_20260719_hybridv8_transportv4_supplement40` 在 40-worker 启动后因本地
+`portalocker.AlreadyLocked` 严格停止，且尚无 result、checkpoint 或 response commit。
+该目录保留为 `failed_informative`。新提交
+`effad42675b6d112c62e42d695617166e27f989c` 只把原子 stop-latch 读取改为无锁，并为
+metadata writer 使用 60 秒有界重试锁；`hybridpatch/8`、prompt、executor、gate、
+FullRewrite、evaluator、scoring 和 transport-v4 请求/重试语义不变。
+
+替代 campaign `exp_20260719_hybridv8_transportv4_supplement40_lockfix` 在 13 个存活 Key
+上按每 Key 最多四 worker 运行固定 V6 val40 的 40 个已曝光样本，HP-first/FR-first 各 20，
+MiniMax-M3、seed42、distractor-on、10RT。最终 1,600/1,600 result rows、80/80 RT10
+checkpoints、40/40 latest outcomes finished；raw 独立复算 PASS 800/800 backward，strict
+inspector `errors=[]`。12 次 incomplete stream 均在 g000 第二 response slot 恢复，terminal
+infrastructure failure 为 0；preservation 为 797 个适用步骤 0 violations + 3 个明确 N/A。
+
+固定 n=40 的 RT1 HP/FR=`0.962799/0.911714`，RT10=`0.837339/0.573381`，paired delta
+`+0.263959`，sample SD `0.402060`，W/L/T=`26/10/4`，CF@0.10=`20/360` vs
+`27/360`。HP routes bounded/local/bulk/DSL=`579/148/54/16`；repair attempted/used/success
+=`104/88/78`；final protocol failure=`20/800`；soft burden=`49/800`，仍只作 telemetry。
+完整 RT1–RT10 以及 prior10、50-chain、去重 44-ID 表见
+[`analysis/exp_20260719_hybridv8_transportv4_supplement40_lockfix.md`](analysis/exp_20260719_hybridv8_transportv4_supplement40_lockfix.md)。
+
+已知 usage 为 HP 33,061,891 tokens / USD 26.581893、FR 25,796,080 / USD 21.104516；
+12 个缺 final usage attempt 的保守附加上界 USD 2.261795，因此本轮 archive-based 上界
+USD 49.948204。所有 44 个唯一 ID 都已曝光，六个 ID 跨 campaign 重复；这些表只作
+diagnostic，不支持 holdout 泛化、普遍优越、统计显著性或 lockfix 因果得分结论。
+
+official prepare、两项独立只读审阅、生成态 finalize 和两个 validator 均 PASS。为维持冻结
+边界，catalog/HP_V3–HP_V7/Baseline/transport generated records 随后恢复原字节；生成 record
+私有快照 SHA-256 为
+`803d78492e0aa9e308b8263c38668800a5ca7c99dd553aa3350a60b0ef2588d0`。最终完整 raw archive
+SHA-256 为 `79d5573ea606544559c68f6630df1c1f90de4679642bcec5f038f9e0e28b9c10`；13-Key
+exact scan 在 15,264 文件、951,396,234 bytes 中发现零 Key、Authorization、Cookie 或
+private-key 匹配。最终 `--records-only` validator 对 13 个 published records PASS；完整
+source-linked 模式因 active research docs 已前进、而冻结 record 仍保存旧 source hash，报告
+21 个预期 stale-hash errors，本轮按冻结边界披露而不改写。
+
 ## 运行方式
 
 ```bash
