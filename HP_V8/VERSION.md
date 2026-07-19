@@ -477,6 +477,8 @@ mixed confirmation100 的第二波在 `weather5` 运行时命中 `git_identity_d
 evaluator-temp ignore/诊断修复的固定 changed-file 集合，且 code fingerprint 只能改变
 `run_meta.py`；任务计划、方法配置和已提交 RT 仍按旧 manifest 校验。任何额外源码变化、
 stop/manifest 摘要变化或 dirty tree 都拒绝恢复。
+并行恢复允许 metadata ledger 同时保留已验证的旧身份记录和带同一 authorization 的新身份记录；
+不属于这两个精确身份的第三种记录仍 fail closed。
 
 该修复不改变 HybridPatch/FullRewrite 请求、prompt、协议、执行器、gate、transport、evaluator
 或 scoring。零 API 回归：新增两项 Git identity 测试 PASS；executor 72/72、splitters、

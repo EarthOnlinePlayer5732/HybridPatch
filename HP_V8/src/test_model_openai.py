@@ -6952,11 +6952,15 @@ class IntegrationContractTests(unittest.TestCase):
                     run_meta, "read_campaign_recovery_authorization",
                     return_value=authorization):
                 recovered = run_meta.append_run_metadata(out_dir, **kwargs)
+                second_recovered = run_meta.append_run_metadata(
+                    out_dir, **kwargs)
             boundary = recovered["campaign_recovery_authorization"]
             self.assertEqual(boundary["authorization_id"], "test-recovery")
             self.assertEqual(boundary["prior_git_commit"], prior_commit)
             self.assertEqual(boundary["recovery_git_commit"], recovery_commit)
             self.assertEqual(recovered["run_git_commit"], recovery_commit)
+            self.assertEqual(
+                second_recovered["run_git_commit"], recovery_commit)
 
     def test_git_identity_ignores_evaluator_tmp_but_not_other_untracked_files(self):
         root_ignore = pathlib.Path(ROOT).parent / ".gitignore"

@@ -2965,7 +2965,35 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             "git_tree_state": git_tree_state,
             "code_fingerprint": fp,
         }
+        recovery_identity_history_valid = bool(
+            recovery_authorization
+            and prior
+            and all(
+                (
+                    record.get("run_git_commit")
+                    == recovery_authorization.get("prior_git_commit")
+                    and record.get("git_tree_state") == "clean"
+                    and record.get("code_fingerprint")
+                    == recovery_authorization.get("prior_code_fingerprint")
+                )
+                or (
+                    record.get("run_git_commit")
+                    == recovery_authorization.get("recovery_git_commit")
+                    and record.get("git_tree_state") == "clean"
+                    and record.get("code_fingerprint")
+                    == recovery_authorization.get("recovery_code_fingerprint")
+                    and isinstance(
+                        record.get("campaign_recovery_authorization"), dict)
+                    and record["campaign_recovery_authorization"].get(
+                        "authorization_id")
+                    == recovery_authorization.get("authorization_id")
+                )
+                for record in prior
+            )
+        )
         for key, current in identity_fields.items():
+            if recovery_identity_history_valid:
+                continue
             previous = _one_prior_value(prior, key)
             if prior and previous is None:
                 raise RuntimeError(
