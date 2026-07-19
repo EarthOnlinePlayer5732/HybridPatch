@@ -56,6 +56,19 @@ API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
 SAMPLE_OUTCOME_SCHEMA = "anchorpatch.sample_outcome/1"
+CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA = (
+    "anchorpatch.campaign_recovery_authorization/1"
+)
+CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME = (
+    "campaign_recovery_authorization.json"
+)
+_GIT_IDENTITY_RECOVERY_CHANGED_PATHS = {
+    ".gitignore",
+    "HP_V8/VERSION.md",
+    "HP_V8/src/paired_campaign_dispatch.py",
+    "HP_V8/src/run_meta.py",
+    "HP_V8/src/test_model_openai.py",
+}
 
 
 class CampaignStoppedError(RuntimeError):
@@ -240,7 +253,7 @@ def _enforce_pre_call_campaign_guards(out_dir, sample_id):
     expected_commit = os.environ.get("ANCHORPATCH_EXPECTED_GIT_COMMIT")
     expected_tree = os.environ.get("ANCHORPATCH_EXPECTED_GIT_TREE_STATE")
     if expected_commit or expected_tree:
-        current_commit, current_tree = _git_identity()
+        current_commit, current_tree, current_status = _git_identity_details()
         if ((expected_commit and current_commit != expected_commit)
                 or (expected_tree and current_tree != expected_tree)):
             record_campaign_stop_condition(
@@ -251,6 +264,7 @@ def _enforce_pre_call_campaign_guards(out_dir, sample_id):
                 actual_commit=current_commit,
                 expected_tree_state=expected_tree,
                 actual_tree_state=current_tree,
+                git_status_porcelain=current_status,
             )
             _raise_if_campaign_stopped(out_dir)
     expected_plan = os.environ.get(
@@ -2441,8 +2455,8 @@ def _timezone_name(value):
     return value.tzname() or value.strftime("%z") or "local"
 
 
-def _git_identity():
-    """Return the immutable Git identity required for every V8+ campaign."""
+def _git_identity_details():
+    """Return commit, tree state, and the exact porcelain used for the state."""
     try:
         commit = subprocess.run(
             ["git", "-C", _HERE, "rev-parse", "HEAD"],
@@ -2456,7 +2470,140 @@ def _git_identity():
         raise RuntimeError("cannot determine run Git identity") from exc
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
         raise RuntimeError(f"invalid Git commit identity: {commit!r}")
-    return commit, ("dirty" if status.strip() else "clean")
+    return commit, ("dirty" if status.strip() else "clean"), status
+
+
+def _git_identity():
+    """Return the immutable Git identity required for every V8+ campaign."""
+    commit, tree_state, _status = _git_identity_details()
+    return commit, tree_state
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_campaign_recovery_authorization(out_dir):
+    """Validate the one narrow, append-only Git-identity recovery boundary.
+
+    The authorization never changes the campaign task/configuration identity.
+    It only permits a stopped campaign to continue after the evaluator-temp
+    ignore/diagnostic hotfix, while preserving the original stop byte-for-byte
+    under ``recovery_history`` and recording both Git identities.
+    """
+    out_dir = os.path.abspath(out_dir)
+    path = os.path.join(out_dir, CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("invalid campaign recovery authorization") from exc
+    if (not isinstance(record, dict)
+            or record.get("schema") != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA
+            or not isinstance(record.get("authorization_id"), str)
+            or not record.get("authorization_id")):
+        raise RuntimeError("invalid campaign recovery authorization")
+
+    manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+    if (not os.path.isfile(manifest_path)
+            or _sha256_file(manifest_path)
+            != record.get("dispatch_manifest_sha256")):
+        raise RuntimeError("campaign recovery manifest digest mismatch")
+    try:
+        with open(manifest_path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("campaign recovery manifest is invalid") from exc
+    if (manifest.get("run_git_commit") != record.get("prior_git_commit")
+            or manifest.get("git_tree_state") != "clean"
+            or manifest.get("code_fingerprint")
+            != record.get("prior_code_fingerprint")):
+        raise RuntimeError("campaign recovery prior identity mismatch")
+
+    archived_relative = record.get("archived_stop_path")
+    if not isinstance(archived_relative, str) or not archived_relative:
+        raise RuntimeError("campaign recovery archived stop path is invalid")
+    archived_path = os.path.realpath(os.path.join(out_dir, archived_relative))
+    if (os.path.commonpath([out_dir, archived_path]) != out_dir
+            or not os.path.isfile(archived_path)
+            or _sha256_file(archived_path)
+            != record.get("archived_stop_sha256")):
+        raise RuntimeError("campaign recovery archived stop digest mismatch")
+    try:
+        with open(archived_path, encoding="utf-8") as handle:
+            archived_stop = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("campaign recovery archived stop is invalid") from exc
+    prior_commit = record.get("prior_git_commit")
+    if (archived_stop.get("schema") != STOP_CONDITION_SCHEMA
+            or archived_stop.get("condition") != "git_identity_drift"
+            or archived_stop.get("expected_commit") != prior_commit
+            or archived_stop.get("actual_commit") != prior_commit
+            or archived_stop.get("expected_tree_state") != "clean"
+            or archived_stop.get("actual_tree_state") != "dirty"):
+        raise RuntimeError("campaign recovery stop is not the authorized drift")
+    if os.path.exists(os.path.join(out_dir, "campaign_stop.json")):
+        raise RuntimeError(
+            "campaign recovery requires the stop latch to be archived first")
+
+    current_commit, current_tree = _git_identity()
+    current_fingerprint = code_fingerprint()
+    if (current_commit != record.get("recovery_git_commit")
+            or current_tree != "clean"
+            or record.get("recovery_git_tree_state") != "clean"
+            or current_fingerprint
+            != record.get("recovery_code_fingerprint")):
+        raise RuntimeError("campaign recovery current identity mismatch")
+    prior_fingerprint = record.get("prior_code_fingerprint")
+    if not isinstance(prior_fingerprint, dict):
+        raise RuntimeError("campaign recovery prior fingerprint is invalid")
+    fingerprint_changes = sorted(
+        key for key in set(prior_fingerprint) | set(current_fingerprint)
+        if prior_fingerprint.get(key) != current_fingerprint.get(key)
+    )
+    if (fingerprint_changes != ["run_meta.py"]
+            or record.get("changed_code_fingerprint_keys")
+            != fingerprint_changes):
+        raise RuntimeError("campaign recovery runtime fingerprint scope changed")
+
+    try:
+        changed = subprocess.run(
+            [
+                "git", "-C", _HERE, "diff", "--name-only",
+                prior_commit, current_commit, "--",
+            ],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        ).stdout.splitlines()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("cannot audit campaign recovery Git diff") from exc
+    changed = sorted(item.replace("\\", "/") for item in changed if item)
+    recorded_changes = record.get("changed_tracked_paths")
+    if (changed != recorded_changes
+            or set(changed) != _GIT_IDENTITY_RECOVERY_CHANGED_PATHS):
+        raise RuntimeError("campaign recovery changed-file scope mismatch")
+    return dict(record, authorization_path=path,
+                authorization_sha256=_sha256_file(path))
+
+
+def _recovery_identity_transition_matches(
+        authorization, *, prior_commit, prior_tree_state, prior_fingerprint,
+        current_commit, current_tree_state, current_fingerprint):
+    return bool(
+        authorization
+        and prior_commit == authorization.get("prior_git_commit")
+        and prior_tree_state == "clean"
+        and prior_fingerprint == authorization.get("prior_code_fingerprint")
+        and current_commit == authorization.get("recovery_git_commit")
+        and current_tree_state == "clean"
+        and current_fingerprint
+        == authorization.get("recovery_code_fingerprint")
+    )
 
 
 def _read_run_metadata_strict(path):
@@ -2714,12 +2861,28 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
     os.makedirs(out_dir, exist_ok=True)
     fp = code_fingerprint()
     run_git_commit, git_tree_state = _git_identity()
+    recovery_authorization = read_campaign_recovery_authorization(out_dir)
     expected_commit = os.environ.get("ANCHORPATCH_EXPECTED_GIT_COMMIT")
     expected_tree_state = os.environ.get(
         "ANCHORPATCH_EXPECTED_GIT_TREE_STATE")
-    if ((expected_commit and run_git_commit != expected_commit)
-            or (expected_tree_state
-                and git_tree_state != expected_tree_state)):
+    expected_identity_matches = (
+        (not expected_commit or run_git_commit == expected_commit)
+        and (not expected_tree_state
+             or git_tree_state == expected_tree_state)
+    )
+    recovery_expected_identity_matches = bool(
+        recovery_authorization
+        and expected_commit
+        in {
+            recovery_authorization.get("prior_git_commit"),
+            recovery_authorization.get("recovery_git_commit"),
+        }
+        and (not expected_tree_state or expected_tree_state == "clean")
+        and run_git_commit
+        == recovery_authorization.get("recovery_git_commit")
+        and git_tree_state == "clean"
+    )
+    if not (expected_identity_matches or recovery_expected_identity_matches):
         raise RuntimeError(
             "runner Git identity differs from dispatch manifest"
         )
@@ -2808,7 +2971,17 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                 raise RuntimeError(
                     f"refusing to resume/mix {out_dir!r}: prior {key} is unrecorded"
                 )
-            if previous is not None and previous != current:
+            transition_matches = _recovery_identity_transition_matches(
+                recovery_authorization,
+                prior_commit=_one_prior_value(prior, "run_git_commit"),
+                prior_tree_state=_one_prior_value(prior, "git_tree_state"),
+                prior_fingerprint=_one_prior_value(prior, "code_fingerprint"),
+                current_commit=run_git_commit,
+                current_tree_state=git_tree_state,
+                current_fingerprint=fp,
+            )
+            if (previous is not None and previous != current
+                    and not transition_matches):
                 raise RuntimeError(
                     f"refusing to resume/mix {out_dir!r}: prior {key} differs from "
                     "the current invocation; use a new --out_dir"
@@ -2901,6 +3074,23 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             ),
             "worker_pid": os.getpid(),
             "transport_resume_authorization": transport_resume_authorization,
+            "campaign_recovery_authorization": (
+                {
+                    "authorization_id": recovery_authorization[
+                        "authorization_id"],
+                    "authorization_sha256": recovery_authorization[
+                        "authorization_sha256"],
+                    "prior_git_commit": recovery_authorization[
+                        "prior_git_commit"],
+                    "recovery_git_commit": recovery_authorization[
+                        "recovery_git_commit"],
+                    "archived_stop_path": recovery_authorization[
+                        "archived_stop_path"],
+                    "archived_stop_sha256": recovery_authorization[
+                        "archived_stop_sha256"],
+                }
+                if recovery_authorization else None
+            ),
         }
         rec.update(provider_runtime)
         rec["context_shuffle_seeded"] = bool(context_shuffle_seeded)

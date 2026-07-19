@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -4888,6 +4889,47 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(found_path, path)
             self.assertEqual(found_manifest, prior)
 
+    def test_paired_dispatch_resume_accepts_only_authorized_git_transition(self):
+        prior = {
+            "schema": paired_dispatch.SCHEMA,
+            "experiment_id": "exp_test",
+            "run_git_commit": "1" * 40,
+            "git_tree_state": "clean",
+            "code_fingerprint": {"run_meta.py": "old"},
+            "config": {"samples": ["sample"]},
+            "assignments": [{
+                "sample": "sample", "key_label": "KEY_01",
+                "methods": ["hybridpatch", "fullrewrite"],
+                "console_log": "dispatch_logs/sample__KEY_01.console.log",
+            }],
+            "task_plans": {"sample": {"sha256": "a" * 64}},
+        }
+        recovered = copy.deepcopy(prior)
+        recovered["run_git_commit"] = "2" * 40
+        recovered["code_fingerprint"] = {"run_meta.py": "new"}
+        authorization = {
+            "prior_git_commit": prior["run_git_commit"],
+            "recovery_git_commit": recovered["run_git_commit"],
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = os.path.join(out_dir, "dispatch_manifest.json")
+            run_meta.write_json_atomic(path, prior)
+            with mock.patch.object(
+                    paired_dispatch, "read_campaign_recovery_authorization",
+                    return_value=authorization):
+                found_path, found_manifest = (
+                    paired_dispatch.write_or_verify_manifest(
+                        out_dir, recovered, resume=True)
+                )
+                self.assertEqual(found_path, path)
+                self.assertEqual(found_manifest, prior)
+
+                changed_config = copy.deepcopy(recovered)
+                changed_config["config"]["samples"] = ["other"]
+                with self.assertRaises(RuntimeError):
+                    paired_dispatch.write_or_verify_manifest(
+                        out_dir, changed_config, resume=True)
+
     def test_confirmation_resume_identity_ignores_wave_key_label_names(self):
         prior = {
             "schema": paired_dispatch.SCHEMA,
@@ -6864,6 +6906,141 @@ class IntegrationContractTests(unittest.TestCase):
                     run_meta.append_run_metadata(out_dir, **kwargs)
             with self.assertRaises(RuntimeError):
                 run_meta.append_run_metadata(out_dir, **dict(kwargs, seed=43))
+
+    def test_run_metadata_records_exact_authorized_git_recovery_boundary(self):
+        kwargs = {
+            "command": "python test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        prior_commit = "1" * 40
+        recovery_commit = "2" * 40
+        prior_fingerprint = {"run_meta.py": "old", "hybrid_schema.py": "same"}
+        recovery_fingerprint = {
+            "run_meta.py": "new", "hybrid_schema.py": "same"}
+        authorization = {
+            "authorization_id": "test-recovery",
+            "authorization_sha256": "a" * 64,
+            "prior_git_commit": prior_commit,
+            "recovery_git_commit": recovery_commit,
+            "prior_code_fingerprint": prior_fingerprint,
+            "recovery_code_fingerprint": recovery_fingerprint,
+            "archived_stop_path": "recovery_history/stop.json",
+            "archived_stop_sha256": "b" * 64,
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            with mock.patch.object(
+                    run_meta, "_git_identity",
+                    return_value=(prior_commit, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value=prior_fingerprint), mock.patch.object(
+                    run_meta, "read_campaign_recovery_authorization",
+                    return_value=None):
+                first = run_meta.append_run_metadata(out_dir, **kwargs)
+                run_meta.finish_run_metadata(out_dir, first["invocation_id"])
+            with mock.patch.object(
+                    run_meta, "_git_identity",
+                    return_value=(recovery_commit, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value=recovery_fingerprint), mock.patch.object(
+                    run_meta, "read_campaign_recovery_authorization",
+                    return_value=authorization):
+                recovered = run_meta.append_run_metadata(out_dir, **kwargs)
+            boundary = recovered["campaign_recovery_authorization"]
+            self.assertEqual(boundary["authorization_id"], "test-recovery")
+            self.assertEqual(boundary["prior_git_commit"], prior_commit)
+            self.assertEqual(boundary["recovery_git_commit"], recovery_commit)
+            self.assertEqual(recovered["run_git_commit"], recovery_commit)
+
+    def test_git_identity_ignores_evaluator_tmp_but_not_other_untracked_files(self):
+        root_ignore = pathlib.Path(ROOT).parent / ".gitignore"
+        ignore_text = root_ignore.read_text(encoding="utf-8")
+        self.assertIn("HP_V**/tmp_eval_**/", ignore_text.splitlines())
+
+        with tempfile.TemporaryDirectory() as repo_dir:
+            repo = pathlib.Path(repo_dir)
+            source_dir = repo / "HP_V8" / "src"
+            source_dir.mkdir(parents=True)
+            (repo / ".gitignore").write_text(ignore_text, encoding="utf-8")
+            (source_dir / "tracked.py").write_text("TRACKED = True\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"],
+                cwd=repo, check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "HybridPatch Test"],
+                cwd=repo, check=True,
+            )
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "fixture"],
+                cwd=repo, check=True,
+            )
+
+            evaluator_tmp = repo / "HP_V8" / "tmp_eval_unit_test" / "work"
+            evaluator_tmp.mkdir(parents=True)
+            (evaluator_tmp / "artifact.py").write_text("temporary\n", encoding="utf-8")
+            with mock.patch.object(run_meta, "_HERE", str(source_dir)):
+                _commit, tree_state, porcelain = run_meta._git_identity_details()
+            self.assertEqual(tree_state, "clean")
+            self.assertEqual(porcelain, "")
+
+            untracked_source = source_dir / "untracked_source.py"
+            untracked_source.write_text("untracked\n", encoding="utf-8")
+            with mock.patch.object(run_meta, "_HERE", str(source_dir)):
+                _commit, tree_state, porcelain = run_meta._git_identity_details()
+            self.assertEqual(tree_state, "dirty")
+            self.assertEqual(porcelain, "?? HP_V8/src/untracked_source.py\n")
+
+    def test_git_identity_drift_stop_records_full_porcelain(self):
+        with tempfile.TemporaryDirectory() as repo_dir, \
+                tempfile.TemporaryDirectory() as out_dir:
+            repo = pathlib.Path(repo_dir)
+            source_dir = repo / "HP_V8" / "src"
+            source_dir.mkdir(parents=True)
+            (repo / ".gitignore").write_text(
+                "HP_V**/tmp_eval_**/\n", encoding="utf-8")
+            (source_dir / "tracked.py").write_text("TRACKED = True\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "config", "user.email", "test@example.invalid"],
+                cwd=repo, check=True,
+            )
+            subprocess.run(
+                ["git", "config", "user.name", "HybridPatch Test"],
+                cwd=repo, check=True,
+            )
+            subprocess.run(["git", "add", "."], cwd=repo, check=True)
+            subprocess.run(
+                ["git", "commit", "-q", "-m", "fixture"],
+                cwd=repo, check=True,
+            )
+            commit = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=repo, check=True,
+                capture_output=True, text=True, encoding="utf-8",
+            ).stdout.strip()
+            untracked_source = source_dir / "unexpected.py"
+            untracked_source.write_text("unexpected\n", encoding="utf-8")
+            expected_porcelain = "?? HP_V8/src/unexpected.py\n"
+            env = {
+                "ANCHORPATCH_EXPECTED_GIT_COMMIT": commit,
+                "ANCHORPATCH_EXPECTED_GIT_TREE_STATE": "clean",
+            }
+            with mock.patch.object(run_meta, "_HERE", str(source_dir)), \
+                    mock.patch.dict(os.environ, env, clear=False):
+                with self.assertRaises(run_meta.CampaignStoppedError):
+                    run_meta.enforce_campaign_runtime_guards(out_dir, "sample")
+            stop = run_meta.read_campaign_stop_conditions(out_dir)[0]
+            self.assertEqual(stop["condition"], "git_identity_drift")
+            self.assertEqual(stop["actual_tree_state"], "dirty")
+            self.assertEqual(stop["git_status_porcelain"], expected_porcelain)
 
     def test_run_metadata_locks_task_plan_hash_before_api(self):
         kwargs = {

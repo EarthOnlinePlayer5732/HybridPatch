@@ -463,6 +463,25 @@ selection/campaign manifest 作为 60 个首次 HP exposure 的派生 overlay。
 5+9、process 14、evaluator-preflight 6、selection tests、V1–V8 matrix、splitters byte-exact 与
 V8 smoke 8-row raw replay，全部 PASS；只读计划审阅 `GO WITH FIXES` 的 required fixes 已闭合。
 
+## 2026-07-20 evaluator 临时目录 Git guard 修复
+
+mixed confirmation100 的第二波在 `weather5` 运行时命中 `git_identity_drift`：commit 未变，
+但另一个 Python evaluator 的短生命周期 `HP_V8/tmp_eval_*` 目录恰与跨 worker Git 检查重叠，
+被误判为工作树污染。根 `.gitignore` 现仅忽略 `HP_V**/tmp_eval_**/`；其他未跟踪源码仍使
+工作树为 dirty。`run_meta` 继续对真实 commit/tree drift 全局停止，并在 stop latch 中保存
+用于该次判定的完整 `git status --porcelain`，不再只记录 clean/dirty。
+
+为只补未提交 RT，恢复边界使用严格校验的
+`anchorpatch.campaign_recovery_authorization/1`：原 stop 按原字节归档，旧 manifest 不改写，
+新 invocation 记录旧/新 commit 和 authorization SHA-256。授权仅接受这次
+evaluator-temp ignore/诊断修复的固定 changed-file 集合，且 code fingerprint 只能改变
+`run_meta.py`；任务计划、方法配置和已提交 RT 仍按旧 manifest 校验。任何额外源码变化、
+stop/manifest 摘要变化或 dirty tree 都拒绝恢复。
+
+该修复不改变 HybridPatch/FullRewrite 请求、prompt、协议、执行器、gate、transport、evaluator
+或 scoring。零 API 回归：新增两项 Git identity 测试 PASS；executor 72/72、splitters、
+transport/runner 110/110、evaluator preflight 6/6 与 Python 编译均 PASS。
+
 ## 运行方式
 
 ```bash

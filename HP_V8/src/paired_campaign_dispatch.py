@@ -39,6 +39,7 @@ from run_meta import (
     append_jsonl_locked,
     code_fingerprint,
     interrupt_audited_running_invocations,
+    read_campaign_recovery_authorization,
     read_campaign_stop_conditions,
     read_sample_outcomes,
     read_run_metadata_snapshot,
@@ -2359,6 +2360,24 @@ def write_or_verify_manifest(out_dir, manifest, *, resume=False):
             _manifest_identity(prior) == _manifest_identity(manifest)
             if resume else prior == manifest
         )
+        if resume and not same:
+            authorization = read_campaign_recovery_authorization(out_dir)
+            if authorization:
+                authorized_manifest = copy.deepcopy(manifest)
+                authorized_manifest["run_git_commit"] = prior.get(
+                    "run_git_commit")
+                authorized_manifest["git_tree_state"] = prior.get(
+                    "git_tree_state")
+                authorized_manifest["code_fingerprint"] = prior.get(
+                    "code_fingerprint")
+                same = (
+                    authorization.get("prior_git_commit")
+                    == prior.get("run_git_commit")
+                    and authorization.get("recovery_git_commit")
+                    == manifest.get("run_git_commit")
+                    and _manifest_identity(prior)
+                    == _manifest_identity(authorized_manifest)
+                )
         if not same:
             raise RuntimeError(
                 "dispatch manifest differs from the existing campaign; "
@@ -2465,7 +2484,12 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             target[worker_id] = row
 
     commit, tree_state = _git_identity()
-    if commit != manifest["run_git_commit"] or tree_state != "clean":
+    recovery_authorization = read_campaign_recovery_authorization(out_dir)
+    expected_runtime_commit = (
+        recovery_authorization.get("recovery_git_commit")
+        if recovery_authorization else manifest["run_git_commit"]
+    )
+    if commit != expected_runtime_commit or tree_state != "clean":
         errors.append("Git commit/tree state changed during campaign")
     for sample, plan in (manifest.get("task_plans") or {}).items():
         plan_path = os.path.join(out_dir, plan.get("path") or "")
@@ -3733,6 +3757,12 @@ def _run_worker_wave(
     """Launch, authorize, and drain one bounded worker wave."""
     if running:
         raise RuntimeError("cannot start a worker wave while another is active")
+    recovery_authorization = read_campaign_recovery_authorization(out_dir)
+    runtime_git_commit = (
+        recovery_authorization.get("recovery_git_commit")
+        if recovery_authorization
+        else inspection_manifest["run_git_commit"]
+    )
     launch_specs = {}
     for item in assignments:
         sample = item["sample"]
@@ -3782,9 +3812,7 @@ def _run_worker_wave(
                 _active_worker_set_path(out_dir)
             ),
             ANCHORPATCH_START_BARRIER_TIMEOUT=str(args.start_timeout),
-            ANCHORPATCH_EXPECTED_GIT_COMMIT=(
-                inspection_manifest["run_git_commit"]
-            ),
+            ANCHORPATCH_EXPECTED_GIT_COMMIT=runtime_git_commit,
             ANCHORPATCH_EXPECTED_GIT_TREE_STATE="clean",
             ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256=(
                 task_plans[sample]["sha256"]
@@ -3947,6 +3975,12 @@ def _launch_under_lease(args, out_dir):
         upstream_smoke_gate=upstream_smoke_gate)
     manifest_path, inspection_manifest = write_or_verify_manifest(
         out_dir, manifest, resume=args.resume)
+    recovery_authorization = read_campaign_recovery_authorization(out_dir)
+    runtime_git_commit = (
+        recovery_authorization.get("recovery_git_commit")
+        if recovery_authorization
+        else inspection_manifest["run_git_commit"]
+    )
     print(f"MANIFEST {manifest_path}", flush=True)
     for item in assignments:
         print(
@@ -4178,9 +4212,7 @@ def _launch_under_lease(args, out_dir):
                     _active_worker_set_path(out_dir)
                 ),
                 ANCHORPATCH_START_BARRIER_TIMEOUT=str(args.start_timeout),
-                ANCHORPATCH_EXPECTED_GIT_COMMIT=(
-                    inspection_manifest["run_git_commit"]
-                ),
+                ANCHORPATCH_EXPECTED_GIT_COMMIT=runtime_git_commit,
                 ANCHORPATCH_EXPECTED_GIT_TREE_STATE="clean",
                 ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256=(
                     task_plans[sample]["sha256"]
