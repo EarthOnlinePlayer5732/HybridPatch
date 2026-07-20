@@ -426,6 +426,52 @@ def unique_values(records: list[dict[str, Any]], key: str) -> list[Any]:
     return values
 
 
+def resolve_metadata_code_provenance(
+    archive: Path,
+    metadata: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Preserve legacy identities and strictly validate recovery pairs."""
+    fingerprints = unique_values(metadata, "code_fingerprint")
+    commits = unique_values(metadata, "run_git_commit") or unique_values(
+        metadata, "git_commit"
+    )
+    if len(commits) <= 1:
+        return {
+            "code_fingerprint": fingerprints[0] if len(fingerprints) == 1 else None,
+            "code_fingerprints": fingerprints,
+            "run_git_commit": commits[0] if commits else None,
+            "run_git_commits": commits,
+            "campaign_recovery_authorization": None,
+            "provenance_warnings": [],
+        }
+
+    try:
+        from process_experiment import code_provenance
+    except ModuleNotFoundError:  # pragma: no cover - package-style import
+        from tools.process_experiment import code_provenance
+    return code_provenance(archive, metadata)
+
+
+def invariant_fingerprint_value(
+    fingerprints: list[dict[str, Any]],
+    key: str,
+) -> Any:
+    values = [
+        fingerprint.get(key)
+        for fingerprint in fingerprints
+        if isinstance(fingerprint, dict)
+    ]
+    if len(values) != len(fingerprints) or not values or any(
+        value is None for value in values
+    ):
+        return None
+    markers = {
+        json.dumps(value, ensure_ascii=False, sort_keys=True)
+        for value in values
+    }
+    return values[0] if len(markers) == 1 else None
+
+
 def scalar_or_list(values: list[Any]) -> Any:
     if not values:
         return None
@@ -2209,7 +2255,8 @@ def build_experiment(
 
     metadata_path = archive / "run_metadata.jsonl"
     metadata = read_jsonl(metadata_path) if metadata_path.exists() else []
-    fingerprints = unique_values(metadata, "code_fingerprint")
+    code_provenance = resolve_metadata_code_provenance(archive, metadata)
+    fingerprints = code_provenance["code_fingerprints"]
     command_templates = sorted(
         {
             normalize_command(str(record["command"]))
@@ -2224,14 +2271,11 @@ def build_experiment(
             or unique_values(metadata, "created_local")
         )
     )
-    run_git_commits = unique_values(metadata, "run_git_commit") or unique_values(
-        metadata, "git_commit"
-    )
+    run_git_commits = code_provenance["run_git_commits"]
     git_tree_states = unique_values(metadata, "git_tree_state")
     finished = unique_values(metadata, "finished_at")
     timezones = unique_values(metadata, "timezone")
     for field, values in (
-        ("run_git_commit", run_git_commits),
         ("git_tree_state", git_tree_states),
         ("finished_at", finished),
         ("timezone", timezones),
@@ -2340,6 +2384,39 @@ def build_experiment(
             }
         )
 
+    code_document = {
+        "run_git_commit": code_provenance["run_git_commit"],
+        "git_tree_state": git_tree_states[0] if git_tree_states else None,
+        "provenance_level": (
+            "git_commit_and_fingerprints"
+            if run_git_commits and fingerprints
+            else "git_commit_only"
+            if run_git_commits
+            else "fingerprints_only"
+            if fingerprints
+            else "documented_reference_only"
+        ),
+        "fingerprint_algorithm": "sha1-12" if fingerprints else None,
+        "fingerprint_count": len(fingerprints),
+        "fingerprints": fingerprints,
+        "version_reference": entry.get("code_reference"),
+    }
+    if code_provenance["campaign_recovery_authorization"] is not None:
+        code_document.update({
+            "run_git_commits": run_git_commits,
+            "campaign_recovery_authorization": code_provenance[
+                "campaign_recovery_authorization"
+            ],
+            "provenance_warnings": code_provenance["provenance_warnings"],
+        })
+
+    def protocol_fingerprint(key: str) -> Any:
+        if len(fingerprints) == 1 and fingerprints[0]:
+            return fingerprints[0].get(key)
+        if code_provenance["campaign_recovery_authorization"] is not None:
+            return invariant_fingerprint_value(fingerprints, key)
+        return None
+
     experiment_document = {
         "schema": "hybridpatch.experiment_record/1",
         "record_revision": 1,
@@ -2358,23 +2435,7 @@ def build_experiment(
             "raw_artifact_id": artifact_id,
             "source_experiments": source_experiments,
         },
-        "code": {
-            "run_git_commit": run_git_commits[0] if run_git_commits else None,
-            "git_tree_state": git_tree_states[0] if git_tree_states else None,
-            "provenance_level": (
-                "git_commit_and_fingerprints"
-                if run_git_commits and fingerprints
-                else "git_commit_only"
-                if run_git_commits
-                else "fingerprints_only"
-                if fingerprints
-                else "documented_reference_only"
-            ),
-            "fingerprint_algorithm": "sha1-12" if fingerprints else None,
-            "fingerprint_count": len(fingerprints),
-            "fingerprints": fingerprints,
-            "version_reference": entry.get("code_reference"),
-        },
+        "code": code_document,
         "execution": {
             "working_directory_ref": owner if owner.startswith("HP_V") else None,
             "command_templates": command_templates,
@@ -2423,21 +2484,9 @@ def build_experiment(
             "declared_campaign_revision": declared_protocol,
             "observed_valid_envelope_revisions": protocols,
             "prompt_revision": None,
-            "prompt_fingerprint": (
-                fingerprints[0].get("hybrid_prompt.py")
-                if len(fingerprints) == 1 and fingerprints[0]
-                else None
-            ),
-            "executor_fingerprint": (
-                fingerprints[0].get("hybrid_executor.py")
-                if len(fingerprints) == 1 and fingerprints[0]
-                else None
-            ),
-            "runner_fingerprint": (
-                fingerprints[0].get("experiment_runner.py")
-                if len(fingerprints) == 1 and fingerprints[0]
-                else None
-            ),
+            "prompt_fingerprint": protocol_fingerprint("hybrid_prompt.py"),
+            "executor_fingerprint": protocol_fingerprint("hybrid_executor.py"),
+            "runner_fingerprint": protocol_fingerprint("experiment_runner.py"),
         },
         "data": {
             "dataset": entry["dataset"],

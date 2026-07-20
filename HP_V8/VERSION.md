@@ -484,6 +484,50 @@ stop/manifest 摘要变化或 dirty tree 都拒绝恢复。
 或 scoring。零 API 回归：新增两项 Git identity 测试 PASS；executor 72/72、splitters、
 transport/runner 110/110、evaluator preflight 6/6 与 Python 编译均 PASS。
 
+## 2026-07-20 mixed confirmation100：样本级隔离后的 incomplete supporting view
+
+`exp_20260719_hybridv8_transportv4_mixed_confirmation100` 最终完成 98/100 个双臂
+RT10 样本。`calendar5` 在 HP RT5 backward 因 malformed `DTEND` 触发
+`icalendar.error.BrokenCalendarProperty`，登记为 `evaluator_incomplete`；`satellite6`
+在 FR RT3 forward 耗尽两个 incomplete-stream response slots，登记为
+`infrastructure_incomplete`。两者未完成步骤均保持 missing/null、未写 0、未替换样本；
+其余 worker 继续完成。campaign 因而保持 `incomplete/failed_informative`，不能写成预注册
+固定 n=100 的 canonical 完成实验。
+
+完整配对 98 样本在 RT1 的 HP/FR/delta 为 `97.431%/92.558%/+4.873pp`，RT10 为
+`79.245%/60.978%/+18.268pp`，W/L/T=`65/25/8`；CriticalFailure@0.10 使用
+`1e-12` 数值容差后为 `47/882` vs `69/882`。method/developer-unseen 层 60/60 完成，
+RT10 delta `+21.563pp`；historical-exposed 层仅 38/40 完成，delta `+13.064pp`。
+两个缺失 endpoint 各只取数学范围 `[-1,+1]` 时，计划 n=100 的事后均值差界为
+`+15.902pp` 至 `+19.902pp`；这不是插补，也不使 campaign 完整。
+
+complete98 的 HP routes 为 bounded/local/bulk/DSL/kept-context
+`1445/358/98/47/12`；repair attempted/used/success=`308/276/259`；protocol failure
+`37/1960`；全部 campaign 已提交的 1,968 个 HP steps 中 preservation violations 为 0。
+已知完整 usage 为 HP `85,072,528` tokens / USD `71.046620`、FR `65,862,257` /
+USD `55.396233`；另有 55 个已开始生成但无 final usage 的 transport attempt，因此费用是
+已知下界而非精确账单。
+
+1966 个 backward rows 零 API replay PASS。strict inspector 保留原始
+`latest run_metadata invocation failed: calendar5`，并由 evaluator-incomplete sidecar、
+source-log SHA、未提交/未插补标记把它识别为已登记的样本级例外；未接受错误、stop latch、
+重复/半提交和 preservation violation 均为 0。恢复跨
+`23ced3cf6cc4d8502aeb61444b476d47f51aba8a` 与
+`0f0b3c881b8e129fcbeb083139c5337c990ff90f` 两个授权身份，方法、prompt、协议、执行器、
+gate、FullRewrite、transport、evaluator 和 scoring 指纹保持冻结。
+
+完整 raw 私有归档为
+`../hybridpatch_private_archives/exp_20260719_hybridv8_transportv4_mixed_confirmation100_incomplete98of100_raw.tgz`
+（607,300,822 bytes、42,317 members、SHA-256
+`ed7717030964483828f5ff60ec04b54b032ec08d0b60380a14ce496895e97ac0`）。13 个本地 Key
+精确扫描命中 0；989 个通用 Authorization/Cookie/x-api-key 字面量全部来自三个任务文档
+副本，非 provider header 或本机凭据。official finalize 的生成态 full/records-only validator
+均 PASS；为不改写 HP_V3–HP_V7、Baseline、transport 与既有 catalog，生成 record 随后私有
+归档并恢复旧 generated state。record archive SHA-256 为
+`babaefce5c5a231d79103cdf0008ff2924bc89fbb8489b883e6cd96894dbfa76`，13-Key 精确
+匹配为 0。恢复后 `--records-only` 对 13 个公开 record PASS；source-linked 模式保留 21 个
+由活动文档前进造成的既有 stale-hash error，不改写冻结记录。
+
 ## 运行方式
 
 ```bash

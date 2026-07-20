@@ -365,6 +365,40 @@ attempt 的保守附加上界为 USD 2.261795，故本轮 archive-based 上界 U
 主张。生成态 finalize/validator PASS 后，全球 catalog/旧 records 恢复原字节；新 HP_V8
 record 与完整 raw 分别私有归档。
 
+### 5.14 HP_V8 mixed confirmation100（2026-07-19—20）——98/100 完整配对，单样本故障不再拖停兄弟 worker
+
+本轮冻结 60 个 method/developer-unseen 与 40 个 historical-exposed 样本，MiniMax-M3、
+transport-v4、seed42、distractor-on、10RT。电源中断和恢复期间不重发已提交 RT；最终
+`calendar5` 在 HP RT5 backward 暴露 iCalendar evaluator 对 malformed `DTEND` 的异常，
+`satellite6` 在 FR RT3 forward 耗尽两个 incomplete-stream response slots。按用户明确授权，
+两者分别标记 `evaluator_incomplete` 与 `infrastructure_incomplete`，未完成 cell 保持 null，
+其余 98 个样本继续到 RT10。
+
+原始网格为 3,932/4,000 cells，其中完整配对 98 样本 3,920 cells；无重复、半提交或补 0。
+API/ledger/journal/replay lineage 独立核对通过，1,966 个 backward rows 重放 PASS，全部 1,968
+个已提交 HP rows 的 preservation violations 为 0。严格 post-run 检查保留 calendar5 的失败
+metadata 原文，并以 evaluator-incomplete sidecar、source SHA、未提交与未插补证据接受这一条
+样本级终态；未接受的完整性错误为 0。
+
+complete98 的 delta 从 RT1 `+4.873pp` 增至 RT10 `+18.268pp`（HP `79.245%`、FR
+`60.978%`），W/L/T `65/25/8`，CriticalFailure@0.10 `47/882` vs `69/882`。60 个 unseen
+样本全部完成，RT10 delta `+21.563pp`；historical 只有 38/40，delta `+13.064pp`。
+由于 calendar5 缺失可能与 HP 输出相关，不能假设 MCAR；固定 n=100 仍是未观察 endpoint。
+把两个缺失差值仅限制在数学边界 `[-1,+1]` 的事后敏感性为 `+15.902` 至 `+19.902pp`，
+不得解释成插补结果。
+
+complete98 HP routes bounded/local/bulk/DSL/kept=`1445/358/98/47/12`，repair
+attempted/used/success=`308/276/259`，protocol failure `37/1960`。已知 HP/FR usage 为
+85.073M/65.862M tokens、USD 71.046620/55.396233；55 个 generation-started attempt 无 final
+usage，使费用只能作为下界。三个独立只读审阅均只允许 incomplete complete-pair supporting
+claim，不允许宣称预注册 n=100 完成。
+
+官方 finalize 在 generated state 构建 98-sample source-only record，完整 validator 与
+`--records-only` 均 PASS。由于 catalog digest 会机械改写全部旧 record，为遵守冻结边界，本轮
+生成 record 以 SHA-256
+`babaefce5c5a231d79103cdf0008ff2924bc89fbb8489b883e6cd96894dbfa76` 私有归档，随后
+恢复原 catalog 和 HP_V3–HP_V7/Baseline/transport generated records 原字节。
+
 ---
 
 ## 6. 追加约定（怎么继续写这份文档）

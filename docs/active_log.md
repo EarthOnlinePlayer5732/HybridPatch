@@ -752,3 +752,46 @@
   frozen.
 - launch status: NO-GO until selection/preflight/tests, fresh read-only plan review, clean commit,
   formal dry-run and 13-Key probes pass. No API call was made while changing scope.
+
+## 2026-07-20 - After Experiment: mixed confirmation100 incomplete, siblings completed
+
+- identity: `exp_20260719_hybridv8_transportv4_mixed_confirmation100`; MiniMax-M3;
+  transport `opencode_anthropic_sdk/4`; seed42; distractor-on; frozen selected100 and task plans.
+  Recovery used the recorded authorization across commits `23ced3c...` and `0f0b3c8...`; the campaign
+  fingerprint changed only at `run_meta.py`, while HP/FR request semantics, evaluator and scoring stayed
+  frozen.
+- sample isolation: `calendar5` is `evaluator_incomplete` at HP RT5 backward after malformed iCalendar
+  output triggered `BrokenCalendarProperty`; `satellite6` is `infrastructure_incomplete` at FR RT3
+  forward after two incomplete-stream response slots. Failed cells remain absent/null, score imputation
+  is false, and no replacement sample was introduced. All other workers continued.
+- completeness: 3,932/4,000 unique result cells; 98 complete paired samples (3,920 cells), 2 incomplete;
+  no duplicate or half-committed RT. API/ledger lineage closes across 4,343 API rows and 21,437 attempt
+  rows, including 99 valid response-journal replays. Verifier PASS 1,966/1,966 backward; strict inspection
+  has zero unaccepted errors and zero preservation violations. Lifecycle remains `incomplete`; this is
+  not the pre-registered canonical n=100 endpoint.
+- complete98 trajectory: RT1 HP/FR/delta `97.431%/92.558%/+4.873pp`; RT10
+  `79.245%/60.978%/+18.268pp`; W/L/T `65/25/8`; bootstrap mean-delta 95% CI
+  `[+10.864,+26.032]pp`; sign test `p=0.0000297`; CriticalFailure@0.10 `47/882` vs `69/882`.
+  The 60-sample method/developer-unseen cohort is complete with RT10 `+21.563pp`; historical is only
+  38/40 with `+13.064pp`. Post-hoc mathematical bounds for the two missing endpoint deltas give planned
+  n=100 mean delta `[+15.902,+19.902]pp`; this is not imputation.
+- HP complete98 telemetry: bounded/local/bulk/DSL/kept-context `1445/358/98/47/12`; repair
+  attempted/used/success `308/276/259`; protocol failure `37/1960`; preservation 0/1960. Across all
+  1,968 committed HP rows, preservation is also 0.
+- known usage: HP 85,072,528 tokens / USD 71.046620; FR 65,862,257 / USD 55.396233. Fifty-five
+  generation-started attempts lack final usage, so token/cost totals are known lower bounds rather than
+  a complete invoice.
+- review boundary: three independent read-only audits returned GO only for the labeled incomplete
+  complete-pair supporting view and NO-GO for canonical n=100. `calendar5` missingness may be
+  output-related and is not assumed missing at random. User-authorized evaluator sample isolation is
+  recorded as a post-registration deviation rather than rewritten into the original plan.
+- retention: raw private archive
+  `../hybridpatch_private_archives/exp_20260719_hybridv8_transportv4_mixed_confirmation100_incomplete98of100_raw.tgz`,
+  SHA-256 `ed7717030964483828f5ff60ec04b54b032ec08d0b60380a14ce496895e97ac0`; 13-Key exact
+  matches 0. Generic credential markers were confined to literal task-document content in three samples.
+  Official finalize and both validators PASS in generated state; the generated record archive SHA-256 is
+  `babaefce5c5a231d79103cdf0008ff2924bc89fbb8489b883e6cd96894dbfa76`. Existing catalog and
+  frozen HP_V3–HP_V7/Baseline/transport records were then restored byte-for-byte, so the new record stays
+  private/source-only rather than rewriting historical evidence. In restored state `--records-only`
+  passes 13 records; source-linked validation reports the same 21 expected stale source-hash errors caused
+  by active research-doc evolution, which are disclosed rather than repaired by rewriting frozen records.

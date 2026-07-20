@@ -292,7 +292,7 @@ class ConfirmationCampaignAnalysisTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self._fixture(root)
-            path = root / "fullrewrite" / "beta2.jsonl"
+            path = root / "hybridpatch" / "beta2.jsonl"
             rows = [
                 json.loads(line)
                 for line in path.read_text(encoding="utf-8").splitlines()
@@ -314,8 +314,27 @@ class ConfirmationCampaignAnalysisTests(unittest.TestCase):
             report = analysis.analyze_campaign(root, allow_incomplete=True)
             self.assertFalse(report["integrity"]["formal_reporting_ready"])
             self.assertEqual(report["integrity"]["incomplete_samples"], ["beta2"])
+            self.assertEqual(report["integrity"]["complete_pair_sample_count"], 1)
             self.assertEqual(report["round_trip_scores"][1]["fixed_n"], 2)
             self.assertEqual(report["round_trip_scores"][1]["paired_n"], 1)
+            self.assertEqual(
+                report["critical_failure_at_0_10"]["fullrewrite"]["count"], 0
+            )
+            self.assertEqual(
+                report["campaign_observed_critical_failure_at_0_10"]
+                ["fullrewrite"]["count"],
+                1,
+            )
+            bounds = report["post_hoc_missing_endpoint_sensitivity"]
+            self.assertFalse(bounds["is_imputation"])
+            self.assertAlmostEqual(
+                bounds["planned_n_mean_delta_bounds_percentage_points"][0],
+                -55.0,
+            )
+            self.assertAlmostEqual(
+                bounds["planned_n_mean_delta_bounds_percentage_points"][1],
+                45.0,
+            )
             beta = next(
                 row
                 for row in report["rt_final_by_sample"]
@@ -340,6 +359,132 @@ class ConfirmationCampaignAnalysisTests(unittest.TestCase):
             ]
             self.assertEqual(len(failure_backed), 1)
             self.assertEqual(failure_backed[0]["sample_id"], "alpha1")
+
+    def test_response_replay_is_backed_by_source_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._fixture(root)
+            result_path = root / "fullrewrite" / "alpha1.jsonl"
+            result_rows = [
+                json.loads(line)
+                for line in result_path.read_text(encoding="utf-8").splitlines()
+            ]
+            source_id = result_rows[0]["api_call_ids"][0]
+            replay_id = "replay0001"
+            result_rows[0]["api_call_ids"] = [replay_id]
+            self._write_jsonl(result_path, result_rows)
+
+            calls_path = root / "api_calls.jsonl"
+            calls = [
+                json.loads(line)
+                for line in calls_path.read_text(encoding="utf-8").splitlines()
+            ]
+            source = next(
+                row for row in calls if row["request_id"] == source_id
+            )
+            source.update({
+                "provider_called": True,
+                "provider_request_id": "provider-1",
+                "content_sha256": "c" * 64,
+            })
+            replay = dict(source)
+            replay.update({
+                "request_id": replay_id,
+                "provider_called": False,
+                "response_replayed": True,
+                "replayed_from_call_id": source_id,
+            })
+            calls.append(replay)
+            self._write_jsonl(calls_path, calls)
+
+            report = analysis.analyze_campaign(root)
+
+            api = report["usage"]["api_semantic_calls"]
+            self.assertTrue(report["integrity"]["structural_complete"])
+            self.assertEqual(api["response_replay_calls"], 1)
+            self.assertEqual(api["indirectly_referenced_source_calls"], 1)
+            self.assertEqual(api["failure_backed_committed_cells"], [])
+
+    def test_invalid_response_replay_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._fixture(root)
+            calls_path = root / "api_calls.jsonl"
+            calls = [
+                json.loads(line)
+                for line in calls_path.read_text(encoding="utf-8").splitlines()
+            ]
+            replay = dict(calls[0])
+            replay.update({
+                "request_id": "replay0001",
+                "provider_called": True,
+                "response_replayed": True,
+                "replayed_from_call_id": calls[0]["request_id"],
+            })
+            calls.append(replay)
+            self._write_jsonl(calls_path, calls)
+
+            report = analysis.analyze_campaign(root, allow_incomplete=True)
+
+            self.assertIn(
+                "invalid API response replay chain (1 calls)",
+                report["integrity"]["api_integrity_problems"],
+            )
+
+    def test_valid_unreferenced_replay_is_audit_evidence_not_api_gap(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._fixture(root)
+            calls_path = root / "api_calls.jsonl"
+            calls = [
+                json.loads(line)
+                for line in calls_path.read_text(encoding="utf-8").splitlines()
+            ]
+            source = calls[0]
+            source.update({
+                "provider_called": True,
+                "provider_request_id": "provider-1",
+                "content_sha256": "c" * 64,
+            })
+            replay = dict(source)
+            replay.update({
+                "request_id": "replay0001",
+                "provider_called": False,
+                "response_replayed": True,
+                "replayed_from_call_id": source["request_id"],
+            })
+            calls.append(replay)
+            self._write_jsonl(calls_path, calls)
+
+            report = analysis.analyze_campaign(root)
+
+            api = report["usage"]["api_semantic_calls"]
+            self.assertTrue(report["integrity"]["structural_complete"])
+            self.assertEqual(api["unreferenced_replay_calls"], 1)
+
+    def test_complete_thinking_only_response_keeps_its_journal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._fixture(root)
+            calls_path = root / "api_calls.jsonl"
+            calls = [
+                json.loads(line)
+                for line in calls_path.read_text(encoding="utf-8").splitlines()
+            ]
+            calls[0].update({
+                "stream_complete": True,
+                "error_type": "thinking_budget_exhausted",
+                "response_classification": "thinking_budget_exhausted",
+                "stop_reason": "max_tokens",
+            })
+            self._write_jsonl(calls_path, calls)
+
+            report = analysis.analyze_campaign(root)
+
+            self.assertTrue(report["integrity"]["structural_complete"])
+            self.assertEqual(
+                report["integrity"]["api_integrity_problems"], []
+            )
 
     def test_frozen_confirmation_identity_binds_selection_and_policy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -440,6 +585,66 @@ class ConfirmationCampaignAnalysisTests(unittest.TestCase):
                 root, expected_backward_rows=1360
             )
             self.assertTrue(proof["valid"], proof["problems"])
+
+    def test_postrun_accepts_registered_sample_level_evaluator_incomplete(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            analysis_dir = root / "analysis"
+            analysis_dir.mkdir()
+            (analysis_dir / "verification.log").write_text(
+                "exit_code=0\n"
+                "HONESTY GATE: PASS — 8 backward RS independently "
+                "reproduced from raw responses\n",
+                encoding="utf-8",
+            )
+            source_log = root / "dispatch_logs" / "calendar5.log"
+            source_log.parent.mkdir()
+            source_log.write_text("BrokenCalendarProperty\n", encoding="utf-8")
+            self._write_jsonl(
+                root / "evaluator_incomplete_samples.jsonl",
+                [{
+                    "schema": "anchorpatch.evaluator_incomplete/1",
+                    "sample": "calendar5",
+                    "status": "evaluator_incomplete",
+                    "disposition": "cancel_sample_continue_campaign",
+                    "failure_stage": "evaluator",
+                    "result_committed_for_failed_step": False,
+                    "score_imputed": False,
+                    "source_log": "dispatch_logs/calendar5.log",
+                    "source_log_sha256": analysis._sha256(source_log),
+                }],
+            )
+            raw_error = "latest run_metadata invocation failed: calendar5"
+            (analysis_dir / "strict_inspection_postrun.json").write_text(
+                json.dumps({
+                    "errors": [raw_error],
+                    "preservation_violations": 0,
+                }),
+                encoding="utf-8",
+            )
+
+            proof = analysis._postrun_verification(
+                root, expected_backward_rows=8
+            )
+
+            self.assertTrue(proof["valid"], proof["problems"])
+            self.assertEqual(
+                proof["accepted_sample_level_incomplete_errors"], [raw_error]
+            )
+            self.assertEqual(proof["unaccepted_inspection_errors"], [])
+
+    def test_critical_failure_threshold_uses_float_tolerance(self) -> None:
+        scores = {
+            ("fullrewrite", "chess4", 1): 0.8978427515498331,
+            ("fullrewrite", "chess4", 2): 0.7978427515498331,
+        }
+
+        result = analysis._critical_failures(
+            scores, ["chess4"], 2, "fullrewrite"
+        )
+
+        self.assertEqual(result["count"], 1)
 
     def test_mixed_confirmation_identity_and_cohort_balance(self) -> None:
         repository_root = SCRIPT.parents[1]

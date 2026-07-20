@@ -338,13 +338,54 @@ def _postrun_verification(
     else:
         problems.append("analysis/verification.log is missing")
     inspection = None
+    accepted_inspection_errors: list[str] = []
+    unaccepted_inspection_errors: list[str] = []
     if inspection_path.is_file():
         try:
             inspection = _read_json(inspection_path)
         except AnalysisError as exc:
             problems.append(str(exc))
         else:
-            if inspection.get("errors") != []:
+            raw_errors = inspection.get("errors")
+            if not isinstance(raw_errors, list) or not all(
+                    isinstance(item, str) for item in raw_errors):
+                problems.append("strict postrun inspection errors are invalid")
+                raw_errors = []
+            registered_evaluator_incomplete: set[str] = set()
+            for row in _read_jsonl(
+                    experiment_dir / "evaluator_incomplete_samples.jsonl",
+                    required=False):
+                sample = row.get("sample")
+                source_log = row.get("source_log")
+                try:
+                    source_path = (experiment_dir / str(source_log)).resolve()
+                    source_path.relative_to(experiment_dir.resolve())
+                except (OSError, ValueError):
+                    continue
+                if (
+                    isinstance(sample, str)
+                    and sample
+                    and row.get("schema") == "anchorpatch.evaluator_incomplete/1"
+                    and row.get("status") == "evaluator_incomplete"
+                    and row.get("disposition") == "cancel_sample_continue_campaign"
+                    and row.get("failure_stage") == "evaluator"
+                    and row.get("result_committed_for_failed_step") is False
+                    and row.get("score_imputed") is False
+                    and source_path.is_file()
+                    and row.get("source_log_sha256") == _sha256(source_path)
+                ):
+                    registered_evaluator_incomplete.add(sample)
+            allowed_errors = {
+                f"latest run_metadata invocation failed: {sample}"
+                for sample in registered_evaluator_incomplete
+            }
+            accepted_inspection_errors = sorted(
+                error for error in raw_errors if error in allowed_errors
+            )
+            unaccepted_inspection_errors = sorted(
+                error for error in raw_errors if error not in allowed_errors
+            )
+            if unaccepted_inspection_errors:
                 problems.append("strict postrun inspection has errors")
             if inspection.get("preservation_violations") != 0:
                 problems.append("strict postrun inspection has preservation violations")
@@ -358,6 +399,8 @@ def _postrun_verification(
             _sha256(verification_path) if verification_path.is_file() else None
         ),
         "strict_inspection": inspection,
+        "accepted_sample_level_incomplete_errors": accepted_inspection_errors,
+        "unaccepted_inspection_errors": unaccepted_inspection_errors,
         "strict_inspection_sha256": (
             _sha256(inspection_path) if inspection_path.is_file() else None
         ),
@@ -844,9 +887,12 @@ def _api_analysis(
     samples: list[str],
     round_trips: int,
     rows_by_cell: dict[tuple[str, str, int, str], dict[str, Any]],
+    *,
+    incomplete_samples: set[str] | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     problems: list[str] = []
     selected = set(samples)
+    incomplete_samples = set(incomplete_samples or ())
     calls_path = experiment_dir / "api_calls.jsonl"
     ledger_path = experiment_dir / "api_attempt_ledger.jsonl"
     journal_dir = experiment_dir / "api_journal"
@@ -924,11 +970,64 @@ def _api_analysis(
             + ", ".join(duplicate_references[:5])
         )
     result_references = set(result_reference_counts)
-    if result_references != api_ids:
+    replay_source_by_id: dict[str, str] = {}
+    replay_problems: list[str] = []
+    identity_fields = (
+        "sample",
+        "method",
+        "rt_index",
+        "direction",
+        "call_kind",
+        "semantic_call_id",
+        "provider_request_id",
+        "content_sha256",
+    )
+    for call_id, row in api_by_id.items():
+        if row.get("response_replayed") is not True:
+            continue
+        source_id = row.get("replayed_from_call_id")
+        source = api_by_id.get(source_id) if isinstance(source_id, str) else None
+        if (
+            row.get("provider_called") is not False
+            or not isinstance(source, dict)
+            or source.get("response_replayed") is True
+            or any(row.get(field) != source.get(field) for field in identity_fields)
+        ):
+            replay_problems.append(call_id)
+            continue
+        replay_source_by_id[call_id] = source_id
+    if replay_problems:
+        problems.append(
+            "invalid API response replay chain "
+            f"({len(replay_problems)} calls)"
+        )
+
+    indirectly_referenced_sources = {
+        replay_source_by_id[call_id]
+        for call_id in result_references
+        if call_id in replay_source_by_id
+    }
+    replay_ids = set(replay_source_by_id)
+    unused_replay_ids = replay_ids - result_references
+    covered_api_ids = (
+        result_references | indirectly_referenced_sources | replay_ids
+    )
+    unreferenced_api_ids = api_ids - covered_api_ids
+    allowed_incomplete_api_ids = {
+        call_id
+        for call_id in unreferenced_api_ids
+        if api_by_id[call_id].get("sample") in incomplete_samples
+    }
+    unexpected_unreferenced_api_ids = (
+        unreferenced_api_ids - allowed_incomplete_api_ids
+    )
+    results_only = result_references - api_ids
+    if results_only or unexpected_unreferenced_api_ids:
         problems.append(
             "result/api_calls call-id mismatch "
-            f"(results_only={len(result_references - api_ids)}, "
-            f"calls_only={len(api_ids - result_references)})"
+            f"(results_only={len(results_only)}, "
+            f"unexpected_calls_only={len(unexpected_unreferenced_api_ids)}, "
+            f"allowed_incomplete_calls_only={len(allowed_incomplete_api_ids)})"
         )
 
     by_method = {method: _usage_accumulator() for method in METHODS}
@@ -958,11 +1057,29 @@ def _api_analysis(
         _add_usage(acc, result)
         _add_usage(by_method[method], result)
 
-    if api_ids != journal_ids:
+    failed_api_ids = {
+        call_id
+        for call_id, row in api_by_id.items()
+        if row.get("stream_complete") is False
+    }
+    journal_expected_ids = api_ids - replay_ids - failed_api_ids
+    if journal_expected_ids != journal_ids:
         problems.append(
             "api_calls/api_journal call-id mismatch "
-            f"(calls_only={len(api_ids - journal_ids)}, "
-            f"journals_only={len(journal_ids - api_ids)})"
+            f"(expected_calls_only={len(journal_expected_ids - journal_ids)}, "
+            f"journals_only={len(journal_ids - journal_expected_ids)}, "
+            f"valid_replays={len(replay_ids)}, failed_calls={len(failed_api_ids)})"
+        )
+
+    replay_without_source_journal = sorted(
+        call_id
+        for call_id, source_id in replay_source_by_id.items()
+        if source_id not in journal_ids
+    )
+    if replay_without_source_journal:
+        problems.append(
+            "API response replay lacks source response journal "
+            f"({len(replay_without_source_journal)} calls)"
         )
 
     failure_backed_cells = []
@@ -975,7 +1092,10 @@ def _api_analysis(
             if _call_kind(api_by_id.get(call_id) or {}) == primary_kind
         ]
         successful_primary_ids = [
-            call_id for call_id in primary_ids if call_id in journal_ids
+            call_id
+            for call_id in primary_ids
+            if call_id in journal_ids
+            or replay_source_by_id.get(call_id) in journal_ids
         ]
         if not successful_primary_ids:
             failure_backed_cells.append({
@@ -1018,6 +1138,14 @@ def _api_analysis(
         {
             "api_calls": len(api_calls),
             "result_referenced_api_calls": len(result_references),
+            "response_replay_calls": len(replay_source_by_id),
+            "unreferenced_replay_calls": len(unused_replay_ids),
+            "indirectly_referenced_source_calls": len(
+                indirectly_referenced_sources
+            ),
+            "allowed_incomplete_unreferenced_api_calls": len(
+                allowed_incomplete_api_ids
+            ),
             "api_call_kinds": dict(sorted(call_kinds.items())),
             "api_journals": len(journal_files),
             "failure_backed_committed_cells": failure_backed_cells,
@@ -1165,9 +1293,6 @@ def analyze_campaign(
     endpoint_rows, endpoint_stats = _sample_endpoint(
         scores, samples, round_trips
     )
-    api, api_problems = _api_analysis(
-        experiment_dir, samples, round_trips, rows_by_cell
-    )
     sample_outcomes = _sample_outcomes(experiment_dir, samples)
     outcome_incomplete = sorted(
         set(sample_outcomes["not_finished"])
@@ -1182,6 +1307,13 @@ def analyze_campaign(
         }
         | set(outcome_incomplete)
     )
+    api, api_problems = _api_analysis(
+        experiment_dir,
+        samples,
+        round_trips,
+        rows_by_cell,
+        incomplete_samples=set(incomplete_samples),
+    )
     fixed_n_ok = all(
         row["paired_n"] == len(samples) and row["complete"] for row in rt_rows
     )
@@ -1191,11 +1323,20 @@ def analyze_campaign(
         and not api_problems
         and not outcome_incomplete
     )
-    telemetry = _hybrid_telemetry(rows_by_cell.values())
+    complete_pair_samples = [
+        sample for sample in samples if sample not in set(incomplete_samples)
+    ]
+    campaign_telemetry = _hybrid_telemetry(rows_by_cell.values())
+    complete_pair_telemetry = _hybrid_telemetry(
+        row for row in rows_by_cell.values()
+        if row.get("sample_id") in set(complete_pair_samples)
+    )
     if confirmation_identity["applicable"]:
         postrun_verification = _postrun_verification(
             experiment_dir,
-            expected_backward_rows=len(samples) * len(METHODS) * round_trips,
+            expected_backward_rows=sum(
+                cell[3] == "backward" for cell in rows_by_cell
+            ),
         )
     else:
         postrun_verification = {
@@ -1208,7 +1349,7 @@ def analyze_campaign(
         and confirmation_identity["applicable"]
         and confirmation_identity["valid"]
         and postrun_verification["valid"]
-        and telemetry["preservation"]["violations"] == 0
+        and campaign_telemetry["preservation"]["violations"] == 0
     )
     sensitivity_excluded = sorted(set(sensitivity_exclude))
     unknown_exclusions = sorted(set(sensitivity_excluded) - set(samples))
@@ -1288,6 +1429,30 @@ def analyze_campaign(
     for row in endpoint_rows:
         row["cohort"] = sample_to_cohort.get(row["sample_id"])
 
+    paired_raw = endpoint_stats["raw_0_1"]
+    missing_endpoint_count = len(samples) - int(paired_raw["paired_n"])
+    missing_endpoint_worst_case = None
+    if missing_endpoint_count:
+        observed_delta_sum = (
+            float(paired_raw["delta_mean"]) * int(paired_raw["paired_n"])
+        )
+        missing_endpoint_worst_case = {
+            "label": "post_hoc_bounded_missing_endpoint_sensitivity",
+            "is_imputation": False,
+            "planned_n": len(samples),
+            "observed_paired_n": int(paired_raw["paired_n"]),
+            "missing_n": missing_endpoint_count,
+            "per_missing_pair_delta_bounds_raw_0_1": [-1.0, 1.0],
+            "planned_n_mean_delta_bounds_raw_0_1": [
+                (observed_delta_sum - missing_endpoint_count) / len(samples),
+                (observed_delta_sum + missing_endpoint_count) / len(samples),
+            ],
+            "planned_n_mean_delta_bounds_percentage_points": [
+                100.0 * (observed_delta_sum - missing_endpoint_count) / len(samples),
+                100.0 * (observed_delta_sum + missing_endpoint_count) / len(samples),
+            ],
+        }
+
     result = {
         "schema": SCHEMA,
         "experiment_dir": experiment_dir.as_posix(),
@@ -1318,6 +1483,8 @@ def analyze_campaign(
             "observed_result_cells": len(rows_by_cell),
             "missing_result_cells": missing_cells,
             "incomplete_samples": incomplete_samples,
+            "complete_pair_sample_ids": complete_pair_samples,
+            "complete_pair_sample_count": len(complete_pair_samples),
             "unfinished_or_missing_sample_outcomes": outcome_incomplete,
             "api_integrity_problems": api_problems,
             "committed_evaluation_errors": evaluation_errors,
@@ -1325,13 +1492,21 @@ def analyze_campaign(
         "round_trip_scores": rt_rows,
         "rt_final_by_sample": endpoint_rows,
         "rt_final_summary": endpoint_stats,
+        "post_hoc_missing_endpoint_sensitivity": missing_endpoint_worst_case,
         "pre_registered_sensitivity": sensitivity,
         "pre_registered_cohorts": cohort_reports,
         "critical_failure_at_0_10": {
+            method: _critical_failures(
+                scores, complete_pair_samples, round_trips, method
+            )
+            for method in METHODS
+        },
+        "campaign_observed_critical_failure_at_0_10": {
             method: _critical_failures(scores, samples, round_trips, method)
             for method in METHODS
         },
-        "hybridpatch_telemetry": telemetry,
+        "hybridpatch_telemetry": complete_pair_telemetry,
+        "campaign_observed_hybridpatch_telemetry": campaign_telemetry,
         "usage": {
             "result_rows_by_method": _result_usage(rows_by_cell.values()),
             "api_semantic_calls": api,
@@ -1356,7 +1531,7 @@ def analyze_campaign(
             f"identity_problems={confirmation_identity['problems'] or 'none'}, "
             f"postrun_problems={postrun_verification['problems'] or 'none'}, "
             "preservation_violations="
-            f"{telemetry['preservation']['violations']}"
+            f"{campaign_telemetry['preservation']['violations']}"
         )
     return result
 
@@ -1399,6 +1574,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Result cells: {integrity['observed_result_cells']}/{integrity['expected_result_cells']}",
         f"- Fixed n at every RT: {str(integrity['fixed_n_satisfied_at_every_round_trip']).lower()}",
         f"- Incomplete samples: {', '.join(integrity['incomplete_samples']) or 'none'}",
+        f"- Complete-pair analysis samples: "
+        f"{integrity['complete_pair_sample_count']}/{scope['selected_sample_count']}",
         f"- API integrity problems: {', '.join(integrity['api_integrity_problems']) or 'none'}",
         f"- Failure-backed committed result cells: "
         f"{len(report['usage']['api_semantic_calls']['failure_backed_committed_cells'])}.",
@@ -1473,6 +1650,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             "",
             "## CriticalFailure@0.10",
             "",
+            "> Complete-pair scope only; sample-level incomplete rows are excluded. "
+            "The threshold comparison uses a 1e-12 floating-point tolerance.",
+            "",
             "| method | failures | eligible adjacent transitions | rate |",
             "|---|---:|---:|---:|",
         ]
@@ -1483,6 +1663,22 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"| {METHOD_LABELS[method]} | {cf['count']} | "
             f"{cf['eligible_transitions']} | {_fmt(_scaled(cf['rate']))}% |"
         )
+
+    worst_case = report.get("post_hoc_missing_endpoint_sensitivity")
+    if worst_case:
+        bounds = worst_case["planned_n_mean_delta_bounds_percentage_points"]
+        lines.extend([
+            "",
+            "## Post-hoc bounded missing-endpoint sensitivity",
+            "",
+            "> This is not score imputation and does not make the campaign complete. "
+            "It assigns each missing paired delta only its mathematical bounds [-1,+1].",
+            "",
+            f"- Planned n: {worst_case['planned_n']}; observed paired n: "
+            f"{worst_case['observed_paired_n']}; missing n: {worst_case['missing_n']}.",
+            f"- Planned-n mean delta bound: "
+            f"[{_fmt(bounds[0], signed=True)}, {_fmt(bounds[1], signed=True)}] pp.",
+        ])
 
     sensitivity = report.get("pre_registered_sensitivity")
     if sensitivity:
@@ -1529,18 +1725,20 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"- W/L/T: {cohort_wlt['hybridpatch_wins']}/"
             f"{cohort_wlt['hybridpatch_losses']}/{cohort_wlt['ties']}.",
             "",
-            "| RT | fixed n | HP_V8 (%) | FullRewrite (%) | Δ (pp) |",
-            "|---:|---:|---:|---:|---:|",
+            "| RT | fixed n | paired n | HP_V8 (%) | FullRewrite (%) | Δ (pp) |",
+            "|---:|---:|---:|---:|---:|---:|",
         ])
         for row in cohort_report["round_trip_scores"]:
             lines.append(
                 f"| RT{row['round_trip']} | {row['fixed_n']} | "
+                f"{row['paired_n']} | "
                 f"{_fmt(row['hybridpatch_percent'])} | "
                 f"{_fmt(row['fullrewrite_percent'])} | "
                 f"{_fmt(row['delta_percentage_points'], signed=True)} |"
             )
 
     telemetry = report["hybridpatch_telemetry"]
+    campaign_telemetry = report["campaign_observed_hybridpatch_telemetry"]
     repair = telemetry["repair"]
     protocol = telemetry["protocol_failure"]
     preservation = telemetry["preservation"]
@@ -1548,6 +1746,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         [
             "",
             "## HybridPatch telemetry",
+            "",
+            f"> Complete-pair scope: {integrity['complete_pair_sample_count']} samples, "
+            f"{telemetry['result_steps']} committed HP rows.",
             "",
             "- Routes: "
             + (", ".join(f"`{key}`={value}" for key, value in telemetry["routes"].items()) or "none"),
@@ -1558,6 +1759,9 @@ def render_markdown(report: dict[str, Any]) -> str:
             f"({_fmt(_scaled(protocol['rate']))}%).",
             f"- Preservation violations: **{preservation['violations']}**; "
             f"ok={str(preservation['ok']).lower()}.",
+            f"- Campaign-observed preservation violations across "
+            f"{campaign_telemetry['result_steps']} committed HP rows: "
+            f"**{campaign_telemetry['preservation']['violations']}**.",
             "",
             "## Tokens and known USD",
             "",

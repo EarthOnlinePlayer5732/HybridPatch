@@ -334,6 +334,150 @@ def one_value(records: list[dict[str, Any]], key: str, *, required: bool) -> Any
     return values[0] if values else None
 
 
+def code_provenance(
+    archive: Path,
+    metadata: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Resolve one code identity or a strictly witnessed recovery transition."""
+    fingerprints = unique(metadata, "code_fingerprint")
+    commits = unique(metadata, "run_git_commit")
+    if len(fingerprints) == 1:
+        if len(commits) > 1:
+            raise RuntimeError(
+                f"run_metadata has conflicting run_git_commit values: {commits}"
+            )
+        return {
+            "code_fingerprint": fingerprints[0],
+            "code_fingerprints": fingerprints,
+            "run_git_commit": commits[0] if commits else None,
+            "run_git_commits": commits,
+            "campaign_recovery_authorization": None,
+            "provenance_warnings": [],
+        }
+
+    if len(fingerprints) != 2:
+        raise RuntimeError(
+            "new method experiment must have one code fingerprint, or exactly "
+            "two covered by a recovery authorization; "
+            f"found {len(fingerprints)}"
+        )
+    authorization_path = archive / "campaign_recovery_authorization.json"
+    if not authorization_path.is_file():
+        raise RuntimeError(
+            "new method experiment must have one code fingerprint, found 2; "
+            "campaign_recovery_authorization.json is missing"
+        )
+    authorization = load_json(authorization_path)
+    if authorization.get("schema") != (
+        "anchorpatch.campaign_recovery_authorization/1"
+    ):
+        raise RuntimeError("campaign recovery authorization schema is invalid")
+
+    prior_commit = authorization.get("prior_git_commit")
+    recovery_commit = authorization.get("recovery_git_commit")
+    prior_fingerprint = authorization.get("prior_code_fingerprint")
+    recovery_fingerprint = authorization.get("recovery_code_fingerprint")
+    if not all(
+        isinstance(value, str) and re.fullmatch(r"[0-9a-f]{40}", value)
+        for value in (prior_commit, recovery_commit)
+    ):
+        raise RuntimeError("campaign recovery authorization commits are invalid")
+    if not all(
+        isinstance(value, dict)
+        for value in (prior_fingerprint, recovery_fingerprint)
+    ):
+        raise RuntimeError(
+            "campaign recovery authorization fingerprints are invalid"
+        )
+
+    def fingerprint_marker(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+    expected_fingerprints = {
+        fingerprint_marker(prior_fingerprint),
+        fingerprint_marker(recovery_fingerprint),
+    }
+    observed_fingerprints = {
+        fingerprint_marker(value) for value in fingerprints
+    }
+    if observed_fingerprints != expected_fingerprints:
+        raise RuntimeError(
+            "campaign recovery authorization does not match metadata fingerprints"
+        )
+    expected_pairs = {
+        (prior_commit, fingerprint_marker(prior_fingerprint)),
+        (recovery_commit, fingerprint_marker(recovery_fingerprint)),
+    }
+    observed_pairs: set[tuple[str, str]] = set()
+    for record in metadata:
+        commit = record.get("run_git_commit")
+        fingerprint = record.get("code_fingerprint")
+        if commit is None and fingerprint is None:
+            continue
+        if not isinstance(commit, str) or not isinstance(fingerprint, dict):
+            raise RuntimeError(
+                "authorized recovery metadata must pair every commit and fingerprint"
+            )
+        observed_pairs.add((commit, fingerprint_marker(fingerprint)))
+    if observed_pairs != expected_pairs:
+        raise RuntimeError(
+            "campaign recovery authorization does not match metadata commit/fingerprint pairs"
+        )
+
+    changed_keys = sorted(
+        key
+        for key in set(prior_fingerprint) | set(recovery_fingerprint)
+        if prior_fingerprint.get(key) != recovery_fingerprint.get(key)
+    )
+    if authorization.get("changed_code_fingerprint_keys") != changed_keys:
+        raise RuntimeError(
+            "campaign recovery authorization changed fingerprint keys are invalid"
+        )
+    if authorization.get("recovery_git_tree_state") != "clean":
+        raise RuntimeError("campaign recovery authorization tree state is not clean")
+
+    authorization_sha256 = sha256_file(authorization_path)
+    dispatch_path = archive / "dispatch_log.jsonl"
+    if not dispatch_path.is_file():
+        raise RuntimeError("authorized recovery lacks dispatch_log.jsonl")
+    witnesses = [
+        row
+        for row in load_jsonl(dispatch_path)
+        if row.get("campaign_recovery_authorization_id")
+        == authorization.get("authorization_id")
+        and row.get("campaign_recovery_authorization_sha256")
+        == authorization_sha256
+        and row.get("prior_git_commit") == prior_commit
+        and row.get("recovery_git_commit") == recovery_commit
+    ]
+    if not witnesses:
+        raise RuntimeError(
+            "campaign recovery authorization lacks a matching dispatch witness"
+        )
+
+    authorization_fact = {
+        "schema": authorization["schema"],
+        "authorization_id": authorization.get("authorization_id"),
+        "path": repo_ref(authorization_path),
+        "sha256": authorization_sha256,
+        "prior_git_commit": prior_commit,
+        "recovery_git_commit": recovery_commit,
+        "changed_code_fingerprint_keys": changed_keys,
+        "dispatch_witness_count": len(witnesses),
+    }
+    return {
+        "code_fingerprint": recovery_fingerprint,
+        "code_fingerprints": [prior_fingerprint, recovery_fingerprint],
+        "run_git_commit": recovery_commit,
+        "run_git_commits": [prior_commit, recovery_commit],
+        "campaign_recovery_authorization": authorization_fact,
+        "provenance_warnings": [
+            "authorized recovery spans two recorded code identities; "
+            f"changed fingerprint keys: {', '.join(changed_keys)}"
+        ],
+    }
+
+
 def sha256_inputs(paths: list[Path], base: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(paths, key=lambda item: item.relative_to(base).as_posix()):
@@ -459,15 +603,11 @@ def collect_facts(owner: str, archive: Path) -> dict[str, Any]:
         if sample not in complete_samples
     }
 
-    fingerprints = unique(metadata, "code_fingerprint")
-    if len(fingerprints) != 1:
-        raise RuntimeError(
-            f"new method experiment must have one code fingerprint, found {len(fingerprints)}"
-        )
+    provenance = code_provenance(archive, metadata)
     protocols = result_protocols(all_result_rows)
     if len(protocols) > 1:
         raise RuntimeError(f"mixed protocol revisions: {protocols}")
-    run_commit = one_value(metadata, "run_git_commit", required=False)
+    run_commit = provenance["run_git_commit"]
     if run_commit is None:
         run_commit = one_value(metadata, "git_commit", required=False)
     git_tree_state = one_value(metadata, "git_tree_state", required=False)
@@ -501,6 +641,12 @@ def collect_facts(owner: str, archive: Path) -> dict[str, Any]:
     except ValueError as exc:
         raise RuntimeError("finished_at must be an ISO-8601 timestamp") from exc
 
+    if provenance["campaign_recovery_authorization"] is not None:
+        input_paths.extend([
+            archive / "campaign_recovery_authorization.json",
+            archive / "dispatch_log.jsonl",
+        ])
+
     return {
         "schema": "hybridpatch.derived_experiment_facts/1",
         "owner": owner,
@@ -531,12 +677,17 @@ def collect_facts(owner: str, archive: Path) -> dict[str, Any]:
         "thinking_mode": thinking_mode,
         "max_tokens": max_tokens,
         "protocol_revision": protocols[0] if protocols else None,
-        "code_fingerprint": fingerprints[0],
+        "code_fingerprint": provenance["code_fingerprint"],
+        "code_fingerprints": provenance["code_fingerprints"],
         "run_git_commit": run_commit,
+        "run_git_commits": provenance["run_git_commits"],
         "git_tree_state": git_tree_state,
         "started_at": started_at,
         "finished_at": finished_at,
-        "provenance_warnings": [],
+        "campaign_recovery_authorization": provenance[
+            "campaign_recovery_authorization"
+        ],
+        "provenance_warnings": provenance["provenance_warnings"],
     }
 
 
@@ -654,6 +805,53 @@ def review_template(facts: dict[str, Any], verification_rows: int) -> dict[str, 
     }
 
 
+def populate_complete_pair_view(
+    archive: Path,
+    view: Path,
+    methods: list[str],
+    samples: list[str],
+) -> None:
+    """Copy only complete paired result rows into a temporary analysis view."""
+    for method in methods:
+        destination = view / method
+        destination.mkdir(parents=True, exist_ok=True)
+        for sample in samples:
+            source = archive / method / f"{sample}.jsonl"
+            if not source.is_file():
+                raise RuntimeError(
+                    f"complete-pair analysis source is missing: {repo_ref(source)}"
+                )
+            shutil.copyfile(source, destination / source.name)
+
+
+def annotate_incomplete_analysis(
+    analysis: Path,
+    scope: dict[str, Any],
+) -> None:
+    comparison_path = analysis / "comparison.md"
+    comparison = comparison_path.read_text(encoding="utf-8")
+    incomplete = ", ".join(scope["incomplete_sample_ids"])
+    notice = (
+        "> Campaign status: **incomplete**. This report is a derived "
+        f"complete-pair view over {scope['analysis_sample_count']}/"
+        f"{scope['planned_sample_count']} planned samples. Excluded incomplete "
+        f"samples: {incomplete}. Missing endpoints remain null; no zero score "
+        "was imputed. This is not the canonical complete campaign endpoint.\n\n"
+    )
+    write_atomic(comparison_path, notice + comparison)
+
+    endpoint_path = analysis / "sample_level_final_endpoint.json"
+    endpoint = load_json(endpoint_path)
+    endpoint.update({
+        "campaign_complete": False,
+        "campaign_expected_n": scope["planned_sample_count"],
+        "campaign_incomplete_sample_ids": scope["incomplete_sample_ids"],
+        "analysis_sample_policy": scope["sample_policy"],
+        "score_imputed_for_incomplete_samples": False,
+    })
+    write_atomic(endpoint_path, stable_json(endpoint))
+
+
 def prepare_experiment(
     experiment: Path,
     *,
@@ -709,25 +907,75 @@ def prepare_experiment(
             f"{facts['committed_backward_rows']}"
         )
 
-    analyzer = run_logged(
-        [
-            sys.executable,
-            "-B",
-            "src/analyze.py",
-            "--dir",
-            f"./{archive.name}",
-            "--K",
-            str(facts["round_trips"]),
-            "--critical_theta",
-            str(critical_theta),
-        ],
-        cwd=owner_path,
-        log_path=analysis / "analysis.log",
-        display=(
-            f"python -B ./src/analyze.py --dir ./{archive.name} "
-            f"--K {facts['round_trips']} --critical_theta {critical_theta}"
-        ),
-    )
+    incomplete_sample_ids = sorted(facts["incomplete_samples"])
+    analysis_scope = {
+        "schema": "hybridpatch.complete_pair_analysis_scope/1",
+        "campaign_complete": not incomplete_sample_ids,
+        "planned_sample_count": facts["planned_sample_count"],
+        "analysis_sample_count": len(facts["complete_all_methods_sample_ids"]),
+        "analysis_sample_ids": facts["complete_all_methods_sample_ids"],
+        "incomplete_sample_ids": incomplete_sample_ids,
+        "sample_policy": "complete_all_methods",
+        "score_imputed_for_incomplete_samples": False,
+    }
+    if incomplete_sample_ids:
+        write_atomic(
+            analysis / "complete_pair_analysis_scope.json",
+            stable_json(analysis_scope),
+        )
+        with tempfile.TemporaryDirectory(
+            prefix=".complete_pair_analysis_", dir=owner_path
+        ) as temporary:
+            view = Path(temporary)
+            populate_complete_pair_view(
+                archive,
+                view,
+                facts["methods"],
+                facts["complete_all_methods_sample_ids"],
+            )
+            analyzer = run_logged(
+                [
+                    sys.executable,
+                    "-B",
+                    "src/analyze.py",
+                    "--dir",
+                    str(view),
+                    "--out",
+                    str(analysis),
+                    "--K",
+                    str(facts["round_trips"]),
+                    "--critical_theta",
+                    str(critical_theta),
+                ],
+                cwd=owner_path,
+                log_path=analysis / "analysis.log",
+                display=(
+                    "python -B ./src/analyze.py --dir <complete-pair-view> "
+                    f"--out ./{archive.name}/analysis "
+                    f"--K {facts['round_trips']} "
+                    f"--critical_theta {critical_theta}"
+                ),
+            )
+    else:
+        analyzer = run_logged(
+            [
+                sys.executable,
+                "-B",
+                "src/analyze.py",
+                "--dir",
+                f"./{archive.name}",
+                "--K",
+                str(facts["round_trips"]),
+                "--critical_theta",
+                str(critical_theta),
+            ],
+            cwd=owner_path,
+            log_path=analysis / "analysis.log",
+            display=(
+                f"python -B ./src/analyze.py --dir ./{archive.name} "
+                f"--K {facts['round_trips']} --critical_theta {critical_theta}"
+            ),
+        )
     if analyzer.returncode != 0:
         raise RuntimeError(
             f"analysis failed; inspect {repo_ref(analysis / 'analysis.log')}"
@@ -738,6 +986,8 @@ def prepare_experiment(
     ):
         if not required.is_file():
             raise RuntimeError(f"analysis output missing: {repo_ref(required)}")
+    if incomplete_sample_ids:
+        annotate_incomplete_analysis(analysis, analysis_scope)
 
     facts["verification"] = {
         "status": "pass",
@@ -749,7 +999,16 @@ def prepare_experiment(
         "rows_ref": repo_ref(analysis / "experiment_results.csv"),
         "log_ref": repo_ref(analysis / "analysis.log"),
         "critical_theta": critical_theta,
+        "campaign_complete": analysis_scope["campaign_complete"],
+        "sample_policy": analysis_scope["sample_policy"],
+        "analysis_sample_count": analysis_scope["analysis_sample_count"],
+        "incomplete_sample_ids": analysis_scope["incomplete_sample_ids"],
+        "score_imputed_for_incomplete_samples": False,
     }
+    if incomplete_sample_ids:
+        facts["analysis"]["scope_ref"] = repo_ref(
+            analysis / "complete_pair_analysis_scope.json"
+        )
     write_atomic(analysis / "derived_facts.json", stable_json(facts))
     review = review_template(facts, verified_rows)
     yaml_content = yaml.safe_dump(
