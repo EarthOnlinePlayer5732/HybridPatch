@@ -1728,6 +1728,17 @@ class IntegrationContractTests(unittest.TestCase):
         infrastructure_incomplete = set()
         evaluator_incomplete = set()
         completed = set()
+        inspection_calls = []
+
+        def fake_inspect(*_args, **kwargs):
+            inspection_calls.append({
+                "active_samples": set(kwargs.get("active_samples") or []),
+                "required_complete_samples": set(
+                    kwargs.get("required_complete_samples") or []),
+            })
+            return {"errors": [], "api_calls": 0,
+                    "preservation_violations": 0}
+
         with tempfile.TemporaryDirectory() as out_dir, \
                 mock.patch.object(
                     paired_dispatch, "_launch_worker_batch",
@@ -1737,10 +1748,10 @@ class IntegrationContractTests(unittest.TestCase):
                     side_effect=fake_exit), \
                 mock.patch.object(
                     paired_dispatch, "inspect_campaign",
-                    return_value={"errors": [], "api_calls": 0,
-                                  "preservation_violations": 0}), \
+                    side_effect=fake_inspect), \
                 mock.patch.object(
-                    paired_dispatch, "_write_active_worker_set"), \
+                    paired_dispatch,
+                    "_write_active_worker_set") as write_active, \
                 mock.patch.object(paired_dispatch.time, "sleep"):
             paired_dispatch._run_worker_queue(
                 args, out_dir, {"run_git_commit": "1" * 40}, {}, {},
@@ -1758,6 +1769,13 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertEqual(infrastructure_incomplete, set())
         self.assertEqual(evaluator_incomplete, {"sample-a"})
         self.assertEqual(completed, {"sample-b", "sample-c", "sample-x"})
+        self.assertEqual(len(inspection_calls), 3)
+        self.assertEqual(
+            [call["required_complete_samples"]
+             for call in inspection_calls],
+            [set(), {"sample-b", "sample-c"}, {"sample-x"}],
+        )
+        self.assertEqual(write_active.call_count, 4)
 
     def test_confirmation_duplicate_key_value_fails_before_provider(self):
         samples = [f"sample-{index:03d}" for index in range(68)]

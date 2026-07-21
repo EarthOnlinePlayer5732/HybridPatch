@@ -649,3 +649,11 @@ Windows `os.replace(run_metadata.jsonl)` 的瞬时 `WinError 5`；dispatcher 按
 Windows 5/32/33 sharing/access violation 做最多 60 秒的短间隔重试，其他错误与超时继续
 fail closed，原子替换和 metadata 锁语义不变。最新零 API dispatcher/transport/runner 回归为
 129/129 PASS。
+
+恢复后的 FR 队列进一步暴露了调度吞吐问题：一次 poll 中已有多个 worker 正常结束时，旧实现
+会为每个完成样本重新扫描全部 campaign ledger，并在每次扫描之间串行更新 active set，导致
+同 Key 的空闲槽长期不能补位。调度器现先收集该 poll 的全部退出 worker，只写一次 active set，
+再用一个 `required_complete_samples` 集合做一次完整性审计；审计通过后下一轮立即按 Key 的空槽
+补位。全局完整性检查、样本完成条件、preservation 停止条件和每 Key 并发上限均不变。新增测试
+固定一次 poll 内多个完成样本只触发一次合并审计；完整零 API 回归为 executor 72/72、
+dispatcher/transport/runner 129/129、analysis 5/5、splitters byte-exact PASS。

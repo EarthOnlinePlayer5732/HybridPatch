@@ -4997,14 +4997,8 @@ def _run_worker_queue(
             break
 
         time.sleep(args.poll_interval)
-        last_inspection = inspect_campaign(
-            out_dir, inspection_manifest,
-            active_samples=set(running),
-            method_phase=method_phase,
-        )
-        if last_inspection["errors"]:
-            raise RuntimeError("; ".join(last_inspection["errors"]))
         exited = []
+        completed_in_poll = set()
         for sample, item in list(running.items()):
             returncode = item["process"].poll()
             if returncode is None:
@@ -5012,8 +5006,6 @@ def _run_worker_queue(
             disposition = _record_worker_exit(
                 out_dir, running, sample, item, returncode,
                 dispatch_log)
-            _write_active_worker_set(
-                out_dir, inspection_manifest, running.values())
             exited.append({"sample": sample, "disposition": disposition})
             if disposition == "infrastructure_incomplete":
                 infrastructure_incomplete_samples.add(sample)
@@ -5022,16 +5014,22 @@ def _run_worker_queue(
                 evaluator_incomplete_samples.add(sample)
                 continue
             completed_samples.add(sample)
-            sample_inspection = inspect_campaign(
-                out_dir, inspection_manifest,
-                active_samples=set(running),
-                required_complete_samples={sample},
-                method_phase=method_phase,
-            )
-            if sample_inspection["errors"]:
-                raise RuntimeError(
-                    "; ".join(sample_inspection["errors"])
-                )
+            completed_in_poll.add(sample)
+        if exited:
+            _write_active_worker_set(
+                out_dir, inspection_manifest, running.values())
+        # One inspection covers every worker observed exiting in this poll.
+        # Re-reading the full append-only campaign ledgers once per sample
+        # serialized otherwise independent key queues and left healthy slots
+        # idle for minutes as campaigns grew.
+        last_inspection = inspect_campaign(
+            out_dir, inspection_manifest,
+            active_samples=set(running),
+            required_complete_samples=completed_in_poll,
+            method_phase=method_phase,
+        )
+        if last_inspection["errors"]:
+            raise RuntimeError("; ".join(last_inspection["errors"]))
         if exited:
             append_jsonl_locked(
                 dispatch_log,

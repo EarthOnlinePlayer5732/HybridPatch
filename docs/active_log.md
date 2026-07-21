@@ -860,3 +860,11 @@
   no API, attempt, result, or checkpoint row was added. JSONL atomic replacement now retries only Windows
   sharing/access errors 5/32/33 for at most 60 seconds and otherwise remains fail-closed. The focused
   zero-API regression covers one denied replace followed by a successful byte-valid replacement.
+- queue refill latency: after the clean recovery launched successfully, completed FR workers were removed
+  one at a time because each exit triggered a full campaign-ledger inspection. The active count therefore
+  fell while healthy per-Key slots stayed idle; this was dispatcher scan serialization, not provider,
+  evaluator, protocol, or preservation failure. At the user-directed pause all 12 still-registered worker
+  PIDs had already exited, so no in-flight provider worker was terminated. The queue now batches every exit
+  observed in one poll into one integrity inspection and one active-set write, then refills every free
+  per-Key slot. Existing committed RTs and raw ledger rows remain unchanged; recovery continues this same
+  experiment from each first uncommitted FR step.
