@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import process_experiment as process
@@ -241,6 +243,17 @@ class ProcessExperimentTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "REVIEW_REQUIRED"):
             process.validate_review(review, self.facts())
 
+    def test_review_rejects_catalog_vocab_before_record_build(self) -> None:
+        review = self.review()
+        review["catalog_entry"]["status"] = "failed_informative"
+        with self.assertRaisesRegex(RuntimeError, "catalog_entry.status"):
+            process.validate_review(review, self.facts())
+
+        review = self.review()
+        review["catalog_entry"]["evidence_role"] = "supporting_confirmation"
+        with self.assertRaisesRegex(RuntimeError, "catalog_entry.evidence_role"):
+            process.validate_review(review, self.facts())
+
     def test_review_requires_pre_registered_plan_source(self) -> None:
         review = self.review()
         review["catalog_entry"]["source_reports"] = [
@@ -415,6 +428,8 @@ class ProcessExperimentTests(unittest.TestCase):
                 "planned_sample_count": 2,
                 "analysis_sample_count": 1,
                 "incomplete_sample_ids": ["broken"],
+                "incomplete_sample_outcomes": {
+                    "broken": "evaluator_incomplete"},
                 "sample_policy": "complete_all_methods",
             }
 
@@ -428,6 +443,232 @@ class ProcessExperimentTests(unittest.TestCase):
             self.assertIn("no zero score was imputed", comparison)
             self.assertFalse(endpoint["campaign_complete"])
             self.assertFalse(endpoint["score_imputed_for_incomplete_samples"])
+            self.assertEqual(
+                endpoint["campaign_incomplete_sample_outcomes"],
+                {"broken": "evaluator_incomplete"},
+            )
+
+    def test_review_check_runs_validate_only_before_heavy_hashing(self) -> None:
+        catalog = {"schema": "fixture", "record_sets": []}
+        with tempfile.TemporaryDirectory(dir=process.ROOT) as directory:
+            archive = Path(directory) / "exp_test"
+            archive.mkdir()
+            with (
+                mock.patch.object(
+                    process,
+                    "reviewed_finalization_inputs",
+                    return_value=(
+                        "HP_V8",
+                        archive,
+                        self.facts(),
+                        self.review()["catalog_entry"],
+                        catalog,
+                    ),
+                ),
+                mock.patch.object(
+                    process.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=0),
+                ) as run,
+            ):
+                process.review_check_experiment(archive, None)
+
+        command = run.call_args.args[0]
+        self.assertIn("--validate-only", command)
+        self.assertIn("--skip-tree-hash", command)
+
+    def test_review_check_propagates_contract_failure_before_hashing(self) -> None:
+        with tempfile.TemporaryDirectory(dir=process.ROOT) as directory:
+            archive = Path(directory) / "exp_test"
+            archive.mkdir()
+            with (
+                mock.patch.object(
+                    process,
+                    "reviewed_finalization_inputs",
+                    return_value=(
+                        "HP_V8",
+                        archive,
+                        self.facts(),
+                        self.review()["catalog_entry"],
+                        {"schema": "fixture", "record_sets": []},
+                    ),
+                ),
+                mock.patch.object(
+                    process.subprocess,
+                    "run",
+                    return_value=SimpleNamespace(returncode=1),
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "before raw-tree"):
+                    process.review_check_experiment(archive, None)
+
+    def test_private_record_helpers_preserve_orphan_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog_path = root / "tools" / "experiment_records_catalog.json"
+            catalog_path.parent.mkdir(parents=True)
+            catalog = {
+                "record_sets": [
+                    {
+                        "owner": "HP_V8",
+                        "experiments": [{"experiment_id": "published"}],
+                    }
+                ]
+            }
+            catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+            (root / "docs").mkdir()
+            (root / "docs" / "EXPERIMENT_INDEX.md").write_text(
+                "old index", encoding="utf-8"
+            )
+            records = root / "HP_V8" / "records"
+            (records / "published").mkdir(parents=True)
+            (records / "published" / "report.md").write_text(
+                "published", encoding="utf-8"
+            )
+            (records / "orphan").mkdir()
+            (records / "orphan" / "report.md").write_text(
+                "private", encoding="utf-8"
+            )
+            (root / "HP_V8" / "EXPERIMENTS.md").write_text(
+                "old owner index", encoding="utf-8"
+            )
+
+            with (
+                mock.patch.object(process, "ROOT", root),
+                mock.patch.object(process, "CATALOG", catalog_path),
+                tempfile.TemporaryDirectory(dir=root) as backup_dir,
+            ):
+                orphans = process.orphan_record_directories(catalog)
+                self.assertEqual(orphans, [records / "orphan"])
+                snapshots = process.snapshot_generated(
+                    catalog, Path(backup_dir)
+                )
+                (records / "orphan" / "report.md").write_text(
+                    "changed", encoding="utf-8"
+                )
+                process.restore_generated(snapshots)
+                self.assertEqual(
+                    (records / "orphan" / "report.md").read_text(
+                        encoding="utf-8"
+                    ),
+                    "private",
+                )
+
+                bundle = root / "private" / "record.tgz"
+                digest = process.write_private_record_bundle(
+                    bundle,
+                    owner="HP_V8",
+                    experiment_id="published",
+                )
+                self.assertRegex(digest, r"^[0-9a-f]{64}$")
+                with tarfile.open(bundle, "r:gz") as handle:
+                    self.assertIn(
+                        "HP_V8/records/published/report.md",
+                        handle.getnames(),
+                    )
+
+    def test_private_finalize_bundles_generated_state_then_restores_orphan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog_path = root / "tools" / "experiment_records_catalog.json"
+            catalog_path.parent.mkdir(parents=True)
+            original_catalog = {
+                "record_sets": [
+                    {
+                        "owner": "HP_V8",
+                        "experiments": [{"experiment_id": "published"}],
+                    }
+                ]
+            }
+            prospective_catalog = json.loads(json.dumps(original_catalog))
+            prospective_catalog["record_sets"][0]["experiments"].append(
+                {"experiment_id": "exp_test"}
+            )
+            catalog_path.write_text(
+                process.stable_json(original_catalog), encoding="utf-8"
+            )
+            (root / "docs").mkdir()
+            (root / "docs" / "EXPERIMENT_INDEX.md").write_text(
+                "original index", encoding="utf-8"
+            )
+            owner = root / "HP_V8"
+            records = owner / "records"
+            (records / "published").mkdir(parents=True)
+            (records / "published" / "report.md").write_text(
+                "published", encoding="utf-8"
+            )
+            orphan = records / "exp_test"
+            orphan.mkdir()
+            (orphan / "report.md").write_text(
+                "old private record", encoding="utf-8"
+            )
+            (owner / "EXPERIMENTS.md").write_text(
+                "original owner index", encoding="utf-8"
+            )
+            archive = owner / "exp_test"
+            (archive / "analysis").mkdir(parents=True)
+            bundle = root / "private" / "record.tgz"
+
+            def generate_state(*_args, **_kwargs):
+                target = records / "exp_test"
+                target.mkdir(parents=True)
+                (target / "report.md").write_text(
+                    "new validated record", encoding="utf-8"
+                )
+                (root / "docs" / "EXPERIMENT_INDEX.md").write_text(
+                    "prospective index", encoding="utf-8"
+                )
+                (owner / "EXPERIMENTS.md").write_text(
+                    "prospective owner index", encoding="utf-8"
+                )
+                return SimpleNamespace(returncode=0)
+
+            with (
+                mock.patch.object(process, "ROOT", root),
+                mock.patch.object(process, "CATALOG", catalog_path),
+                mock.patch.object(
+                    process,
+                    "reviewed_finalization_inputs",
+                    return_value=(
+                        "HP_V8",
+                        archive,
+                        {"input_sha256": "a" * 64},
+                        {"experiment_id": "exp_test"},
+                        prospective_catalog,
+                    ),
+                ),
+                mock.patch.object(
+                    process.subprocess,
+                    "run",
+                    side_effect=generate_state,
+                ),
+            ):
+                process.finalize_experiment(
+                    archive,
+                    None,
+                    private_record_bundle=bundle,
+                )
+
+            self.assertEqual(
+                json.loads(catalog_path.read_text(encoding="utf-8")),
+                original_catalog,
+            )
+            self.assertEqual(
+                (orphan / "report.md").read_text(encoding="utf-8"),
+                "old private record",
+            )
+            state = json.loads(
+                (archive / "analysis" / "process_state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(state["stage"], "finalized_private")
+            with tarfile.open(bundle, "r:gz") as handle:
+                report = handle.extractfile(
+                    "HP_V8/records/exp_test/report.md"
+                )
+                assert report is not None
+                self.assertEqual(report.read().decode(), "new validated record")
 
 
 if __name__ == "__main__":

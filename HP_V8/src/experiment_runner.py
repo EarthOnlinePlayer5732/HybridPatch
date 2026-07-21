@@ -41,6 +41,7 @@ from run_meta import (RunLogger, dump_step_docs, append_run_metadata,
                       finish_run_metadata, register_task_plan,
                       ApiCallRecorder, record_model_content_anomaly,
                       append_relay_rows_and_checkpoint, write_json_atomic,
+                      append_jsonl_locked,
                       enforce_active_worker_authorization,
                       enforce_campaign_runtime_guards,
                       read_campaign_stop_conditions,
@@ -61,6 +62,31 @@ SAMPLES_ROOT = os.path.join(_ROOT, "data", "samples_delegate52")
 RESULTS_DIR = os.path.join(_HERE, "experiment_results")
 DEFAULT_SAMPLES = ["accounting1", "accounting2", "accounting3", "accounting4",
                    "accounting5", "accounting6", "calendar1", "calendar5"]
+
+
+class EvaluatorIncompleteError(RuntimeError):
+    """A sample-local domain evaluator exception after model generation."""
+
+    _anchorpatch_failure_class = "evaluator_incomplete"
+
+    def __init__(self, sample_id, method, rt_index, direction,
+                 target_state_id, cause):
+        error_type = (
+            f"{type(cause).__module__}.{type(cause).__qualname__}"
+        )
+        error_message = str(cause) or repr(cause)
+        super().__init__(
+            "domain evaluator failed for "
+            f"{method}/{sample_id}/RT{rt_index}/{direction}: "
+            f"{error_type}: {error_message}"
+        )
+        self.sample_id = sample_id
+        self.method = method
+        self.rt_index = rt_index
+        self.direction = direction
+        self.target_state_id = target_state_id
+        self.error_type = error_type
+        self.error_message = error_message
 
 
 def _dispatch_worker_start_barrier(out_dir, samples, num_round_trips,
@@ -743,7 +769,9 @@ def _edit_step(method, domain, sample_id, model, current_context, distractor,
     return raw, gen_real, meta, exec_log, method_tag, input_real, v2_info
 
 
-def _evaluate(domain, sample_id, gen_real, target_state, target_filenames):
+def _evaluate(domain, sample_id, gen_real, target_state, target_filenames, *,
+              method=None, rt_index=None, direction=None,
+              target_state_id=None):
     if not is_context_complete(gen_real, target_filenames):
         return {"error": "context_mismatch",
                 "detailed_error": "one or more target files missing from output"}
@@ -753,7 +781,19 @@ def _evaluate(domain, sample_id, gen_real, target_state, target_filenames):
         valid, err_msg = validate_wildcard_context(gen_real, target_filenames)
         if not valid:
             return {"error": "wildcard_mismatch", "detailed_error": err_msg}
-    return domain.evaluate_context(sample_id, gen_real, target_state)
+    try:
+        return domain.evaluate_context(sample_id, gen_real, target_state)
+    except Exception as exc:
+        if (not isinstance(method, str) or not method
+                or not isinstance(rt_index, int) or isinstance(rt_index, bool)
+                or rt_index < 1
+                or direction not in {"forward", "backward"}
+                or not isinstance(target_state_id, str)
+                or not target_state_id):
+            raise
+        raise EvaluatorIncompleteError(
+            sample_id, method, rt_index, direction, target_state_id, exc
+        ) from exc
 
 
 def _row(method, sample_id, sample_type, model, rid_chain, state_chain, rt_num,
@@ -929,7 +969,12 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
             raise
         fwd_changed = (gen_real != in_real)
         with log.capture("eval"):
-            evaluation = _evaluate(domain, sample_id, gen_real, fwd_state, list(fwd_state["context"]))
+            evaluation = _evaluate(
+                domain, sample_id, gen_real, fwd_state,
+                list(fwd_state["context"]), method=method,
+                rt_index=rt_num, direction="forward",
+                target_state_id=fwd_target_id,
+            )
         fwd_target = list(fwd_state["context"])
         fwd_out = sorted(gen_real.keys())
         fwd_complete = is_context_complete(gen_real, fwd_target)
@@ -977,7 +1022,12 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
             raise
         bwd_changed = (gen_real != in_real)
         with log.capture("eval"):
-            evaluation = _evaluate(domain, sample_id, gen_real, initial_state, list(initial_state["context"]))
+            evaluation = _evaluate(
+                domain, sample_id, gen_real, initial_state,
+                list(initial_state["context"]), method=method,
+                rt_index=rt_num, direction="backward",
+                target_state_id=initial_state_id,
+            )
         bwd_out = sorted(gen_real.keys())
         rid_chain.append(generate_response_id()); state_chain.append(initial_state_id)
         bwd_row = _row(method, sample_id, sample_type, model, rid_chain, state_chain,
@@ -1105,6 +1155,70 @@ def _sample_checkpoint_progress(out_dir, sample_id, methods):
     return progress
 
 
+def _record_evaluator_incomplete(out_dir, sample_id, methods,
+                                 num_round_trips, invocation_id, exc):
+    """Persist a fail-closed, sample-local evaluator failure record."""
+    progress = _sample_checkpoint_progress(out_dir, sample_id, methods)
+    failure_index = methods.index(exc.method)
+    expected = {}
+    for index, method in enumerate(methods):
+        completed = (
+            num_round_trips if index < failure_index
+            else exc.rt_index - 1 if index == failure_index
+            else 0
+        )
+        expected[method] = {
+            "completed_round_trips": completed,
+            "committed_rows": 2 * completed,
+        }
+    if progress != expected:
+        raise RuntimeError(
+            "evaluator failure cannot be isolated because committed progress "
+            f"is not the expected atomic prefix: actual={progress!r} "
+            f"expected={expected!r}"
+        ) from exc
+    details = {
+        "invocation_id": invocation_id,
+        "methods": list(methods),
+        "method": exc.method,
+        "rt_index": exc.rt_index,
+        "direction": exc.direction,
+        "target_state": exc.target_state_id,
+        "failure_stage": "evaluator",
+        "error_type": exc.error_type,
+        "error_message": exc.error_message,
+        "checkpoint_progress": progress,
+        "result_committed_for_failed_step": False,
+        "score_imputed": False,
+        "evidence": {
+            "api_calls": "api_calls.jsonl",
+            "attempt_ledger": "api_attempt_ledger.jsonl",
+            "run_metadata": "run_metadata.jsonl",
+            "sample_outcomes": "sample_outcomes.jsonl",
+        },
+    }
+    outcome = record_sample_outcome(
+        out_dir, sample_id, "evaluator_incomplete", **details)
+    sidecar = {
+        "schema": "anchorpatch.evaluator_incomplete/2",
+        "created_at": outcome["created_at"],
+        "sample": sample_id,
+        "status": "evaluator_incomplete",
+        "disposition": "cancel_sample_continue_campaign",
+        "worker_launch_id": outcome.get("worker_launch_id"),
+        "worker_pid": outcome.get("worker_pid"),
+        **details,
+    }
+    source_log = os.environ.get("ANCHORPATCH_WORKER_CONSOLE_LOG")
+    if source_log:
+        sidecar["source_log"] = source_log
+    append_jsonl_locked(
+        os.path.join(out_dir, "evaluator_incomplete_samples.jsonl"),
+        sidecar,
+    )
+    return sidecar
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--sample", nargs="+", default=DEFAULT_SAMPLES)
@@ -1184,8 +1298,17 @@ def main():
                     args.out_dir, args.sample[0], args.methods),
             )
     except Exception as exc:
-        if (getattr(exc, "_anchorpatch_failure_class", None)
-                == "infrastructure_incomplete" and len(args.sample) == 1):
+        failure_class = getattr(exc, "_anchorpatch_failure_class", None)
+        if (failure_class == "evaluator_incomplete"
+                and len(args.sample) == 1
+                and isinstance(exc, EvaluatorIncompleteError)):
+            finish_status = "evaluator_incomplete"
+            _record_evaluator_incomplete(
+                args.out_dir, args.sample[0], list(args.methods),
+                args.num_round_trips, run_metadata["invocation_id"], exc,
+            )
+        elif (failure_class == "infrastructure_incomplete"
+                and len(args.sample) == 1):
             finish_status = "infrastructure_incomplete"
             api_record = getattr(exc, "_anchorpatch_api_record", None) or {}
             record_sample_outcome(

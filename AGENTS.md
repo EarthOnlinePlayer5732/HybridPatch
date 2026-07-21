@@ -49,6 +49,14 @@
 - 输出多个文件片段时，为每段添加文件名和行号标题。不要把无边界的切片连续打印，造成代码似乎错位或损坏的假象。
 - 已知符号或报错优先定向搜索；只有定向搜索不足时才扩大到隐藏目录、父仓库或用户目录。
 
+## 研究代码简约与完整修改
+
+- 不要过度工程化。把复杂度用在会直接影响研究问题的部分：数据与任务计划、训练流程（若有）、模型或提示/协议设计、损失或评测设计（若有）；不要为假设中的未来需求预建框架、抽象层、插件系统或通用平台。
+- 保持核心代码和主调用链简约、可读、可验证。代码组织与风格优先参考成熟、主流、高采用度的基线仓库及本项目既有实现，不追求自创范式。
+- 修改前先理解入口、调用链、数据流、测试和兼容边界；实施时完成一个最小但完整的闭环。避免把同一个明确改动拆成长期堆叠的零碎补丁，能在一次变更中完整改到位的，就同步处理实现、调用方、测试、配置和文档。
+- “一次改到位”不等于大范围重写。存在高不确定性、不可逆风险或需要实验验证时，仍应先用最小样本、合成输入或短路径验证，再完成正式变更。
+- 减少没有真实故障、调用证据或威胁模型支撑的边界包装、安全声明、防御分支和静默兜底；同时不得削弱本项目已有的凭据保护、冻结边界、实验完整性、数据只读、传输完整性和可重放要求。
+
 ## Python 子进程与测试替身
 
 - 从目标 `HP_Vx` 根用 `python -c` 导入该版 `src/` 中的顶层模块时，必须显式设置 `PYTHONPATH`，或使用脚本自带 bootstrap。父进程对 `sys.path` 的修改不会自动传给新的 Python 解释器。
@@ -58,13 +66,22 @@
 
 ## 实验运行安全
 
-- 任何 API 实验启动前依次执行：零 API dry-run、依赖与数据 preflight、Key 小探针、目标命令复核。没有全部通过不得正式开跑。
+- 新 API 实验开跑前，优先用 `tools/preflight_experiment.py` 一次生成零 API preflight receipt：复用未变代码的回归结果，并对正式 manifest 中的样本并行运行 runtime evaluator。dispatcher dry-run 仍每次执行，以核对本次 task plan、out_dir 和命令身份；该工具不执行 Key probe，也不启动正式 worker。
+- 零 API 缓存只复用输入指纹完全一致且成功的结果。代码、Python runtime 或样本内容变化时只重跑失效部分，失败结果不得缓存为通过。Key 小探针仍是独立的真实 provider 请求，成功 receipt 不能替代 Key probe。全部通过后再做最终命令复核并开跑。
 - 方法实验输出放所属 `HP_Vx/exp_*`；传输诊断放顶层 `transport/exp_*`；baseline 放顶层 `Baseline/exp_*`。从 HP 根引用后两者时使用 `../transport/...` / `../Baseline/...`。
 - 新方法语义先复制最新 `HP_Vx` 为下一版本再改；冻结版永不回改。API 修改只在 `transport/` 开发，验证后仅同步到新建的可写 HP 并记录指纹，绝不回灌冻结版本。
 - evaluator 的 import 成功不代表样本可运行。全量付费实验前应对样本自带 scaffold / runtime evaluator 做零 API smoke test，捕获只在 `evaluate_context()` 执行时出现的缺文件或缺模块问题。
 - runner 因本地异常退出时，先判断异常发生在 API 调用前还是调用后；必须检查 `api_calls.jsonl` / `api_raw`，不能仅凭缺少 checkpoint 推断“没有花费”。
 - 本地确定性错误（缺模块、路径错误、评估器异常）不得通过换 Key 连续重试。修复根因前不要重新启动同一样本。
 - 断点续跑只补未提交 RT，不删除、覆盖或重掷已提交行。不得同时运行两个指向同一 `out_dir` 的调度器。
+- 大规模 paired campaign 使用 dispatcher 的 per-Key work-conserving 队列：每个 Key 的
+  worker 数不得超过 `--slots_per_key`，但任一槽位释放后应立即从同一 Key 的 FIFO 队列
+  补位，不等待其他 Key 或同一批 worker 全部结束。manifest 必须记录 dispatch policy、
+  每 Key 队列和最大并发。
+- `domain.evaluate_context()` 抛出的样本级异常只有在 runner 已写入
+  `evaluator_incomplete` outcome、run metadata、正式 sidecar，且能证明失败步骤未提交、未补
+  0 时才允许隔离该样本并继续队列。该状态在本 campaign 中是终态，resume 不重发；普通
+  本地代码异常、evaluator 证据不完整、preservation 或共享完整性错误仍全局停止。
 - 分析结果前先检查样本数、每样本行数、checkpoint 和已有结果复核记录。冻结归档只读既有记录，不为文档或派生分析重复运行复核脚本；缺失样本必须显式排除并报告，不能静默按 0 分或假装完整。
 - 新 HP_V8+ 实验收尾统一使用 `tools/process_experiment.py prepare → review → finalize`。`prepare` 前必须确认 worker 已停止；机械事实不得代替 canonical scope、排除理由、claim role 和 paper reporting 的显式 review。冻结 HP_V3–HP_V7 不得交给该流程重新处理。
 
@@ -78,7 +95,7 @@
 2. 从 [`docs/experiment_plans/TEMPLATE.md`](./docs/experiment_plans/TEMPLATE.md) 创建 `docs/experiment_plans/<experiment_id>.md`。计划至少写明：迭代来源与思路、研究问题、可证伪假设、相对上一版的唯一变化、代码/配置/模型/API/transport/prompt/protocol/executor、数据划分与样本编号、seed、task plan、运行命令、指标、预注册排除、成功/失败/停止条件、预算、风险和原始日志保留级别。来自外部模型（例如 Web 审阅模型）的建议必须先转写为可验证假设，不能直接当作结论。
 3. 在 `docs/active_log.md` 追加 `Before Experiment` 条目并链接计划文件。若本次实验引入新方法版本、transport revision 或新样本曝光，还必须在开跑前分别更新目标 `HP_Vx/VERSION.md`、`transport/API_ITERATION_LOG.md` 或 `data/CONTAMINATION_REGISTRY.json`。
 4. 正式主实验和支持性付费实验开跑前，主 Agent 必须创建一个只读的“实验计划审阅”子代理。该子代理检查混杂因素、数据污染、比较公平性、指标、排除规则、停止条件、运行身份和复现信息，只给出 `GO`、`GO WITH FIXES` 或 `NO-GO` 及证据；由主 Agent 独占文件写入权并落实修改。付费 smoke 可由主 Agent 完成同一清单，但必须在计划中说明未单独创建子代理的理由。
-5. 依次完成零 API dry-run、依赖与数据 preflight、样本 runtime evaluator smoke、Key 小探针和最终命令复核。计划或 preflight 未闭合时不得调用正式 API。
+5. 使用 `tools/preflight_experiment.py` 完成零 API 回归、正式 manifest dry-run 和样本 runtime evaluator 检查并保存 receipt；随后独立完成 Key 小探针与最终命令复核。指纹未变时可以复用成功的零 API 结果，不为形式完整重复昂贵检查；计划或 preflight 未闭合时不得调用正式 API。
 6. 首次 API 调用前固定代码状态。V8+ runner 必须把 `run_git_commit`、`git_tree_state`、`started_at`、`finished_at`、模型与接口配置、seed、task plan 和命令身份写入运行 metadata；计划文件不得用当前 HEAD、mtime 或整理时间补猜实际运行身份。
 
 ### 实验运行中

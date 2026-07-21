@@ -140,6 +140,14 @@ python ./tools/process_experiment.py finalize \
 依次执行本地完整校验和干净 clone `--records-only` 校验。失败时恢复 catalog 和
 生成 overlay，不留下半更新状态。
 
+新的大体量 paired campaign 推荐使用
+[`postprocess_experiment.py`](../tools/postprocess_experiment.py) 的 `closeout` 入口。
+它在 raw tree hash 前运行 `review-check` 和临时 record build；权威凭据/tree 扫描与
+原生 tgz 并行生成 seal，finalize 通过 `--sealed-manifest` 复用结果。
+只需保留私有 source-only record 时，`--private-record-bundle` 会在 validators PASS 后
+打包 prospective generated state，再恢复进入命令前的 catalog/index/records。详见
+[`实验后处理优化.md`](./实验后处理优化.md)。
+
 该版本所有实验收尾且无 worker 后，冻结 active 版本，之后才能激活 V9：
 
 ```bash

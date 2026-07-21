@@ -173,7 +173,8 @@ def record_sample_outcome(out_dir, sample, status, **details):
     """Append one worker/sample terminal outcome without replacing prior attempts."""
     if not isinstance(sample, str) or not sample:
         raise ValueError("sample outcome requires a non-empty sample")
-    if status not in {"finished", "infrastructure_incomplete"}:
+    if status not in {
+            "finished", "infrastructure_incomplete", "evaluator_incomplete"}:
         raise ValueError(f"unsupported sample outcome status: {status!r}")
     reserved = {
         "schema", "created_at", "sample", "status", "worker_launch_id",

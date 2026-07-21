@@ -352,27 +352,60 @@ def _postrun_verification(
                 problems.append("strict postrun inspection errors are invalid")
                 raw_errors = []
             registered_evaluator_incomplete: set[str] = set()
+            sample_outcome_rows = _read_jsonl(
+                experiment_dir / "sample_outcomes.jsonl", required=False)
+            metadata_rows = _read_jsonl(
+                experiment_dir / "run_metadata.jsonl", required=False)
             for row in _read_jsonl(
                     experiment_dir / "evaluator_incomplete_samples.jsonl",
                     required=False):
                 sample = row.get("sample")
-                source_log = row.get("source_log")
-                try:
-                    source_path = (experiment_dir / str(source_log)).resolve()
-                    source_path.relative_to(experiment_dir.resolve())
-                except (OSError, ValueError):
-                    continue
+                historical_valid = False
+                if row.get("schema") == "anchorpatch.evaluator_incomplete/1":
+                    source_log = row.get("source_log")
+                    try:
+                        source_path = (
+                            experiment_dir / str(source_log)).resolve()
+                        source_path.relative_to(experiment_dir.resolve())
+                    except (OSError, ValueError):
+                        source_path = None
+                    historical_valid = (
+                        source_path is not None
+                        and source_path.is_file()
+                        and row.get("source_log_sha256")
+                        == _sha256(source_path)
+                    )
+                invocation_id = row.get("invocation_id")
+                formal_valid = (
+                    row.get("schema") == "anchorpatch.evaluator_incomplete/2"
+                    and isinstance(invocation_id, str)
+                    and bool(invocation_id)
+                    and sum(
+                        outcome.get("sample") == sample
+                        and outcome.get("invocation_id") == invocation_id
+                        and outcome.get("status") == "evaluator_incomplete"
+                        and outcome.get("failure_stage") == "evaluator"
+                        and outcome.get("result_committed_for_failed_step")
+                        is False
+                        and outcome.get("score_imputed") is False
+                        for outcome in sample_outcome_rows
+                    ) == 1
+                    and sum(
+                        metadata.get("invocation_id") == invocation_id
+                        and metadata.get("samples") == [sample]
+                        and metadata.get("status") == "evaluator_incomplete"
+                        for metadata in metadata_rows
+                    ) == 1
+                )
                 if (
                     isinstance(sample, str)
                     and sample
-                    and row.get("schema") == "anchorpatch.evaluator_incomplete/1"
                     and row.get("status") == "evaluator_incomplete"
                     and row.get("disposition") == "cancel_sample_continue_campaign"
                     and row.get("failure_stage") == "evaluator"
                     and row.get("result_committed_for_failed_step") is False
                     and row.get("score_imputed") is False
-                    and source_path.is_file()
-                    and row.get("source_log_sha256") == _sha256(source_path)
+                    and (historical_valid or formal_valid)
                 ):
                     registered_evaluator_incomplete.add(sample)
             allowed_errors = {

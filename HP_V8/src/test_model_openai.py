@@ -1228,6 +1228,145 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(
                 paired_dispatch.read_campaign_stop_conditions(out_dir), [])
 
+    def test_evaluator_exception_is_sample_local_and_resume_never_reposts(self):
+        class BrokenDomain:
+            @staticmethod
+            def evaluate_context(*_args):
+                raise ValueError("broken sample evaluator")
+
+        with self.assertRaises(
+                experiment_runner.EvaluatorIncompleteError) as caught:
+            experiment_runner._evaluate(
+                BrokenDomain(), "sample-eval", {"a.txt": "generated"},
+                {"context": ["a.txt"]}, ["a.txt"],
+                method="hybridpatch", rt_index=1, direction="backward",
+                target_state_id="basic_state",
+            )
+        self.assertEqual(caught.exception.error_type, "builtins.ValueError")
+
+        sample = "sample-eval"
+        worker_id = "worker-eval"
+        invocation_id = "invocation-eval"
+        methods = ["hybridpatch", "fullrewrite"]
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+                os.environ,
+                {"ANCHORPATCH_WORKER_LAUNCH_ID": worker_id},
+                clear=False):
+            sidecar = experiment_runner._record_evaluator_incomplete(
+                out_dir, sample, methods, 1, invocation_id,
+                caught.exception,
+            )
+            self.assertFalse(sidecar["result_committed_for_failed_step"])
+            self.assertFalse(sidecar["score_imputed"])
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "run_metadata.jsonl"), {
+                    "schema": "anchorpatch.run_metadata/3",
+                    "invocation_id": invocation_id,
+                    "worker_launch_id": worker_id,
+                    "worker_pid": os.getpid(),
+                    "samples": [sample],
+                    "status": "evaluator_incomplete",
+                })
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), {
+                    "schema": "anchorpatch.api_call/4",
+                    "sample": sample,
+                    "method": "hybridpatch",
+                    "rt_index": 1,
+                    "direction": "backward",
+                    "call_kind": "hybridpatch_primary",
+                    "worker_launch_id": "prior-recovery-worker",
+                    "classification": "provider/API failure",
+                })
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), {
+                    "schema": "anchorpatch.api_call/4",
+                    "sample": sample,
+                    "method": "hybridpatch",
+                    "rt_index": 1,
+                    "direction": "backward",
+                    "call_kind": "hybridpatch_primary",
+                    "worker_launch_id": worker_id,
+                    "classification": "success",
+                })
+            process = mock.Mock(pid=os.getpid())
+            running = {
+                sample: {
+                    "sample": sample,
+                    "process": process,
+                    "log": mock.Mock(),
+                    "key_label": "KEY_01",
+                    "worker_launch_id": worker_id,
+                    "methods": methods,
+                    "target_round_trips": 1,
+                    "exit_recorded": False,
+                },
+            }
+            disposition = paired_dispatch._record_worker_exit(
+                out_dir, running, sample, running[sample], 7,
+                os.path.join(out_dir, "dispatch_log.jsonl"),
+            )
+            self.assertEqual(disposition, "evaluator_incomplete")
+            self.assertEqual(running, {})
+
+            selected, authorizations = (
+                paired_dispatch._select_invocation_assignments(
+                    out_dir,
+                    [{"sample": sample, "methods": methods}],
+                    resume=True, target_round_trips=1,
+                ))
+            self.assertEqual(selected, [])
+            self.assertEqual(authorizations, {})
+            provider_post = mock.Mock(
+                side_effect=AssertionError(
+                    "evaluator-incomplete sample must not be reposted"))
+            for _item in selected:
+                provider_post()
+            provider_post.assert_not_called()
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, "hybridpatch", f"{sample}.jsonl")))
+            self.assertEqual(
+                paired_dispatch.read_campaign_stop_conditions(out_dir), [])
+
+    def test_runner_main_records_evaluator_terminal_status(self):
+        failure = experiment_runner.EvaluatorIncompleteError(
+            "sample", "hybridpatch", 1, "forward", "target",
+            ValueError("broken evaluator"),
+        )
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    sys, "argv", [
+                        "experiment_runner.py", "--sample", "sample",
+                        "--methods", "hybridpatch", "fullrewrite",
+                        "--num_round_trips", "1", "--out_dir", out_dir,
+                        "--model", "offline-test-model",
+                    ]), \
+                mock.patch.object(
+                    experiment_runner, "_require_formal_opencode_transport"), \
+                mock.patch.object(
+                    experiment_runner, "_require_formal_dispatch_environment"), \
+                mock.patch.object(
+                    experiment_runner, "append_run_metadata",
+                    return_value={"invocation_id": "invocation"}), \
+                mock.patch.object(
+                    experiment_runner, "_dispatch_worker_start_barrier"), \
+                mock.patch.object(
+                    experiment_runner, "run_relay", side_effect=failure), \
+                mock.patch.object(
+                    experiment_runner, "_record_evaluator_incomplete") as record, \
+                mock.patch.object(
+                    experiment_runner, "finish_run_metadata") as finish:
+            with self.assertRaises(
+                    experiment_runner.EvaluatorIncompleteError):
+                experiment_runner.main()
+
+        record.assert_called_once_with(
+            out_dir, "sample", ["hybridpatch", "fullrewrite"], 1,
+            "invocation", failure,
+        )
+        finish.assert_called_once_with(
+            out_dir, "invocation", status="evaluator_incomplete")
+
     def test_launch_poll_isolates_exhausted_worker_and_keeps_sibling_running(self):
         class FakeProcess:
             def __init__(self, pid, poll_sequence):
@@ -1317,6 +1456,11 @@ class IntegrationContractTests(unittest.TestCase):
                         return_value={"semantic_call_id": "failed-call",
                                       "transport_recovery_index": 0}), \
                     mock.patch.object(
+                        paired_dispatch, "_latest_sample_outcomes",
+                        return_value={
+                            "sample-a": {
+                                "status": "infrastructure_incomplete"}}), \
+                    mock.patch.object(
                         paired_dispatch.subprocess, "Popen",
                         side_effect=fake_popen), \
                     mock.patch.object(
@@ -1345,7 +1489,7 @@ class IntegrationContractTests(unittest.TestCase):
                 dispatch_rows[-1]["infrastructure_incomplete_samples"],
                 ["sample-a"])
 
-    def test_confirmation_incomplete_worker_does_not_block_later_wave(self):
+    def test_confirmation_queue_isolates_incomplete_and_preservation_stops(self):
         samples = ["sample-a", "sample-b", "sample-c"]
         lifecycle = []
 
@@ -1381,23 +1525,20 @@ class IntegrationContractTests(unittest.TestCase):
                 "candidate_count": 85, "selected_count": 68,
                 "reserve_count": 17, "seed": 42,
             }
-            launched_waves = []
+            launched_queues = []
 
-            def fake_wave(
+            def fake_queue(
                     _args, _out_dir, _manifest, _plans, _keys, assignments,
                     _authorizations, _dispatch_log, _running, incomplete,
-                    completed, _total):
+                    _evaluator_incomplete, completed, _total, _slots):
                 self.assertEqual(lifecycle, ["all_plans"])
                 manifest = paired_dispatch._read_json(os.path.join(
                     out_dir, "dispatch_manifest.json"))
                 self.assertEqual(set(manifest["task_plans"]), set(samples))
-                wave_samples = [item["sample"] for item in assignments]
-                launched_waves.append(wave_samples)
-                if len(launched_waves) == 1:
-                    incomplete.add("sample-a")
-                    completed.add("sample-b")
-                else:
-                    completed.update(wave_samples)
+                queue_samples = [item["sample"] for item in assignments]
+                launched_queues.append(queue_samples)
+                incomplete.add("sample-a")
+                completed.update({"sample-b", "sample-c"})
 
             with mock.patch.object(
                     paired_dispatch, "CONFIRMATION_SAMPLE_COUNT", 3), \
@@ -1428,23 +1569,19 @@ class IntegrationContractTests(unittest.TestCase):
                         paired_dispatch, "_load_confirmation_selection",
                         return_value=(list(samples), selection_record)) as load_selection, \
                     mock.patch.object(
-                        paired_dispatch, "_run_worker_wave",
-                        side_effect=fake_wave):
+                        paired_dispatch, "_run_worker_queue",
+                        side_effect=fake_queue):
                 result = paired_dispatch._launch_under_lease(args, out_dir)
                 load_selection.assert_called_once_with(
                     "selection.json", current_experiment_dir=out_dir)
 
             self.assertEqual(result, 2)
-            self.assertEqual(launched_waves, [
-                ["sample-a", "sample-b"], ["sample-c"]])
+            self.assertEqual(
+                launched_queues, [["sample-a", "sample-b", "sample-c"]])
             dispatch_rows = run_meta._read_jsonl_records_with_retry(
                 os.path.join(out_dir, "dispatch_log.jsonl"))
-            self.assertEqual(
-                [row["event"] for row in dispatch_rows
-                 if row["event"].startswith("wave_")],
-                ["wave_start", "wave_complete",
-                 "wave_start", "wave_complete"],
-            )
+            self.assertFalse(any(
+                row["event"].startswith("wave_") for row in dispatch_rows))
 
         lifecycle.clear()
         with tempfile.TemporaryDirectory() as out_dir:
@@ -1466,12 +1603,12 @@ class IntegrationContractTests(unittest.TestCase):
                 "candidate_count": 85, "selected_count": 68,
                 "reserve_count": 17, "seed": 42,
             }
-            stopped_waves = []
+            stopped_queues = []
 
             def preservation_stop(
                     _args, wave_out_dir, _manifest, _plans, _keys,
                     assignments, *_rest):
-                stopped_waves.append(
+                stopped_queues.append(
                     [item["sample"] for item in assignments])
                 run_meta.record_campaign_stop_condition(
                     wave_out_dir, "preservation_violation",
@@ -1507,17 +1644,120 @@ class IntegrationContractTests(unittest.TestCase):
                         paired_dispatch, "_load_confirmation_selection",
                         return_value=(list(samples), selection_record)) as load_selection, \
                     mock.patch.object(
-                        paired_dispatch, "_run_worker_wave",
+                        paired_dispatch, "_run_worker_queue",
                         side_effect=preservation_stop):
                 result = paired_dispatch._launch_under_lease(args, out_dir)
                 load_selection.assert_called_once_with(
                     "selection.json", current_experiment_dir=out_dir)
 
             self.assertEqual(result, 1)
-            self.assertEqual(stopped_waves, [["sample-a", "sample-b"]])
+            self.assertEqual(
+                stopped_queues, [["sample-a", "sample-b", "sample-c"]])
             self.assertEqual(
                 run_meta.read_campaign_stop_conditions(out_dir)[0][
                     "condition"], "preservation_violation")
+
+    def test_work_conserving_queue_refills_key_after_evaluator_incomplete(self):
+        class FakeProcess:
+            def __init__(self, pid, polls):
+                self.pid = pid
+                self.polls = list(polls)
+                self.returncode = None
+
+            def poll(self):
+                if self.polls:
+                    self.returncode = self.polls.pop(0)
+                return self.returncode
+
+        assignments = [
+            {"sample": "sample-a", "key_label": "KEY_01",
+             "methods": ["hybridpatch", "fullrewrite"]},
+            {"sample": "sample-b", "key_label": "KEY_01",
+             "methods": ["fullrewrite", "hybridpatch"]},
+            {"sample": "sample-c", "key_label": "KEY_01",
+             "methods": ["hybridpatch", "fullrewrite"]},
+            {"sample": "sample-x", "key_label": "KEY_02",
+             "methods": ["fullrewrite", "hybridpatch"]},
+        ]
+        polls = {
+            "sample-a": [7],
+            "sample-b": [None, 0],
+            "sample-c": [0],
+            "sample-x": [None, None, 0],
+        }
+        lifecycle = []
+
+        def fake_launch(_args, _out_dir, _manifest, _plans, _keys,
+                        batch, _authorizations, _dispatch_log, running):
+            lifecycle.append({
+                "event": "launch",
+                "samples": [item["sample"] for item in batch],
+                "already_running": sorted(running),
+            })
+            for index, item in enumerate(batch, 1):
+                sample = item["sample"]
+                running[sample] = {
+                    **item,
+                    "process": FakeProcess(index, polls[sample]),
+                    "log": mock.Mock(),
+                    "worker_launch_id": f"worker-{sample}",
+                    "exit_recorded": False,
+                }
+            by_key = {}
+            for item in running.values():
+                by_key[item["key_label"]] = (
+                    by_key.get(item["key_label"], 0) + 1)
+            self.assertTrue(all(count <= 2 for count in by_key.values()))
+            return [item["sample"] for item in batch]
+
+        def fake_exit(_out_dir, running, sample, _item, returncode,
+                      _dispatch_log):
+            del running[sample]
+            disposition = (
+                "evaluator_incomplete"
+                if sample == "sample-a" else "finished")
+            self.assertEqual(returncode != 0, sample == "sample-a")
+            lifecycle.append({"event": "exit", "sample": sample,
+                              "disposition": disposition})
+            return disposition
+
+        args = mock.Mock(
+            campaign_role="full234", poll_interval=0,
+            progress_interval=9999,
+        )
+        infrastructure_incomplete = set()
+        evaluator_incomplete = set()
+        completed = set()
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    side_effect=fake_launch), \
+                mock.patch.object(
+                    paired_dispatch, "_record_worker_exit",
+                    side_effect=fake_exit), \
+                mock.patch.object(
+                    paired_dispatch, "inspect_campaign",
+                    return_value={"errors": [], "api_calls": 0,
+                                  "preservation_violations": 0}), \
+                mock.patch.object(
+                    paired_dispatch, "_write_active_worker_set"), \
+                mock.patch.object(paired_dispatch.time, "sleep"):
+            paired_dispatch._run_worker_queue(
+                args, out_dir, {"run_git_commit": "1" * 40}, {}, {},
+                assignments, {}, os.path.join(out_dir, "dispatch_log.jsonl"),
+                {}, infrastructure_incomplete, evaluator_incomplete,
+                completed, len(assignments), 2,
+            )
+
+        launches = [row for row in lifecycle if row["event"] == "launch"]
+        self.assertEqual(
+            [row["samples"] for row in launches],
+            [["sample-a", "sample-b", "sample-x"], ["sample-c"]],
+        )
+        self.assertIn("sample-b", launches[1]["already_running"])
+        self.assertEqual(infrastructure_incomplete, set())
+        self.assertEqual(evaluator_incomplete, {"sample-a"})
+        self.assertEqual(completed, {"sample-b", "sample-c", "sample-x"})
 
     def test_confirmation_duplicate_key_value_fails_before_provider(self):
         samples = [f"sample-{index:03d}" for index in range(68)]
@@ -4618,34 +4858,36 @@ class IntegrationContractTests(unittest.TestCase):
                         str(selection_path),
                         current_experiment_dir=current_dir)
 
-    def test_confirmation_queues_sixty_eight_as_balanced_52_and_16_waves(self):
+    def test_confirmation_manifest_uses_balanced_work_conserving_key_queues(self):
         samples = [f"sample-{index:03d}" for index in range(68)]
         labels = [f"KEY_{index:02d}" for index in range(1, 14)]
         assignments = paired_dispatch.build_key_assignments(
             samples, labels, 4, alternate_within_key=True,
             allow_queue=True)
-        waves = paired_dispatch._partition_assignment_waves(assignments, 4)
-        self.assertEqual([len(wave) for wave in waves], [52, 16])
+        for label in labels:
+            initial = [
+                item for item in assignments if item["key_label"] == label
+            ][:4]
+            self.assertEqual(
+                sum(item["methods"][0] == "hybridpatch" for item in initial),
+                2,
+            )
+            self.assertEqual(
+                sum(item["methods"][0] == "fullrewrite" for item in initial),
+                2,
+            )
         self.assertEqual(
             sum(item["methods"][0] == "hybridpatch"
                 for item in assignments), 34)
         self.assertEqual(
             sum(item["methods"][0] == "fullrewrite"
                 for item in assignments), 34)
-        self.assertEqual([
-            (
-                sum(item["methods"][0] == "hybridpatch" for item in wave),
-                sum(item["methods"][0] == "fullrewrite" for item in wave),
-            )
-            for wave in waves
-        ], [(26, 26), (8, 8)])
-        for wave in waves:
-            by_key = {}
-            for item in wave:
-                by_key[item["key_label"]] = (
-                    by_key.get(item["key_label"], 0) + 1
-                )
-            self.assertTrue(all(count <= 4 for count in by_key.values()))
+        queues = paired_dispatch._assignment_key_queues(assignments)
+        self.assertEqual(len(queues), 13)
+        self.assertEqual(
+            sorted(queue["worker_count"] for queue in queues),
+            [5] * 10 + [6] * 3,
+        )
         with self.assertRaisesRegex(RuntimeError, "concurrency capacity"):
             paired_dispatch.build_key_assignments(samples, labels, 4)
 
@@ -4683,9 +4925,16 @@ class IntegrationContractTests(unittest.TestCase):
                     return_value={"unit": "test"}):
             manifest = paired_dispatch.build_manifest(
                 "out", samples, assignments, {}, args)
+        self.assertNotIn("assignment_waves", manifest)
         self.assertEqual(
-            [wave["worker_count"] for wave in manifest["assignment_waves"]],
-            [52, 16])
+            sum(queue["worker_count"]
+                for queue in manifest["assignment_queues"]),
+            68)
+        self.assertEqual(
+            manifest["config"]["dispatch_policy"],
+            paired_dispatch.WORK_CONSERVING_DISPATCH_POLICY)
+        self.assertEqual(manifest["config"]["max_worker_count"], 52)
+        self.assertEqual(manifest["config"]["queued_worker_count"], 16)
         self.assertEqual(
             manifest["selection_manifest"]["sha256"], "1" * 64)
         self.assertEqual(
@@ -4735,8 +4984,12 @@ class IntegrationContractTests(unittest.TestCase):
         assignments = paired_dispatch.build_key_assignments(
             assignment_samples, labels, 4, alternate_within_key=True,
             allow_queue=True)
-        waves = paired_dispatch._partition_assignment_waves(assignments, 4)
-        self.assertEqual([len(wave) for wave in waves], [52, 48])
+        queues = paired_dispatch._assignment_key_queues(assignments)
+        self.assertEqual(len(queues), 13)
+        self.assertEqual(
+            sorted(queue["worker_count"] for queue in queues),
+            [7] * 4 + [8] * 9,
+        )
         self.assertEqual(
             sum(item["methods"][0] == "hybridpatch"
                 for item in assignments),
@@ -4773,6 +5026,53 @@ class IntegrationContractTests(unittest.TestCase):
             "experiment_id": paired_dispatch.MIXED_CONFIRMATION_EXPERIMENT_ID,
         }
         paired_dispatch._validate_campaign_grid(args)
+
+    def test_full234_scope_is_exact_and_uses_thirteen_rolling_key_queues(self):
+        samples, scope = paired_dispatch._load_full234_scope()
+        self.assertEqual(len(samples), 234)
+        self.assertEqual(samples, sorted(samples))
+        self.assertEqual(scope["sample_count"], 234)
+        self.assertEqual(len(scope["sample_json_sha256"]), 64)
+
+        args = mock.Mock(
+            campaign_role="full234", smoke_dir=None, samples=None,
+            num_round_trips=10, seed=42, slots_per_key=4,
+        )
+        resolved = paired_dispatch._resolve_full234_scope(args)
+        self.assertEqual(resolved, scope)
+        self.assertEqual(args.samples, samples)
+        paired_dispatch._validate_campaign_grid(args)
+
+        labels = [f"KEY_{index:02d}" for index in range(1, 14)]
+        assignments = paired_dispatch.build_key_assignments(
+            samples, labels, 4, alternate_within_key=True,
+            allow_queue=True)
+        self.assertEqual(
+            sum(item["methods"][0] == "hybridpatch"
+                for item in assignments),
+            117,
+        )
+        self.assertEqual(
+            sum(item["methods"][0] == "fullrewrite"
+                for item in assignments),
+            117,
+        )
+        with mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")), \
+                mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"unit": "test"}):
+            manifest = paired_dispatch.build_manifest(
+                "out", samples, assignments, {}, args)
+        self.assertEqual(manifest["full234_scope"], scope)
+        self.assertEqual(len(manifest["assignment_queues"]), 13)
+        self.assertTrue(all(
+            queue["worker_count"] == 18
+            for queue in manifest["assignment_queues"]))
+        self.assertEqual(manifest["config"]["max_worker_count"], 52)
+        self.assertEqual(manifest["config"]["queued_worker_count"], 182)
+        self.assertNotIn("assignment_waves", manifest)
 
     def test_preflight_require_plans_fails_on_missing_frozen_plan(self):
         with tempfile.TemporaryDirectory() as out_dir, \
@@ -4963,6 +5263,18 @@ class IntegrationContractTests(unittest.TestCase):
                 "hybridpatch_first": 1,
                 "fullrewrite_first": 1,
             }],
+            "assignment_queues": [
+                {
+                    "key_label": "KEY_01", "sample_ids": ["sample-a"],
+                    "worker_count": 1, "hybridpatch_first": 1,
+                    "fullrewrite_first": 0,
+                },
+                {
+                    "key_label": "KEY_02", "sample_ids": ["sample-b"],
+                    "worker_count": 1, "hybridpatch_first": 0,
+                    "fullrewrite_first": 1,
+                },
+            ],
             "task_plans": {
                 "sample-a": {"sha256": "a" * 64},
                 "sample-b": {"sha256": "b" * 64},
@@ -4977,6 +5289,8 @@ class IntegrationContractTests(unittest.TestCase):
             )
         rotated["assignment_waves"][0]["key_worker_counts"] = {
             "KEY_11": 1, "KEY_12": 1}
+        rotated["assignment_queues"][0]["key_label"] = "KEY_11"
+        rotated["assignment_queues"][1]["key_label"] = "KEY_12"
         with tempfile.TemporaryDirectory() as out_dir:
             path = os.path.join(out_dir, "dispatch_manifest.json")
             run_meta.write_json_atomic(path, prior)
@@ -6227,7 +6541,7 @@ class IntegrationContractTests(unittest.TestCase):
                 popen.assert_not_called()
             reports = run_meta._read_jsonl_records_with_retry(
                 os.path.join(out_dir, "confirmation_known_usage_gate.jsonl"))
-            self.assertEqual(reports[-1]["phase"], "pre_wave")
+            self.assertEqual(reports[-1]["phase"], "pre_refill")
             self.assertIn(
                 "known_committed_usage_threshold_exceeded",
                 reports[-1]["failure_codes"])

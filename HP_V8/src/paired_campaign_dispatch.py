@@ -2,9 +2,10 @@
 
 The dispatcher never prints key values.  It pre-generates and hashes every
 task plan, records a deterministic sample/key-label/method-order manifest,
-launches one process per sample, isolates only fully evidenced provider/transport
-budget exhaustion to that sample, and stops all workers on preservation or
-shared campaign-integrity failures.
+launches one process per sample through work-conserving per-key queues, isolates
+only fully evidenced provider/transport exhaustion or domain-evaluator failure
+to that sample, and stops all workers on preservation or shared
+campaign-integrity failures.
 """
 
 import argparse
@@ -86,6 +87,10 @@ CONFIRMATION_CANDIDATE_COUNT = 85
 CONFIRMATION_KEY_COUNT = 13
 CONFIRMATION_SLOTS_PER_KEY = 4
 CONFIRMATION_GRID_STEPS = 2720
+FULL234_SAMPLE_COUNT = 234
+FULL234_KEY_COUNT = 13
+FULL234_SLOTS_PER_KEY = 4
+WORK_CONSERVING_DISPATCH_POLICY = "per_key_work_conserving_v1"
 CONFIRMATION_KNOWN_USAGE_LIMIT_USD = 130.0
 CONFIRMATION_EXPERIMENT_ID = (
     "exp_20260719_hybridv8_transportv4_method_unseen_confirmation68"
@@ -116,7 +121,7 @@ CONFIRMATION_ANALYSIS_POLICY = {
         "error_rows_reported_separately": True,
     },
     "known_committed_usage_wave_boundary_stop": {
-        "scope": "wave_boundary_committed_result_rows",
+        "scope": "refill_boundary_committed_result_rows",
         "usd_threshold": CONFIRMATION_KNOWN_USAGE_LIMIT_USD,
     },
 }
@@ -138,7 +143,7 @@ MIXED_CONFIRMATION_ANALYSIS_POLICY = {
         "error_rows_reported_separately": True,
     },
     "known_committed_usage_wave_boundary_stop": {
-        "scope": "wave_boundary_committed_result_rows",
+        "scope": "refill_boundary_committed_result_rows",
         "usd_threshold": CONFIRMATION_KNOWN_USAGE_LIMIT_USD,
     },
 }
@@ -505,35 +510,28 @@ def _mixed_confirmation_sample_order(
     return ordered
 
 
-def _partition_assignment_waves(assignments, slots_per_key):
-    """Partition a stable assignment stream into per-key bounded waves."""
-    if not _is_exact_int(slots_per_key) or slots_per_key < 1:
-        raise RuntimeError("wave slots_per_key must be >= 1")
-    waves = []
-    current = []
-    key_counts = {}
-    seen_samples = set()
+def _assignment_key_queues(assignments):
+    """Describe stable FIFO queues without imposing cross-key barriers."""
+    queues = {}
     for item in assignments:
-        if not isinstance(item, dict):
-            raise RuntimeError("assignment wave contains a non-object")
-        sample = item.get("sample")
         label = item.get("key_label")
-        if (not isinstance(sample, str) or not sample
-                or sample in seen_samples
-                or not isinstance(label, str) or not label):
-            raise RuntimeError("assignment wave identity is invalid")
-        if key_counts.get(label, 0) >= slots_per_key:
-            if not current:
-                raise RuntimeError("assignment wave cannot make progress")
-            waves.append(current)
-            current = []
-            key_counts = {}
-        current.append(item)
-        key_counts[label] = key_counts.get(label, 0) + 1
-        seen_samples.add(sample)
-    if current:
-        waves.append(current)
-    return waves
+        sample = item.get("sample")
+        if (not isinstance(label, str) or not label
+                or not isinstance(sample, str) or not sample):
+            raise RuntimeError("assignment queue identity is invalid")
+        queues.setdefault(label, []).append(item)
+    return [
+        {
+            "key_label": label,
+            "sample_ids": [item["sample"] for item in items],
+            "worker_count": len(items),
+            "hybridpatch_first": sum(
+                item["methods"][0] == "hybridpatch" for item in items),
+            "fullrewrite_first": sum(
+                item["methods"][0] == "fullrewrite" for item in items),
+        }
+        for label, items in queues.items()
+    ]
 
 
 def _validate_campaign_grid(args):
@@ -589,6 +587,20 @@ def _validate_campaign_grid(args):
             raise RuntimeError(
                 "confirmation requires --slots_per_key 4"
             )
+    elif args.campaign_role == "full234":
+        scope = _argument_value(args, "_full234_scope_record", {}) or {}
+        if (scope.get("schema") != "anchorpatch.full234_scope/1"
+                or list(args.samples) != list(scope.get("sample_ids") or [])
+                or len(args.samples) != FULL234_SAMPLE_COUNT
+                or args.num_round_trips != 10):
+            raise RuntimeError(
+                "full234 requires the exact 234-sample inventory at 10 RT"
+            )
+        if getattr(args, "smoke_dir", None):
+            raise RuntimeError("full234 cannot declare --smoke_dir")
+        if (getattr(args, "slots_per_key", None)
+                != FULL234_SLOTS_PER_KEY):
+            raise RuntimeError("full234 requires --slots_per_key 4")
     else:
         raise RuntimeError(f"unsupported campaign role: {args.campaign_role}")
 
@@ -607,6 +619,50 @@ def _canonical_json_bytes(value):
     return json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
+
+
+def _load_full234_scope():
+    """Return the exact current 234-sample inventory and its content digest."""
+    root = Path(SAMPLES_ROOT)
+    sample_paths = {
+        child.name: child / "sample.json"
+        for child in root.iterdir()
+        if child.is_dir() and (child / "sample.json").is_file()
+    }
+    sample_ids = sorted(sample_paths)
+    if (len(sample_ids) != FULL234_SAMPLE_COUNT
+            or len(set(sample_ids)) != FULL234_SAMPLE_COUNT):
+        raise RuntimeError(
+            "full234 requires exactly 234 unique runnable sample folders"
+        )
+    sample_hashes = {
+        sample: _sha256(sample_paths[sample]) for sample in sample_ids
+    }
+    return sample_ids, {
+        "schema": "anchorpatch.full234_scope/1",
+        "sample_count": len(sample_ids),
+        "sample_ids": sample_ids,
+        "sample_json_sha256": hashlib.sha256(
+            _canonical_json_bytes(sample_hashes)).hexdigest(),
+    }
+
+
+def _resolve_full234_scope(args):
+    if _argument_value(args, "campaign_role") != "full234":
+        return None
+    cached = _argument_value(args, "_full234_scope_record")
+    if cached is None:
+        samples, cached = _load_full234_scope()
+        args._full234_scope_record = cached
+    else:
+        samples = list(cached.get("sample_ids") or [])
+    manual = _argument_value(args, "samples")
+    if manual not in (None, []) and list(manual) != samples:
+        raise RuntimeError(
+            "full234 samples are the exact sorted samples_delegate52 inventory"
+        )
+    args.samples = samples
+    return dict(cached)
 
 
 def _validate_mixed_confirmation_selection_payload(
@@ -1192,17 +1248,17 @@ def _validate_mixed_confirmation_recomputed_selection(
     }
 
 
-def _require_unique_key_values_for_confirmation(keys, selected_labels):
-    """Fail closed if two confirmation key labels map to the same secret value."""
+def _require_unique_key_values_for_queued_campaign(keys, selected_labels):
+    """Fail closed if two queued-campaign labels map to one secret value."""
     digests = {}
     for label in selected_labels:
         value = keys[label]
         if not isinstance(value, str) or not value:
-            raise RuntimeError("confirmation key value is empty or invalid")
+            raise RuntimeError("campaign key value is empty or invalid")
         digest = hashlib.sha256(value.encode("utf-8")).digest()
         if digest in digests:
             raise RuntimeError(
-                "confirmation key labels must map to physically unique key values"
+                "campaign key labels must map to physically unique key values"
             )
         digests[digest] = label
 
@@ -1412,7 +1468,10 @@ def _latest_sample_outcomes(out_dir, expected_samples=None):
         sample = record.get("sample")
         status = record.get("status")
         if (not isinstance(sample, str) or not sample
-                or status not in {"finished", "infrastructure_incomplete"}):
+                or status not in {
+                    "finished", "infrastructure_incomplete",
+                    "evaluator_incomplete",
+                }):
             raise RuntimeError(f"invalid sample outcome row {index}")
         if expected and sample not in expected:
             raise RuntimeError(
@@ -1495,11 +1554,11 @@ def _record_mentions_sample(record, sample):
     return False
 
 
-def _confirmation_pending_evidence(out_dir, sample, methods):
+def _queued_pending_evidence(out_dir, sample, methods):
     """List durable evidence that a nominally pending worker ever started.
 
     Task plans and the dispatch manifest are intentionally absent: they are
-    pre-created for all 68 confirmation samples before wave one starts.  Every
+    pre-created for the full queued scope before workers start.  Every
     execution-side artifact is fail-closed, including an empty result,
     checkpoint, raw-call directory, console log, or worker barrier.
     """
@@ -1526,7 +1585,7 @@ def _confirmation_pending_evidence(out_dir, sample, methods):
 
     record_files = (
         "sample_outcomes.jsonl", "run_metadata.jsonl", "api_calls.jsonl",
-        "api_anomalies.jsonl",
+        "api_anomalies.jsonl", "evaluator_incomplete_samples.jsonl",
     )
     for filename in record_files:
         path = os.path.join(out_dir, filename)
@@ -1539,7 +1598,7 @@ def _confirmation_pending_evidence(out_dir, sample, methods):
         identity = _parse_semantic_call_id(record.get("semantic_call_id"))
         if identity is None:
             raise RuntimeError(
-                "confirmation pending audit cannot map attempt ledger row "
+                "queued pending audit cannot map attempt ledger row "
                 f"{row_number}"
             )
         if identity["sample"] == sample:
@@ -1548,18 +1607,30 @@ def _confirmation_pending_evidence(out_dir, sample, methods):
     dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
     for row_number, record in enumerate(_read_jsonl(dispatch_path), 1):
         event = record.get("event")
-        # wave_start and resume_start describe queued intent only.  A durable
-        # per-worker launch_intent is appended before Popen and is the earliest
-        # execution evidence.  wave_complete, unlike wave_start, proves that
-        # the worker wave drained and must therefore have an outcome.
+        # queue_start/wave_start and resume_start describe queued intent only.
+        # A durable per-worker launch_intent is appended before Popen and is
+        # the earliest execution evidence.  queue_refill and historical
+        # wave_complete both prove that a worker was launched.
         mentions = record.get("sample") == sample
         if event == "wave_complete":
             mentions = mentions or sample in (record.get("samples") or [])
+        if event == "queue_refill":
+            mentions = mentions or sample in (record.get("samples") or [])
+        if event == "queue_complete":
+            mentions = mentions or any(
+                sample in (record.get(field) or [])
+                for field in (
+                    "completed_samples",
+                    "infrastructure_incomplete_samples",
+                    "evaluator_incomplete_samples",
+                )
+            )
         if event == "campaign_incomplete":
             mentions = mentions or any(
                 sample in (record.get(field) or [])
                 for field in (
                     "infrastructure_incomplete_samples",
+                    "evaluator_incomplete_samples",
                     "completed_samples",
                 )
             )
@@ -1586,7 +1657,7 @@ def _confirmation_pending_evidence(out_dir, sample, methods):
                     or identity is None
                     or path.name != expected_name):
                 raise RuntimeError(
-                    "confirmation pending audit cannot map response journal: "
+                    "queued pending audit cannot map response journal: "
                     f"{path.name}"
                 )
             if identity["sample"] == sample:
@@ -1623,15 +1694,15 @@ def _confirmation_pending_evidence(out_dir, sample, methods):
     return sorted(set(evidence))
 
 
-def _verify_confirmation_pending_samples(out_dir, assignments):
-    """Allow only samples proven never launched in a queued confirmation."""
+def _verify_queued_pending_samples(out_dir, assignments):
+    """Allow only samples proven never launched in a queued campaign."""
     for item in assignments:
         sample = item["sample"]
-        evidence = _confirmation_pending_evidence(
+        evidence = _queued_pending_evidence(
             out_dir, sample, item.get("methods") or [])
         if evidence:
             raise RuntimeError(
-                "confirmation resume cannot prove pending sample was never "
+                "queued resume cannot prove pending sample was never "
                 f"started: {sample}; evidence={evidence}"
             )
 
@@ -1901,6 +1972,143 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
     }
 
 
+def _verified_evaluator_incomplete(out_dir, sample, item):
+    """Verify a sample-local evaluator exception without accepting score rows."""
+    if read_campaign_stop_conditions(out_dir):
+        raise RuntimeError(
+            "campaign-wide stop latch forbids sample-local isolation")
+    latest = _latest_sample_outcomes(out_dir)
+    outcome = latest.get(sample)
+    if (not isinstance(outcome, dict)
+            or outcome.get("status") != "evaluator_incomplete"):
+        raise RuntimeError(
+            f"worker {sample} failed without evaluator outcome")
+    worker_id = item["worker_launch_id"]
+    process = item.get("process")
+    worker_pid = (
+        process.pid if process is not None else item.get("worker_pid")
+    )
+    methods = item.get("methods") or []
+    if (outcome.get("worker_launch_id") != worker_id
+            or outcome.get("worker_pid") != worker_pid
+            or outcome.get("methods") != methods
+            or outcome.get("failure_stage") != "evaluator"
+            or outcome.get("result_committed_for_failed_step") is not False
+            or outcome.get("score_imputed") is not False):
+        raise RuntimeError(
+            f"worker {sample} evaluator outcome provenance mismatch")
+    if _worker_lease_is_held(out_dir, sample):
+        raise RuntimeError(
+            f"worker {sample} lease remains held after evaluator exit")
+
+    invocation_id = outcome.get("invocation_id")
+    failure_method = outcome.get("method")
+    failure_rt = outcome.get("rt_index")
+    direction = outcome.get("direction")
+    target_round_trips = item.get("target_round_trips")
+    if (not isinstance(invocation_id, str) or not invocation_id
+            or failure_method not in methods
+            or not _is_exact_int(failure_rt) or failure_rt < 1
+            or direction not in {"forward", "backward"}
+            or (_is_exact_int(target_round_trips)
+                and failure_rt > target_round_trips)
+            or not isinstance(outcome.get("error_type"), str)
+            or not outcome.get("error_type")
+            or not isinstance(outcome.get("error_message"), str)):
+        raise RuntimeError(
+            f"worker {sample} evaluator failed-step identity is invalid")
+
+    actual_progress = _actual_sample_progress(out_dir, sample, methods)
+    if outcome.get("checkpoint_progress") != actual_progress:
+        raise RuntimeError(
+            f"worker {sample} evaluator checkpoint evidence drift")
+    if _is_exact_int(target_round_trips):
+        failure_index = methods.index(failure_method)
+        for index, method in enumerate(methods):
+            expected_rt = (
+                target_round_trips if index < failure_index
+                else failure_rt - 1 if index == failure_index else 0
+            )
+            if actual_progress[method] != {
+                    "completed_round_trips": expected_rt,
+                    "committed_rows": 2 * expected_rt}:
+                raise RuntimeError(
+                    f"worker {sample} evaluator method-order/checkpoint mismatch")
+
+    metadata = [
+        record for record in read_run_metadata_snapshot(out_dir)
+        if record.get("invocation_id") == invocation_id
+    ]
+    if (len(metadata) != 1
+            or metadata[0].get("status") != "evaluator_incomplete"
+            or metadata[0].get("worker_launch_id") != worker_id
+            or metadata[0].get("worker_pid") != worker_pid
+            or metadata[0].get("samples") != [sample]):
+        raise RuntimeError(
+            f"worker {sample} evaluator run metadata mismatch")
+
+    sidecar_rows = _read_jsonl(os.path.join(
+        out_dir, "evaluator_incomplete_samples.jsonl"))
+    sidecar_matches = [
+        (index, row) for index, row in enumerate(sidecar_rows, 1)
+        if row.get("sample") == sample
+        and row.get("invocation_id") == invocation_id
+    ]
+    if len(sidecar_matches) != 1:
+        raise RuntimeError(
+            f"worker {sample} evaluator sidecar evidence is not unique")
+    sidecar_index, sidecar = sidecar_matches[0]
+    mirrored_fields = (
+        "created_at", "worker_launch_id", "worker_pid", "methods",
+        "method", "rt_index", "direction", "target_state",
+        "failure_stage", "error_type", "error_message",
+        "checkpoint_progress", "result_committed_for_failed_step",
+        "score_imputed",
+    )
+    if (sidecar.get("schema") != "anchorpatch.evaluator_incomplete/2"
+            or sidecar.get("status") != "evaluator_incomplete"
+            or sidecar.get("disposition")
+            != "cancel_sample_continue_campaign"
+            or any(sidecar.get(field) != outcome.get(field)
+                   for field in mirrored_fields)):
+        raise RuntimeError(
+            f"worker {sample} evaluator sidecar provenance mismatch")
+
+    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    step_rows = [
+        (index, row) for index, row in enumerate(api_rows, 1)
+        if row.get("sample") == sample
+        and row.get("method") == failure_method
+        and row.get("rt_index") == failure_rt
+        and row.get("direction") == direction
+        and row.get("worker_launch_id") == worker_id
+    ]
+    expected_primary = (
+        "hybridpatch_primary"
+        if failure_method == "hybridpatch" else "fullrewrite_primary"
+    )
+    if (not step_rows
+            or sum(row.get("call_kind") == expected_primary
+                   for _index, row in step_rows) != 1
+            or step_rows[-1][1].get("classification")
+            == "provider/API failure"):
+        raise RuntimeError(
+            f"worker {sample} evaluator model-response evidence is invalid")
+    return {
+        "sample_outcome_created_at": outcome.get("created_at"),
+        "invocation_id": invocation_id,
+        "method": failure_method,
+        "rt_index": failure_rt,
+        "direction": direction,
+        "error_type": outcome.get("error_type"),
+        "evaluator_sidecar_row": sidecar_index,
+        "api_rows": [index for index, _row in step_rows],
+        "checkpoint_progress": actual_progress,
+        "result_committed_for_failed_step": False,
+        "score_imputed": False,
+    }
+
+
 def _select_invocation_assignments(out_dir, assignments, *, resume,
                                    target_round_trips,
                                    allow_pristine_pending=False):
@@ -1921,7 +2129,7 @@ def _select_invocation_assignments(out_dir, assignments, *, resume,
             raise RuntimeError(
                 f"resume is limited to explicitly incomplete samples; "
                 f"missing outcomes: {missing}")
-        _verify_confirmation_pending_samples(out_dir, missing_assignments)
+        _verify_queued_pending_samples(out_dir, missing_assignments)
     selected = []
     authorizations = {}
     for item in assignments:
@@ -1944,6 +2152,17 @@ def _select_invocation_assignments(out_dir, assignments, *, resume,
                     or outcome.get("checkpoint_progress") != expected):
                 raise RuntimeError(
                     f"finished sample evidence is incomplete: {sample}")
+            continue
+        if outcome["status"] == "evaluator_incomplete":
+            _verified_evaluator_incomplete(
+                out_dir, sample, {
+                    "worker_launch_id": outcome.get("worker_launch_id"),
+                    "worker_pid": outcome.get("worker_pid"),
+                    "methods": item["methods"],
+                    "target_round_trips": target_round_trips,
+                })
+            # An evaluator-broken sample is terminal for this campaign.  Its
+            # missing endpoint stays null; resume must not issue another POST.
             continue
         evidence = _verified_infrastructure_incomplete(
             out_dir, sample, {
@@ -2295,14 +2514,28 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
         "task_plans": task_plans,
         "upstream_smoke_gate": upstream_smoke_gate,
     }
-    if args.campaign_role == "confirmation":
-        waves = _partition_assignment_waves(
-            assignments, CONFIRMATION_SLOTS_PER_KEY)
+    if args.campaign_role in {"confirmation", "full234"}:
+        slots_per_key = (
+            CONFIRMATION_SLOTS_PER_KEY
+            if args.campaign_role == "confirmation"
+            else FULL234_SLOTS_PER_KEY
+        )
+        key_count = (
+            CONFIRMATION_KEY_COUNT
+            if args.campaign_role == "confirmation"
+            else FULL234_KEY_COUNT
+        )
+        queues = _assignment_key_queues(assignments)
         manifest["config"].update({
-            "slots_per_key": CONFIRMATION_SLOTS_PER_KEY,
-            "key_count": CONFIRMATION_KEY_COUNT,
-            "wave_count": len(waves),
+            "dispatch_policy": WORK_CONSERVING_DISPATCH_POLICY,
+            "slots_per_key": slots_per_key,
+            "key_count": key_count,
+            "max_worker_count": slots_per_key * key_count,
+            "queued_worker_count": max(
+                0, len(assignments) - slots_per_key * key_count),
         })
+        manifest["assignment_queues"] = queues
+    if args.campaign_role == "confirmation":
         manifest["selection_manifest"] = dict(
             _argument_value(args, "_selection_manifest_record") or {})
         analysis_policy = (
@@ -2312,25 +2545,9 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
             else CONFIRMATION_ANALYSIS_POLICY
         )
         manifest["analysis_policy"] = copy.deepcopy(analysis_policy)
-        manifest["assignment_waves"] = [
-            {
-                "wave_index": index,
-                "sample_ids": [item["sample"] for item in wave],
-                "worker_count": len(wave),
-                "key_worker_counts": dict(sorted(
-                    {
-                        label: sum(
-                            item["key_label"] == label for item in wave)
-                        for label in {item["key_label"] for item in wave}
-                    }.items()
-                )),
-                "hybridpatch_first": sum(
-                    item["methods"][0] == "hybridpatch" for item in wave),
-                "fullrewrite_first": sum(
-                    item["methods"][0] == "fullrewrite" for item in wave),
-            }
-            for index, wave in enumerate(waves, 1)
-        ]
+    elif args.campaign_role == "full234":
+        manifest["full234_scope"] = dict(
+            _argument_value(args, "_full234_scope_record") or {})
     return manifest
 
 
@@ -2349,6 +2566,17 @@ def _manifest_identity(manifest):
                 normalized["key_worker_counts"] = sorted(counts.values())
             normalized_waves.append(normalized)
         value["assignment_waves"] = normalized_waves
+    if "assignment_queues" in value:
+        value["assignment_queues"] = [
+            {
+                key: item.get(key)
+                for key in (
+                    "sample_ids", "worker_count", "hybridpatch_first",
+                    "fullrewrite_first",
+                )
+            }
+            for item in value.get("assignment_queues") or []
+        ]
     return value
 
 
@@ -3256,7 +3484,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             errors.append(f"run_metadata task-plan mismatch: {sample}")
         outcome = latest_outcomes.get(sample)
         if (record.get("status") in {
-                "finished", "infrastructure_incomplete"}
+                "finished", "infrastructure_incomplete",
+                "evaluator_incomplete"}
                 and (not isinstance(outcome, dict)
                      or outcome.get("status") != record.get("status")
                      or outcome.get("invocation_id")
@@ -3291,6 +3520,20 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                     errors.append(
                         "finished sample checkpoint evidence drift: "
                         f"{sample}")
+        if (record.get("status") == "evaluator_incomplete"
+                and isinstance(outcome, dict)
+                and sample not in active_samples):
+            try:
+                _verified_evaluator_incomplete(
+                    out_dir, sample, {
+                        "worker_launch_id": outcome.get("worker_launch_id"),
+                        "worker_pid": outcome.get("worker_pid"),
+                        "methods": methods_by_sample.get(
+                            sample, default_methods),
+                        "target_round_trips": target_rt,
+                    })
+            except RuntimeError as exc:
+                errors.append(str(exc))
     if completion_samples:
         missing_metadata = completion_samples - set(latest_by_sample)
         if missing_metadata:
@@ -3326,7 +3569,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             terminal_metadata = None
             for record in reversed(metadata_by_worker.get(worker_id, [])):
                 if record.get("status") in {
-                        "finished", "infrastructure_incomplete"}:
+                        "finished", "infrastructure_incomplete",
+                        "evaluator_incomplete"}:
                     terminal_metadata = record
                     break
             basic_exit_ok = (
@@ -3346,12 +3590,12 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                     and exit_row.get("disposition") == "finished"
                 )
             elif (basic_exit_ok
-                  and terminal_metadata.get("status")
-                  == "infrastructure_incomplete"):
+                  and terminal_metadata.get("status") in {
+                      "infrastructure_incomplete", "evaluator_incomplete"}):
                 exit_ok = (
                     exit_row.get("returncode") != 0
                     and exit_row.get("disposition")
-                    == "infrastructure_incomplete"
+                    == terminal_metadata.get("status")
                     and isinstance(exit_row.get("evidence"), dict)
                 )
             else:
@@ -3404,6 +3648,7 @@ def _campaign_evidence_digest(out_dir, manifest):
             "api_attempt_ledger.jsonl", "run_metadata.jsonl",
             "dispatch_log.jsonl",
             "sample_outcomes.jsonl",
+            "evaluator_incomplete_samples.jsonl",
         )
     }
     for plan in (manifest.get("task_plans") or {}).values():
@@ -3556,8 +3801,15 @@ def evaluate_smoke_cost_gate(smoke_dir, main_out_dir):
 
 
 def evaluate_confirmation_known_usage_gate(
-        out_dir, manifest, wave_index, *, phase="post_wave"):
-    """Stop confirmation when known committed USD exceeds its wave threshold."""
+        out_dir, manifest, boundary_index=None, *, phase="post_wave",
+        wave_index=None):
+    """Stop confirmation when known committed USD exceeds its boundary limit."""
+    if boundary_index is None:
+        boundary_index = wave_index
+    elif wave_index is not None and wave_index != boundary_index:
+        raise RuntimeError("usage gate boundary_index/wave_index mismatch")
+    if not _is_exact_int(boundary_index) or boundary_index < 0:
+        raise RuntimeError("usage gate boundary index must be a non-negative int")
     config = manifest.get("config") or {}
     samples = config.get("samples") or []
     methods = config.get("method_set") or []
@@ -3591,7 +3843,8 @@ def evaluate_confirmation_known_usage_gate(
         "schema": "anchorpatch.confirmation_known_usage_gate/1",
         "created_at": datetime.now().astimezone().isoformat(
             timespec="seconds"),
-        "wave_index": wave_index,
+        "boundary_index": boundary_index,
+        "wave_index": boundary_index,
         "phase": phase,
         "rows_observed": total_rows,
         "usage_rows": usage_rows,
@@ -3609,7 +3862,8 @@ def evaluate_confirmation_known_usage_gate(
             record_campaign_stop_condition(
                 out_dir,
                 "known_committed_usage_wave_boundary_stop",
-                wave_index=wave_index,
+                boundary_index=boundary_index,
+                wave_index=boundary_index,
                 phase=phase,
                 known_committed_usage_usd=total_usd,
                 known_committed_usage_threshold_usd=threshold,
@@ -3619,11 +3873,11 @@ def evaluate_confirmation_known_usage_gate(
             )
         except BaseException as exc:
             raise RuntimeError(
-                "confirmation known committed usage wave-boundary stop "
+                "confirmation known committed usage refill-boundary stop "
                 "failed to persist latch"
             ) from exc
         raise RuntimeError(
-            "confirmation known committed usage wave-boundary stop NO_GO: "
+            "confirmation known committed usage refill-boundary stop NO_GO: "
             + ", ".join(failure_codes)
         )
     return report
@@ -3724,7 +3978,7 @@ def _stop_and_reconcile_workers(out_dir, running, dispatch_log=None):
 
 def _record_worker_exit(out_dir, running, sample, item, returncode,
                         dispatch_log):
-    """Remove a finished or strictly evidenced infrastructure-only worker."""
+    """Remove a finished or strictly evidenced sample-local worker."""
     item["log"].close()
     if returncode == 0:
         _append_worker_exit(
@@ -3733,8 +3987,17 @@ def _record_worker_exit(out_dir, running, sample, item, returncode,
         del running[sample]
         return "finished"
     try:
-        evidence = _verified_infrastructure_incomplete(
-            out_dir, sample, item)
+        outcome = _latest_sample_outcomes(out_dir).get(sample) or {}
+        status = outcome.get("status")
+        if status == "infrastructure_incomplete":
+            evidence = _verified_infrastructure_incomplete(
+                out_dir, sample, item)
+        elif status == "evaluator_incomplete":
+            evidence = _verified_evaluator_incomplete(
+                out_dir, sample, item)
+        else:
+            raise RuntimeError(
+                f"worker {sample} failed without a supported sample-local outcome")
     except BaseException as exc:
         _append_worker_exit(
             sample, item, returncode, dispatch_log,
@@ -3745,18 +4008,15 @@ def _record_worker_exit(out_dir, running, sample, item, returncode,
             f"worker {sample} exited with {returncode}: {exc}") from exc
     _append_worker_exit(
         sample, item, returncode, dispatch_log,
-        disposition="infrastructure_incomplete", evidence=evidence)
+        disposition=status, evidence=evidence)
     del running[sample]
-    return "infrastructure_incomplete"
+    return status
 
 
-def _run_worker_wave(
+def _launch_worker_batch(
         args, out_dir, inspection_manifest, task_plans, keys, assignments,
-        resume_authorizations, dispatch_log, running, incomplete_samples,
-        completed_samples, total_assignment_count):
-    """Launch, authorize, and drain one bounded worker wave."""
-    if running:
-        raise RuntimeError("cannot start a worker wave while another is active")
+        resume_authorizations, dispatch_log, running):
+    """Launch and authorize one refill batch while existing workers continue."""
     recovery_authorization = read_campaign_recovery_authorization(out_dir)
     runtime_git_commit = (
         recovery_authorization.get("recovery_git_commit")
@@ -3775,7 +4035,9 @@ def _run_worker_wave(
             "ack_path": ack_path,
         }
     _write_active_worker_set(
-        out_dir, inspection_manifest, launch_specs.values())
+        out_dir, inspection_manifest,
+        [*running.values(), *launch_specs.values()])
+    batch_running = {}
     for item in assignments:
         sample = item["sample"]
         label = item["key_label"]
@@ -3812,6 +4074,7 @@ def _run_worker_wave(
                 _active_worker_set_path(out_dir)
             ),
             ANCHORPATCH_START_BARRIER_TIMEOUT=str(args.start_timeout),
+            ANCHORPATCH_WORKER_CONSOLE_LOG=item["console_log"],
             ANCHORPATCH_EXPECTED_GIT_COMMIT=runtime_git_commit,
             ANCHORPATCH_EXPECTED_GIT_TREE_STATE="clean",
             ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256=(
@@ -3872,6 +4135,7 @@ def _run_worker_wave(
             "ack_path": ack_path,
             "exit_recorded": False,
         }
+        batch_running[sample] = running[sample]
         append_jsonl_locked(
             dispatch_log,
             {
@@ -3882,20 +4146,110 @@ def _run_worker_wave(
             },
         )
 
-    if running:
+    if batch_running:
         _authorize_workers(
-            out_dir, running, task_plans, dispatch_log,
+            out_dir, batch_running, task_plans, dispatch_log,
             args.start_timeout,
         )
+    return list(batch_running)
+
+
+def _take_available_assignments(pending_by_key, running, slots_per_key):
+    """Pop stable per-key FIFO work for every currently free key slot."""
+    if not _is_exact_int(slots_per_key) or slots_per_key < 1:
+        raise RuntimeError("queue slots_per_key must be >= 1")
+    running_counts = {}
+    for item in running.values():
+        label = item.get("key_label")
+        running_counts[label] = running_counts.get(label, 0) + 1
+    batch = []
+    for label, pending in pending_by_key.items():
+        free = slots_per_key - running_counts.get(label, 0)
+        if free < 0:
+            raise RuntimeError(
+                f"per-key concurrency exceeded before refill: {label}")
+        for _index in range(min(free, len(pending))):
+            batch.append(pending.pop(0))
+    return batch
+
+
+def _run_worker_queue(
+        args, out_dir, inspection_manifest, task_plans, keys, assignments,
+        resume_authorizations, dispatch_log, running,
+        infrastructure_incomplete_samples, evaluator_incomplete_samples,
+        completed_samples, total_assignment_count, slots_per_key):
+    """Drain stable per-key FIFO queues without a cross-key wave barrier."""
+    if running:
+        raise RuntimeError("cannot start a worker queue while workers are active")
+    pending_by_key = {}
+    seen_samples = set()
+    for item in assignments:
+        sample = item.get("sample")
+        label = item.get("key_label")
+        if (not isinstance(sample, str) or not sample
+                or sample in seen_samples
+                or not isinstance(label, str) or not label):
+            raise RuntimeError("worker queue assignment identity is invalid")
+        seen_samples.add(sample)
+        pending_by_key.setdefault(label, []).append(item)
+    append_jsonl_locked(
+        dispatch_log,
+        {
+            "event": "queue_start",
+            "dispatch_policy": WORK_CONSERVING_DISPATCH_POLICY,
+            "slots_per_key": slots_per_key,
+            "pending_by_key": {
+                label: len(items) for label, items in pending_by_key.items()
+            },
+        },
+    )
+    refill_index = 0
     last_report = 0.0
-    while running:
+    last_inspection = {
+        "errors": [], "api_calls": 0, "preservation_violations": 0}
+    while running or any(pending_by_key.values()):
+        batch = _take_available_assignments(
+            pending_by_key, running, slots_per_key)
+        if batch:
+            refill_index += 1
+            if args.campaign_role == "confirmation":
+                evaluate_confirmation_known_usage_gate(
+                    out_dir, inspection_manifest, refill_index,
+                    phase="pre_refill")
+            launched = _launch_worker_batch(
+                args, out_dir, inspection_manifest, task_plans, keys, batch,
+                resume_authorizations, dispatch_log, running)
+            append_jsonl_locked(
+                dispatch_log,
+                {
+                    "event": "queue_refill",
+                    "refill_index": refill_index,
+                    "samples": launched,
+                    "running_by_key": {
+                        label: sum(
+                            item.get("key_label") == label
+                            for item in running.values())
+                        for label in pending_by_key
+                    },
+                    "pending_by_key": {
+                        label: len(items)
+                        for label, items in pending_by_key.items()
+                    },
+                },
+            )
+        if not running:
+            if any(pending_by_key.values()):
+                raise RuntimeError("worker queue cannot make progress")
+            break
+
         time.sleep(args.poll_interval)
-        inspection = inspect_campaign(
+        last_inspection = inspect_campaign(
             out_dir, inspection_manifest,
             active_samples=set(running),
         )
-        if inspection["errors"]:
-            raise RuntimeError("; ".join(inspection["errors"]))
+        if last_inspection["errors"]:
+            raise RuntimeError("; ".join(last_inspection["errors"]))
+        exited = []
         for sample, item in list(running.items()):
             returncode = item["process"].poll()
             if returncode is None:
@@ -3905,8 +4259,12 @@ def _run_worker_wave(
                 dispatch_log)
             _write_active_worker_set(
                 out_dir, inspection_manifest, running.values())
+            exited.append({"sample": sample, "disposition": disposition})
             if disposition == "infrastructure_incomplete":
-                incomplete_samples.add(sample)
+                infrastructure_incomplete_samples.add(sample)
+                continue
+            if disposition == "evaluator_incomplete":
+                evaluator_incomplete_samples.add(sample)
                 continue
             completed_samples.add(sample)
             sample_inspection = inspect_campaign(
@@ -3918,18 +4276,46 @@ def _run_worker_wave(
                 raise RuntimeError(
                     "; ".join(sample_inspection["errors"])
                 )
+        if exited:
+            append_jsonl_locked(
+                dispatch_log,
+                {
+                    "event": "queue_slots_released",
+                    "refill_index": refill_index,
+                    "workers": exited,
+                },
+            )
         if time.time() - last_report >= args.progress_interval:
+            pending_count = sum(len(items) for items in pending_by_key.values())
             print(
                 f"PROGRESS running={len(running)}/{total_assignment_count} "
-                f"api_calls={inspection['api_calls']} preservation=0",
+                f"pending={pending_count} "
+                f"api_calls={last_inspection['api_calls']} preservation=0",
                 flush=True,
             )
             last_report = time.time()
     _write_active_worker_set(out_dir, inspection_manifest, [])
+    append_jsonl_locked(
+        dispatch_log,
+        {
+            "event": "queue_complete",
+            "refill_count": refill_index,
+            "completed_samples": sorted(completed_samples),
+            "infrastructure_incomplete_samples": sorted(
+                infrastructure_incomplete_samples),
+            "evaluator_incomplete_samples": sorted(
+                evaluator_incomplete_samples),
+        },
+    )
+    if args.campaign_role == "confirmation":
+        evaluate_confirmation_known_usage_gate(
+            out_dir, inspection_manifest, refill_index,
+            phase="pre_final")
 
 
 def _launch_under_lease(args, out_dir):
     _resolve_confirmation_selection(args, out_dir=out_dir)
+    _resolve_full234_scope(args)
     _validate_campaign_grid(args)
     _require_formal_opencode_transport("minimax-m3")
     upstream_smoke_gate = None
@@ -3938,16 +4324,22 @@ def _launch_under_lease(args, out_dir):
             args.smoke_dir, out_dir)
     keys = dict(read_keys(os.path.abspath(args.keys_file)))
     selected_labels = list(args.key_labels or sorted(keys))
-    if (args.campaign_role == "confirmation"
-            and len(selected_labels) != CONFIRMATION_KEY_COUNT):
+    required_key_count = (
+        CONFIRMATION_KEY_COUNT
+        if args.campaign_role == "confirmation"
+        else FULL234_KEY_COUNT if args.campaign_role == "full234" else None
+    )
+    if (required_key_count is not None
+            and len(selected_labels) != required_key_count):
         raise RuntimeError(
-            "confirmation requires exactly 13 unique key labels"
+            f"{args.campaign_role} requires exactly "
+            f"{required_key_count} unique key labels"
         )
     missing_labels = [label for label in selected_labels if label not in keys]
     if missing_labels:
         raise RuntimeError(f"unknown key labels: {missing_labels}")
-    if args.campaign_role == "confirmation":
-        _require_unique_key_values_for_confirmation(keys, selected_labels)
+    if args.campaign_role in {"confirmation", "full234"}:
+        _require_unique_key_values_for_queued_campaign(keys, selected_labels)
     slots_per_key = getattr(args, "slots_per_key", 1)
     if not _is_exact_int(slots_per_key):
         slots_per_key = 1
@@ -3963,9 +4355,10 @@ def _launch_under_lease(args, out_dir):
     assignments = build_key_assignments(
         assignment_samples, selected_labels, slots_per_key,
         alternate_within_key=(
-            args.campaign_role in {"supplemental", "confirmation"}
+            args.campaign_role in {
+                "supplemental", "confirmation", "full234"}
         ),
-        allow_queue=(args.campaign_role == "confirmation"),
+        allow_queue=(args.campaign_role in {"confirmation", "full234"}),
     )
 
     task_plans = prepare_task_plans(
@@ -3975,12 +4368,6 @@ def _launch_under_lease(args, out_dir):
         upstream_smoke_gate=upstream_smoke_gate)
     manifest_path, inspection_manifest = write_or_verify_manifest(
         out_dir, manifest, resume=args.resume)
-    recovery_authorization = read_campaign_recovery_authorization(out_dir)
-    runtime_git_commit = (
-        recovery_authorization.get("recovery_git_commit")
-        if recovery_authorization
-        else inspection_manifest["run_git_commit"]
-    )
     print(f"MANIFEST {manifest_path}", flush=True)
     for item in assignments:
         print(
@@ -3994,11 +4381,16 @@ def _launch_under_lease(args, out_dir):
                 out_dir, assignments, resume=args.resume,
                 target_round_trips=args.num_round_trips,
                 allow_pristine_pending=(
-                    args.campaign_role == "confirmation"),
+                    args.campaign_role in {"confirmation", "full234"}),
             )
         )
         dry_active = {item["sample"] for item in dry_assignments}
-        dry_complete = set(args.samples) - dry_active
+        dry_outcomes = _latest_sample_outcomes(
+            out_dir, [item["sample"] for item in assignments])
+        dry_complete = {
+            sample for sample, outcome in dry_outcomes.items()
+            if outcome.get("status") == "finished"
+        }
         # A new dry-run has no worker metadata yet, but the inspector still
         # requires a well-formed active-set artifact before treating an open
         # sample as launchable. Mirror the real launch preflight's explicit
@@ -4023,6 +4415,7 @@ def _launch_under_lease(args, out_dir):
     launch_assignments = list(assignments)
     resume_authorizations = {}
     incomplete_samples = set()
+    evaluator_incomplete_samples = set()
     completed_samples = set()
     try:
         # Never revoke a prior worker's authorization before proving its
@@ -4087,12 +4480,18 @@ def _launch_under_lease(args, out_dir):
                 out_dir, assignments, resume=args.resume,
                 target_round_trips=args.num_round_trips,
                 allow_pristine_pending=(
-                    args.campaign_role == "confirmation"),
+                    args.campaign_role in {"confirmation", "full234"}),
             )
         )
+        latest_outcomes = _latest_sample_outcomes(
+            out_dir, [item["sample"] for item in assignments])
         completed_samples = {
-            item["sample"] for item in assignments
-            if item not in launch_assignments
+            sample for sample, outcome in latest_outcomes.items()
+            if outcome.get("status") == "finished"
+        }
+        evaluator_incomplete_samples = {
+            sample for sample, outcome in latest_outcomes.items()
+            if outcome.get("status") == "evaluator_incomplete"
         }
         if args.resume:
             resume_record = {
@@ -4109,7 +4508,7 @@ def _launch_under_lease(args, out_dir):
                 "skipped_finished_samples": sorted(completed_samples),
                 "transport_authorizations": resume_authorizations,
             }
-            if args.campaign_role == "confirmation":
+            if args.campaign_role in {"confirmation", "full234"}:
                 resume_record.update({
                     "launch_pending_samples": [
                         item["sample"] for item in launch_assignments
@@ -4118,216 +4517,18 @@ def _launch_under_lease(args, out_dir):
                     "launch_infrastructure_incomplete_samples": sorted(
                         resume_authorizations
                     ),
+                    "skipped_evaluator_incomplete_samples": sorted(
+                        evaluator_incomplete_samples
+                    ),
                 })
             append_jsonl_locked(dispatch_log, resume_record)
-        if args.campaign_role == "confirmation":
-            waves = _partition_assignment_waves(
-                launch_assignments, CONFIRMATION_SLOTS_PER_KEY)
-            for wave_index, wave in enumerate(waves, 1):
-                evaluate_confirmation_known_usage_gate(
-                    out_dir, inspection_manifest, wave_index,
-                    phase="pre_wave")
-                append_jsonl_locked(
-                    dispatch_log,
-                    {
-                        "event": "wave_start",
-                        "wave_index": wave_index,
-                        "wave_count": len(waves),
-                        "samples": [item["sample"] for item in wave],
-                    },
-                )
-                _run_worker_wave(
-                    args, out_dir, inspection_manifest, task_plans, keys,
-                    wave, resume_authorizations, dispatch_log, running,
-                    incomplete_samples, completed_samples, len(assignments),
-                )
-                append_jsonl_locked(
-                    dispatch_log,
-                    {
-                        "event": "wave_complete",
-                        "wave_index": wave_index,
-                        "wave_count": len(waves),
-                        "samples": [item["sample"] for item in wave],
-                        "infrastructure_incomplete_samples": sorted(
-                            incomplete_samples
-                        ),
-                    },
-                )
-                evaluate_confirmation_known_usage_gate(
-                    out_dir, inspection_manifest, wave_index,
-                    phase="post_wave")
-            evaluate_confirmation_known_usage_gate(
-                out_dir, inspection_manifest, len(waves),
-                phase="pre_final")
-            # Confirmation has already drained every queued wave.  Leave the
-            # legacy single-cohort block below byte-for-byte operationally idle.
-            launch_assignments = []
-        launch_specs = {}
-        for item in launch_assignments:
-            sample = item["sample"]
-            worker_id = f"paired-{sample}-{uuid.uuid4().hex[:12]}"
-            ready_path, ack_path = _worker_barrier_paths(
-                out_dir, worker_id)
-            launch_specs[sample] = {
-                "sample": sample,
-                "worker_launch_id": worker_id,
-                "ready_path": ready_path,
-                "ack_path": ack_path,
-            }
-        _write_active_worker_set(
-            out_dir, inspection_manifest, launch_specs.values())
-        for item in launch_assignments:
-            sample = item["sample"]
-            label = item["key_label"]
-            launch_spec = launch_specs[sample]
-            worker_id = launch_spec["worker_launch_id"]
-            ready_path = launch_spec["ready_path"]
-            ack_path = launch_spec["ack_path"]
-            command = [
-                sys.executable, os.path.join("src", "experiment_runner.py"),
-                "--sample", sample,
-                "--methods", *item["methods"],
-                "--num_round_trips", str(args.num_round_trips),
-                "--seed", str(args.seed),
-                "--model", "minimax-m3",
-                "--max_tokens", "131072",
-                "--out_dir", out_dir,
-                "--stop_on_preservation_violation",
-                "--notes", f"{args.notes}, key={label}",
-            ]
-            environment = dict(
-                os.environ,
-                OPENCODE_API_KEY=keys[label],
-                OPENCODE_TRANSPORT="anthropic_sdk_v2",
-                MINIMAX_TRANSPORT="opencode",
-                MINIMAX_HARD_TIMEOUT="7200",
-                PYTHONUTF8="1",
-                ANCHORPATCH_WORKER_LAUNCH_ID=worker_id,
-                ANCHORPATCH_WORKER_LOCK_PATH=_worker_lease_path(
-                    out_dir, sample
-                ),
-                ANCHORPATCH_WORKER_READY_PATH=os.path.abspath(ready_path),
-                ANCHORPATCH_WORKER_ACK_PATH=os.path.abspath(ack_path),
-                ANCHORPATCH_ACTIVE_WORKER_SET_PATH=os.path.abspath(
-                    _active_worker_set_path(out_dir)
-                ),
-                ANCHORPATCH_START_BARRIER_TIMEOUT=str(args.start_timeout),
-                ANCHORPATCH_EXPECTED_GIT_COMMIT=runtime_git_commit,
-                ANCHORPATCH_EXPECTED_GIT_TREE_STATE="clean",
-                ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256=(
-                    task_plans[sample]["sha256"]
-                ),
-                ANCHORPATCH_EXPECTED_TASK_PLAN_PATH=os.path.abspath(
-                    os.path.join(out_dir, task_plans[sample]["path"])
-                ),
-            )
-            environment.pop(
-                "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID", None)
-            environment.pop(
-                "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX", None)
-            environment.pop(
-                "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT", None)
-            environment.pop(
-                "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX", None)
-            authorization = resume_authorizations.get(sample)
-            if authorization is not None:
-                _validate_resume_authorization(authorization)
-                environment[
-                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID"
-                ] = authorization["parent_semantic_call_id"]
-                environment[
-                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX"
-                ] = str(authorization["generation_index"])
-                environment[
-                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT"
-                ] = authorization["request_fingerprint"]
-                environment[
-                    "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX"
-                ] = str(authorization["next_attempt_index"])
-            append_jsonl_locked(
-                dispatch_log,
-                {
-                    "event": "launch_intent", "sample": sample,
-                    "key_label": label, "methods": item["methods"],
-                    "worker_launch_id": worker_id,
-                    "console_log": item["console_log"],
-                },
-            )
-            log_path = os.path.join(out_dir, item["console_log"])
-            log_handle = open(log_path, "a", encoding="utf-8")
-            process = subprocess.Popen(
-                command, cwd=_ROOT, env=environment,
-                stdout=log_handle, stderr=subprocess.STDOUT,
-            )
-            running[sample] = {
-                "sample": sample,
-                "process": process,
-                "log": log_handle,
-                "key_label": label,
-                "methods": list(item["methods"]),
-                "target_round_trips": args.num_round_trips,
-                "resume_authorization": authorization,
-                "worker_launch_id": worker_id,
-                "ready_path": ready_path,
-                "ack_path": ack_path,
-                "exit_recorded": False,
-            }
-            append_jsonl_locked(
-                dispatch_log,
-                {
-                    "event": "launch", "sample": sample,
-                    "key_label": label, "methods": item["methods"],
-                    "pid": process.pid, "worker_launch_id": worker_id,
-                    "console_log": item["console_log"],
-                },
-            )
-
-        if running:
-            _authorize_workers(
-                out_dir, running, task_plans, dispatch_log,
-                args.start_timeout,
-            )
-        last_report = 0.0
-        while running:
-            time.sleep(args.poll_interval)
-            inspection = inspect_campaign(
-                out_dir, inspection_manifest,
-                active_samples=set(running),
-            )
-            if inspection["errors"]:
-                raise RuntimeError("; ".join(inspection["errors"]))
-            for sample, item in list(running.items()):
-                returncode = item["process"].poll()
-                if returncode is None:
-                    continue
-                disposition = _record_worker_exit(
-                    out_dir, running, sample, item, returncode,
-                    dispatch_log)
-                _write_active_worker_set(
-                    out_dir, inspection_manifest, running.values())
-                if disposition == "infrastructure_incomplete":
-                    incomplete_samples.add(sample)
-                    continue
-                completed_samples.add(sample)
-                sample_inspection = inspect_campaign(
-                    out_dir, inspection_manifest,
-                    active_samples=set(running),
-                    required_complete_samples={sample},
-                )
-                if sample_inspection["errors"]:
-                    raise RuntimeError(
-                        "; ".join(sample_inspection["errors"])
-                    )
-            if time.time() - last_report >= args.progress_interval:
-                print(
-                    f"PROGRESS running={len(running)}/{len(assignments)} "
-                    f"api_calls={inspection['api_calls']} preservation=0",
-                    flush=True,
-                )
-                last_report = time.time()
-
-        _write_active_worker_set(out_dir, inspection_manifest, [])
-        if incomplete_samples:
+        _run_worker_queue(
+            args, out_dir, inspection_manifest, task_plans, keys,
+            launch_assignments, resume_authorizations, dispatch_log,
+            running, incomplete_samples, evaluator_incomplete_samples,
+            completed_samples, len(assignments), slots_per_key,
+        )
+        if incomplete_samples or evaluator_incomplete_samples:
             inspection = inspect_campaign(
                 out_dir, inspection_manifest,
                 required_complete_samples=completed_samples)
@@ -4339,6 +4540,8 @@ def _launch_under_lease(args, out_dir):
                     "event": "campaign_incomplete",
                     "infrastructure_incomplete_samples": sorted(
                         incomplete_samples),
+                    "evaluator_incomplete_samples": sorted(
+                        evaluator_incomplete_samples),
                     "completed_samples": sorted(completed_samples),
                     "api_calls": inspection["api_calls"],
                     "preservation_violations": 0,
@@ -4346,7 +4549,9 @@ def _launch_under_lease(args, out_dir):
             )
             print(
                 "RESULT INCOMPLETE infrastructure_samples="
-                + ",".join(sorted(incomplete_samples)),
+                + ",".join(sorted(incomplete_samples))
+                + " evaluator_samples="
+                + ",".join(sorted(evaluator_incomplete_samples)),
                 file=sys.stderr, flush=True,
             )
             return 2
@@ -4437,7 +4642,8 @@ def main():
     parser.add_argument("--out_dir", required=True)
     parser.add_argument(
         "--campaign_role",
-        choices=("smoke", "main", "supplemental", "confirmation"),
+        choices=(
+            "smoke", "main", "supplemental", "confirmation", "full234"),
         required=True)
     parser.add_argument(
         "--smoke_dir",
@@ -4482,6 +4688,19 @@ def main():
             _resolve_confirmation_selection(args, out_dir=args.out_dir)
         except RuntimeError as exc:
             parser.error(str(exc))
+    elif args.campaign_role == "full234":
+        if manual_samples:
+            parser.error(
+                "full234 samples come only from samples_delegate52"
+            )
+        if args.selection_manifest:
+            parser.error(
+                "--selection_manifest is only valid for confirmation"
+            )
+        try:
+            _resolve_full234_scope(args)
+        except RuntimeError as exc:
+            parser.error(str(exc))
     else:
         if not args.samples:
             parser.error("--samples is required for this campaign role")
@@ -4513,7 +4732,7 @@ def main():
             parser.error("--smoke_dir is not valid for supplemental")
         if args.slots_per_key != 4:
             parser.error("supplemental requires --slots_per_key 4")
-    else:
+    elif args.campaign_role == "confirmation":
         selection_record = _argument_value(
             args, "_selection_manifest_record", {}) or {}
         expected_count = (
@@ -4533,6 +4752,16 @@ def main():
             parser.error("--smoke_dir is not valid for confirmation")
         if args.slots_per_key != CONFIRMATION_SLOTS_PER_KEY:
             parser.error("confirmation requires --slots_per_key 4")
+    else:
+        if (len(args.samples) != FULL234_SAMPLE_COUNT
+                or args.num_round_trips != 10):
+            parser.error(
+                "full234 requires the exact 234-sample inventory with 10 round trips"
+            )
+        if args.smoke_dir:
+            parser.error("--smoke_dir is not valid for full234")
+        if args.slots_per_key != FULL234_SLOTS_PER_KEY:
+            parser.error("full234 requires --slots_per_key 4")
     if args.num_round_trips < 1:
         parser.error("--num_round_trips must be >= 1")
     if args.poll_interval < 1 or args.progress_interval < 1:

@@ -1,9 +1,11 @@
-"""Two-stage post-processing for new HybridPatch experiments.
+"""Review-gated post-processing for new HybridPatch experiments.
 
 ``prepare`` runs the version-local verifier and analyzer, records only
 mechanically derived facts, and writes a review YAML for the judgments that
-must not be guessed. ``finalize`` verifies that review, atomically registers
-the experiment, and delegates Git-record generation to finalize_experiment.py.
+must not be guessed. ``review-check`` exercises record contracts before heavy
+I/O. ``finalize`` verifies that review, atomically registers the experiment,
+and delegates Git-record generation to finalize_experiment.py; it can consume
+a parallel artifact seal and optionally restore a private generated bundle.
 
 This tool is offline: it never calls a model. It refuses frozen HP_V3-HP_V7.
 """
@@ -19,6 +21,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -35,6 +38,20 @@ EXPERIMENT_PLANS = ROOT / "docs" / "experiment_plans"
 OWNER_RE = re.compile(r"^HP_V(\d+)$")
 PLACEHOLDER = "REVIEW_REQUIRED"
 METHOD_NAMES = ("hybridpatch", "fullrewrite", "anchorpatch")
+CATALOG_STATUSES = {"canonical", "diagnostic", "source-only", "superseded"}
+LIFECYCLE_STATUSES = {
+    "complete",
+    "incomplete",
+    "failed_informative",
+    "superseded",
+}
+CATALOG_EVIDENCE_ROLES = {
+    "canonical",
+    "historical",
+    "diagnostic",
+    "source_only",
+    "sensitivity",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -81,6 +98,38 @@ def parse_args() -> argparse.Namespace:
     )
     finalize.add_argument("--experiment", required=True, type=Path)
     finalize.add_argument(
+        "--review",
+        type=Path,
+        default=None,
+        help="Default: <experiment>/analysis/record_review.yaml",
+    )
+    finalize.add_argument(
+        "--sealed-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Reuse a parallel private artifact seal and avoid another raw-tree scan."
+        ),
+    )
+    finalize.add_argument(
+        "--private-record-bundle",
+        type=Path,
+        default=None,
+        help=(
+            "After validators pass, archive the generated record state and "
+            "restore the pre-existing catalog/index/records byte-for-byte."
+        ),
+    )
+
+    review = subparsers.add_parser(
+        "review-check",
+        help=(
+            "Validate reviewed YAML and record-generation contracts without "
+            "hashing the raw archive or changing generated records."
+        ),
+    )
+    review.add_argument("--experiment", required=True, type=Path)
+    review.add_argument(
         "--review",
         type=Path,
         default=None,
@@ -602,6 +651,22 @@ def collect_facts(owner: str, archive: Path) -> dict[str, Any]:
         for sample in planned
         if sample not in complete_samples
     }
+    sample_outcome_path = archive / "sample_outcomes.jsonl"
+    latest_sample_outcomes: dict[str, str] = {}
+    if sample_outcome_path.is_file():
+        for row in load_jsonl(sample_outcome_path):
+            sample = row.get("sample")
+            status = row.get("status")
+            if sample in planned and isinstance(status, str) and status:
+                latest_sample_outcomes[str(sample)] = status
+        input_paths.append(sample_outcome_path)
+    evaluator_incomplete_path = archive / "evaluator_incomplete_samples.jsonl"
+    if evaluator_incomplete_path.is_file():
+        input_paths.append(evaluator_incomplete_path)
+    incomplete_sample_outcomes = {
+        sample: latest_sample_outcomes.get(sample, "missing_outcome")
+        for sample in incomplete
+    }
 
     provenance = code_provenance(archive, metadata)
     protocols = result_protocols(all_result_rows)
@@ -660,6 +725,8 @@ def collect_facts(owner: str, archive: Path) -> dict[str, Any]:
         "planned_sample_count": len(planned),
         "complete_all_methods_sample_ids": complete_samples,
         "incomplete_samples": incomplete,
+        "sample_outcomes": latest_sample_outcomes,
+        "incomplete_sample_outcomes": incomplete_sample_outcomes,
         "methods": methods,
         "per_method_sample_counts": per_method,
         "round_trips": round_trips,
@@ -846,6 +913,8 @@ def annotate_incomplete_analysis(
         "campaign_complete": False,
         "campaign_expected_n": scope["planned_sample_count"],
         "campaign_incomplete_sample_ids": scope["incomplete_sample_ids"],
+        "campaign_incomplete_sample_outcomes": scope.get(
+            "incomplete_sample_outcomes", {}),
         "analysis_sample_policy": scope["sample_policy"],
         "score_imputed_for_incomplete_samples": False,
     })
@@ -915,6 +984,8 @@ def prepare_experiment(
         "analysis_sample_count": len(facts["complete_all_methods_sample_ids"]),
         "analysis_sample_ids": facts["complete_all_methods_sample_ids"],
         "incomplete_sample_ids": incomplete_sample_ids,
+        "incomplete_sample_outcomes": facts.get(
+            "incomplete_sample_outcomes", {}),
         "sample_policy": "complete_all_methods",
         "score_imputed_for_incomplete_samples": False,
     }
@@ -1003,6 +1074,8 @@ def prepare_experiment(
         "sample_policy": analysis_scope["sample_policy"],
         "analysis_sample_count": analysis_scope["analysis_sample_count"],
         "incomplete_sample_ids": analysis_scope["incomplete_sample_ids"],
+        "incomplete_sample_outcomes": analysis_scope.get(
+            "incomplete_sample_outcomes", {}),
         "score_imputed_for_incomplete_samples": False,
     }
     if incomplete_sample_ids:
@@ -1190,6 +1263,16 @@ def validate_review(
     for field in required_text_fields:
         if not isinstance(entry.get(field), str) or not entry.get(field):
             raise RuntimeError(f"catalog_entry.{field} must be a non-empty string")
+    for field, allowed in (
+        ("status", CATALOG_STATUSES),
+        ("lifecycle_status", LIFECYCLE_STATUSES),
+        ("evidence_role", CATALOG_EVIDENCE_ROLES),
+    ):
+        if entry[field] not in allowed:
+            raise RuntimeError(
+                f"catalog_entry.{field} has unsupported value {entry[field]!r}; "
+                f"expected one of {sorted(allowed)}"
+            )
     if not isinstance(entry.get("source_reports"), list) or not entry["source_reports"]:
         raise RuntimeError("catalog_entry.source_reports must be a non-empty list")
     for index, report in enumerate(entry["source_reports"]):
@@ -1332,6 +1415,62 @@ def restore_generated(snapshots: list[tuple[Path, Path]]) -> None:
             shutil.copy2(backup, target)
 
 
+def orphan_record_directories(
+    catalog: dict[str, Any],
+    *,
+    extra_owners: Iterable[str] = (),
+) -> list[Path]:
+    declared: dict[str, set[str]] = {}
+    for record_set in catalog.get("record_sets") or []:
+        owner = str(record_set["owner"])
+        declared[owner] = {
+            str(entry["experiment_id"])
+            for entry in record_set.get("experiments") or []
+        }
+    for owner in extra_owners:
+        declared.setdefault(owner, set())
+    orphans: list[Path] = []
+    for owner, experiment_ids in sorted(declared.items()):
+        records = ROOT / owner / "records"
+        if not records.is_dir():
+            continue
+        for candidate in sorted(records.iterdir()):
+            if candidate.is_dir() and candidate.name not in experiment_ids:
+                orphans.append(candidate)
+    return orphans
+
+
+def write_private_record_bundle(
+    destination: Path,
+    *,
+    owner: str,
+    experiment_id: str,
+) -> str:
+    destination = destination.resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".tmp")
+    temporary.unlink(missing_ok=True)
+    sources = (
+        CATALOG,
+        ROOT / "docs" / "EXPERIMENT_INDEX.md",
+        ROOT / owner / "EXPERIMENTS.md",
+        ROOT / owner / "records" / experiment_id,
+    )
+    try:
+        with tarfile.open(temporary, "w:gz") as archive:
+            for source in sources:
+                if not source.exists():
+                    raise RuntimeError(
+                        f"private record bundle source is missing: {repo_ref(source)}"
+                    )
+                archive.add(source, arcname=repo_ref(source), recursive=True)
+        temporary.replace(destination)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+    return sha256_file(destination)
+
+
 def register_entry(catalog: dict[str, Any], owner: str, entry: dict[str, Any]) -> None:
     for record_set in catalog.get("record_sets") or []:
         for existing in record_set.get("experiments") or []:
@@ -1357,10 +1496,12 @@ def register_entry(catalog: dict[str, Any], owner: str, entry: dict[str, Any]) -
     record_set.setdefault("experiments", []).append(entry)
 
 
-def finalize_experiment(experiment: Path, review_path: Path | None) -> None:
+def reviewed_finalization_inputs(
+    experiment: Path,
+    review_path: Path | None,
+) -> tuple[str, Path, dict[str, Any], dict[str, Any], dict[str, Any]]:
     owner, _, archive = resolve_experiment(experiment)
-    analysis = archive / "analysis"
-    facts_path = analysis / "derived_facts.json"
+    facts_path = archive / "analysis" / "derived_facts.json"
     if not facts_path.is_file():
         raise RuntimeError("prepare has not produced analysis/derived_facts.json")
     facts = load_json(facts_path)
@@ -1369,7 +1510,7 @@ def finalize_experiment(experiment: Path, review_path: Path | None) -> None:
         raise RuntimeError("raw result inputs changed after prepare; run prepare again")
     if current["experiment_plan_sha256"] != facts.get("experiment_plan_sha256"):
         raise RuntimeError("experiment plan changed after prepare; run prepare again")
-    selected_review = review_path or analysis / "record_review.yaml"
+    selected_review = review_path or archive / "analysis" / "record_review.yaml"
     if not selected_review.is_absolute():
         selected_review = ROOT / selected_review
     with selected_review.open(encoding="utf-8") as handle:
@@ -1377,26 +1518,95 @@ def finalize_experiment(experiment: Path, review_path: Path | None) -> None:
     if not isinstance(review, dict):
         raise RuntimeError("review YAML must contain an object")
     entry = validate_review(review, facts)
-
     catalog = load_json(CATALOG)
+    register_entry(catalog, owner, entry)
+    return owner, archive, facts, entry, catalog
+
+
+def review_check_experiment(
+    experiment: Path,
+    review_path: Path | None,
+) -> None:
+    owner, archive, _, entry, catalog = reviewed_finalization_inputs(
+        experiment,
+        review_path,
+    )
+    with tempfile.TemporaryDirectory(
+        prefix="hybridpatch-review-contract-"
+    ) as temporary:
+        prospective_catalog = Path(temporary) / "catalog.json"
+        write_atomic(prospective_catalog, stable_json(catalog))
+        completed = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "tools" / "build_experiment_records.py"),
+                "--catalog",
+                str(prospective_catalog),
+                "--only",
+                entry["experiment_id"],
+                "--skip-tree-hash",
+                "--validate-only",
+            ],
+            cwd=ROOT,
+            env={**os.environ, "PYTHONUTF8": "1"},
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                "review/catalog record contract failed before raw-tree hashing"
+            )
+    print(
+        f"[process] review contract: {owner}/{archive.name} (zero raw-tree scan)"
+    )
+    print("[process] REVIEW-CHECK PASS")
+
+
+def finalize_experiment(
+    experiment: Path,
+    review_path: Path | None,
+    sealed_manifest: Path | None = None,
+    private_record_bundle: Path | None = None,
+) -> None:
+    owner, archive, facts, _, catalog = reviewed_finalization_inputs(
+        experiment,
+        review_path,
+    )
+    analysis = archive / "analysis"
     record_directory = ROOT / owner / "records" / archive.name
-    if record_directory.exists():
+    if record_directory.exists() and private_record_bundle is None:
         raise RuntimeError(
             f"record directory already exists; refusing overwrite: {repo_ref(record_directory)}"
         )
-    original_catalog = json.loads(json.dumps(catalog))
-    register_entry(catalog, owner, entry)
+    original_catalog = load_json(CATALOG)
 
-    with tempfile.TemporaryDirectory(prefix="hybridpatch-record-backup-") as temporary:
+    private_bundle_sha256 = None
+    with tempfile.TemporaryDirectory(
+        prefix=".hybridpatch-record-backup-",
+        dir=ROOT,
+    ) as temporary:
         snapshots = snapshot_generated(
             original_catalog,
             Path(temporary),
             extra_owners=[owner],
         )
         try:
+            if private_record_bundle is not None:
+                orphan_root = Path(temporary) / "orphans"
+                for orphan in orphan_record_directories(
+                    original_catalog,
+                    extra_owners=[owner],
+                ):
+                    destination = orphan_root / orphan.relative_to(ROOT)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(orphan), str(destination))
             write_atomic(CATALOG, stable_json(catalog))
+            command = [sys.executable, str(FINALIZER), archive.name]
+            if sealed_manifest is not None:
+                command.extend(
+                    ["--sealed-manifest", str(sealed_manifest.resolve())]
+                )
             completed = subprocess.run(
-                [sys.executable, str(FINALIZER), archive.name],
+                command,
                 cwd=ROOT,
                 env={**os.environ, "PYTHONUTF8": "1"},
                 check=False,
@@ -1405,11 +1615,19 @@ def finalize_experiment(experiment: Path, review_path: Path | None) -> None:
                 raise RuntimeError(
                     f"finalize_experiment.py failed with {completed.returncode}"
                 )
+            if private_record_bundle is not None:
+                private_bundle_sha256 = write_private_record_bundle(
+                    private_record_bundle,
+                    owner=owner,
+                    experiment_id=archive.name,
+                )
         except Exception:
             restore_generated(snapshots)
-            if record_directory.exists():
+            if private_record_bundle is None and record_directory.exists():
                 shutil.rmtree(record_directory)
             raise
+        if private_record_bundle is not None:
+            restore_generated(snapshots)
 
     write_atomic(
         analysis / "process_state.json",
@@ -1417,13 +1635,29 @@ def finalize_experiment(experiment: Path, review_path: Path | None) -> None:
             {
                 "schema": "hybridpatch.experiment_process_state/1",
                 "experiment_id": archive.name,
-                "stage": "finalized",
+                "stage": (
+                    "finalized_private"
+                    if private_record_bundle is not None
+                    else "finalized"
+                ),
                 "input_sha256": facts["input_sha256"],
-                "record_ref": f"{owner}/records/{archive.name}/report.md",
+                "record_ref": (
+                    str(private_record_bundle.resolve())
+                    if private_record_bundle is not None
+                    else f"{owner}/records/{archive.name}/report.md"
+                ),
+                "private_record_bundle_sha256": private_bundle_sha256,
             }
         ),
     )
-    print(f"[process] report: {owner}/records/{archive.name}/report.md")
+    if private_record_bundle is not None:
+        print(
+            "[process] private record bundle: "
+            f"{private_record_bundle.resolve()} sha256={private_bundle_sha256}"
+        )
+        print("[process] generated catalog/index/records restored")
+    else:
+        print(f"[process] report: {owner}/records/{archive.name}/report.md")
     print("[process] FINALIZE PASS")
 
 
@@ -1444,7 +1678,14 @@ def main() -> int:
             force_review_draft=args.force_review_draft,
         )
     elif args.command == "finalize":
-        finalize_experiment(args.experiment, args.review)
+        finalize_experiment(
+            args.experiment,
+            args.review,
+            args.sealed_manifest,
+            args.private_record_bundle,
+        )
+    elif args.command == "review-check":
+        review_check_experiment(args.experiment, args.review)
     else:
         raise RuntimeError(f"unsupported command: {args.command}")
     return 0

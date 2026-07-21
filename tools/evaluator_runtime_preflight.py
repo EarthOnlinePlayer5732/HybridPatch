@@ -27,11 +27,13 @@ import io
 import json
 import math
 import os
+import platform
 import subprocess
 import sys
 import tempfile
 import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
@@ -104,9 +106,27 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "stdout contains only a compact JSON summary."
         ),
     )
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=min(8, max(1, os.cpu_count() or 1)),
+        help="Maximum concurrent evaluator subprocesses (default: min(8, CPU count)).",
+    )
+    parser.add_argument(
+        "--reuse-output",
+        action="store_true",
+        help=(
+            "Reuse successful per-sample results from the existing --output "
+            "report when Python, evaluator code, and sample fingerprints match."
+        ),
+    )
     args = parser.parse_args(argv)
     if args.timeout <= 0 or not math.isfinite(args.timeout):
         parser.error("--timeout must be a finite positive number")
+    if args.jobs < 1:
+        parser.error("--jobs must be >= 1")
+    if args.reuse_output and args.output is None:
+        parser.error("--reuse-output requires --output")
     return args
 
 
@@ -178,6 +198,96 @@ def _tree_digest(root: Path) -> str:
                 digest.update(chunk)
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _paths_digest(root: Path, paths: Iterable[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.as_posix()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def evaluator_code_sha256(version_root: Path) -> str:
+    candidates = list((version_root / "src").rglob("*.py"))
+    requirements = version_root / "requirements.txt"
+    if requirements.is_file():
+        candidates.append(requirements)
+    return _paths_digest(
+        version_root,
+        (path for path in candidates if path.is_file()),
+    )
+
+
+def runtime_identity() -> dict[str, str]:
+    return {
+        "python_executable": str(Path(sys.executable).resolve()),
+        "python_version": sys.version,
+        "platform": platform.platform(),
+    }
+
+
+def preflight_input_fingerprints(
+    version_root: Path,
+    selected: Iterable[str],
+) -> dict[str, Any]:
+    root = samples_root(version_root)
+    return {
+        "evaluator_code_sha256": evaluator_code_sha256(version_root),
+        "runtime_identity": runtime_identity(),
+        "sample_input_sha256": {
+            sample_id: _tree_digest(root / sample_id)
+            for sample_id in selected
+        },
+    }
+
+
+def _cached_successful_results(
+    output_path: Path | None,
+    selected: Iterable[str],
+    fingerprints: dict[str, Any],
+    *,
+    enabled: bool,
+) -> dict[str, dict[str, Any]]:
+    if not enabled or output_path is None or not output_path.is_file():
+        return {}
+    try:
+        prior = json.loads(output_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    prior_inputs = prior.get("input_fingerprints") or {}
+    if (
+        prior.get("schema") != SCHEMA
+        or prior_inputs.get("evaluator_code_sha256")
+        != fingerprints["evaluator_code_sha256"]
+        or prior_inputs.get("runtime_identity")
+        != fingerprints["runtime_identity"]
+    ):
+        return {}
+    prior_samples = prior_inputs.get("sample_input_sha256") or {}
+    prior_results = {
+        result.get("sample_id"): result
+        for result in prior.get("results") or []
+        if isinstance(result, dict)
+    }
+    reusable: dict[str, dict[str, Any]] = {}
+    for sample_id in selected:
+        result = prior_results.get(sample_id)
+        if (
+            prior_samples.get(sample_id)
+            == fingerprints["sample_input_sha256"].get(sample_id)
+            and isinstance(result, dict)
+            and result.get("status") == "runtime_runnable"
+            and result.get("api_guard_active") is True
+            and result.get("sample_tree_unchanged") is True
+            and not result.get("new_tmp_eval_artifacts")
+        ):
+            reusable[sample_id] = dict(result)
+    return reusable
 
 
 def classify_evaluation(evaluation: Any) -> dict[str, Any]:
@@ -286,7 +396,14 @@ def evaluate_sample_worker(version_root: Path, sample_id: str) -> dict[str, Any]
         }
 
     before_digest = _tree_digest(sample_dir)
-    before_tmp = {path.name for path in version_root.glob("tmp_eval_*")}
+    parallel_parent = os.environ.get(
+        "ANCHORPATCH_EVALUATOR_PREFLIGHT_PARALLEL"
+    ) == "1"
+    before_tmp = (
+        set()
+        if parallel_parent
+        else {path.name for path in version_root.glob("tmp_eval_*")}
+    )
     captured = io.StringIO()
     evaluation: Any = None
     result: dict[str, Any]
@@ -342,10 +459,14 @@ def evaluate_sample_worker(version_root: Path, sample_id: str) -> dict[str, Any]
         }
 
     after_digest = _tree_digest(sample_dir)
-    new_tmp = sorted(
-        path.name
-        for path in version_root.glob("tmp_eval_*")
-        if path.name not in before_tmp
+    new_tmp = (
+        []
+        if parallel_parent
+        else sorted(
+            path.name
+            for path in version_root.glob("tmp_eval_*")
+            if path.name not in before_tmp
+        )
     )
     if before_digest != after_digest:
         result.update(
@@ -367,6 +488,7 @@ def evaluate_sample_worker(version_root: Path, sample_id: str) -> dict[str, Any]
         **result,
         "sample_tree_unchanged": before_digest == after_digest,
         "new_tmp_eval_artifacts": new_tmp,
+        "per_worker_tmp_guard": not parallel_parent,
         "api_guard_active": True,
         "duration_seconds": round(time.monotonic() - started, 6),
     }
@@ -398,7 +520,13 @@ def _worker_main(argv: list[str]) -> int:
     return 0 if payload.get("status") == "runtime_runnable" else 1
 
 
-def run_sample(version_root: Path, sample_id: str, timeout: float) -> dict[str, Any]:
+def run_sample(
+    version_root: Path,
+    sample_id: str,
+    timeout: float,
+    *,
+    concurrent: bool = False,
+) -> dict[str, Any]:
     command = [
         sys.executable,
         "-B",
@@ -417,6 +545,10 @@ def run_sample(version_root: Path, sample_id: str, timeout: float) -> dict[str, 
         PYTHONPATH=str(version_root / "src"),
         ANCHORPATCH_EVALUATOR_PREFLIGHT="1",
     )
+    if concurrent:
+        environment["ANCHORPATCH_EVALUATOR_PREFLIGHT_PARALLEL"] = "1"
+    else:
+        environment.pop("ANCHORPATCH_EVALUATOR_PREFLIGHT_PARALLEL", None)
     started = time.monotonic()
     try:
         completed = subprocess.run(
@@ -538,6 +670,11 @@ def build_report(
     timeout: float,
     preexisting_tmp: list[str],
     postexisting_tmp: list[str],
+    fingerprints: dict[str, Any],
+    *,
+    jobs: int,
+    executed_samples: list[str],
+    reused_samples: list[str],
 ) -> dict[str, Any]:
     counts = Counter(str(result.get("status")) for result in results)
     runnable = [r for r in results if r.get("status") == "runtime_runnable"]
@@ -552,6 +689,16 @@ def build_report(
         "samples_root_resolved": _relative(samples_root(version_root)),
         "selection": selected,
         "timeout_seconds": timeout,
+        "input_fingerprints": fingerprints,
+        "execution": {
+            "jobs": jobs,
+            "executed_sample_ids": executed_samples,
+            "executed_sample_count": len(executed_samples),
+            "reused_sample_ids": reused_samples,
+            "reused_sample_count": len(reused_samples),
+            "cache_policy": "successful_matching_inputs_only",
+            "parallel_tmp_guard": "aggregate_before_after",
+        },
         "api_guard": {
             "credential_environment_removed": list(CREDENTIAL_ENV_VARS),
             "model_entry_points_blocked": True,
@@ -623,9 +770,63 @@ def build_report(
                 str(result["sample_id"]): result.get("score") for result in nonunit
             },
             "status_counts": dict(sorted(counts.items())),
+            "executed": len(executed_samples),
+            "reused": len(reused_samples),
         },
         "results": results,
     }
+
+
+def run_selected_samples(
+    version_root: Path,
+    selected: list[str],
+    timeout: float,
+    jobs: int,
+    *,
+    quiet: bool,
+) -> dict[str, dict[str, Any]]:
+    if not selected:
+        return {}
+    worker_count = min(jobs, len(selected))
+    concurrent = worker_count > 1
+    results: dict[str, dict[str, Any]] = {}
+    if worker_count == 1:
+        for index, sample_id in enumerate(selected, 1):
+            if not quiet:
+                print(
+                    f"[evaluator-preflight] {index}/{len(selected)} {sample_id}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            results[sample_id] = run_sample(
+                version_root,
+                sample_id,
+                timeout,
+                concurrent=False,
+            )
+        return results
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(
+                run_sample,
+                version_root,
+                sample_id,
+                timeout,
+                concurrent=concurrent,
+            ): sample_id
+            for sample_id in selected
+        }
+        for index, future in enumerate(as_completed(futures), 1):
+            sample_id = futures[future]
+            results[sample_id] = future.result()
+            if not quiet:
+                print(
+                    f"[evaluator-preflight] {index}/{len(selected)} {sample_id}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+    return results
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -639,11 +840,14 @@ def main(argv: list[str] | None = None) -> int:
     output_path = (
         resolve_output_path(args.output, version_root) if args.output is not None else None
     )
+    fingerprints = preflight_input_fingerprints(version_root, selected)
     preexisting_tmp = sorted(path.name for path in version_root.glob("tmp_eval_*"))
-    results = []
+    results_by_sample: dict[str, dict[str, Any]] = {}
+    reused: list[str] = []
+    executed: list[str] = []
     if preexisting_tmp:
-        results = [
-            {
+        results_by_sample = {
+            sample_id: {
                 "schema": WORKER_SCHEMA,
                 "sample_id": sample_id,
                 "sample_type": _sample_type(version_root, sample_id),
@@ -654,16 +858,27 @@ def main(argv: list[str] | None = None) -> int:
                 "api_guard_active": True,
             }
             for sample_id in selected
-        ]
+        }
     else:
-        for index, sample_id in enumerate(selected, 1):
-            if not args.quiet:
-                print(
-                    f"[evaluator-preflight] {index}/{len(selected)} {sample_id}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-            results.append(run_sample(version_root, sample_id, args.timeout))
+        results_by_sample = _cached_successful_results(
+            output_path,
+            selected,
+            fingerprints,
+            enabled=args.reuse_output,
+        )
+        reused = [sample_id for sample_id in selected if sample_id in results_by_sample]
+        pending = [sample_id for sample_id in selected if sample_id not in results_by_sample]
+        executed = list(pending)
+        results_by_sample.update(
+            run_selected_samples(
+                version_root,
+                pending,
+                args.timeout,
+                args.jobs,
+                quiet=args.quiet,
+            )
+        )
+    results = [results_by_sample[sample_id] for sample_id in selected]
     postexisting_tmp = sorted(path.name for path in version_root.glob("tmp_eval_*"))
     report = build_report(
         version_root,
@@ -672,6 +887,10 @@ def main(argv: list[str] | None = None) -> int:
         args.timeout,
         preexisting_tmp,
         postexisting_tmp,
+        fingerprints,
+        jobs=args.jobs,
+        executed_samples=executed,
+        reused_samples=reused,
     )
     if output_path is None:
         print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True))

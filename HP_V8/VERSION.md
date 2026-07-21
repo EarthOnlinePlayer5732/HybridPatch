@@ -528,6 +528,38 @@ gate、FullRewrite、transport、evaluator 和 scoring 指纹保持冻结。
 匹配为 0。恢复后 `--records-only` 对 13 个公开 record PASS；source-linked 模式保留 21 个
 由活动文档前进造成的既有 stale-hash error，不改写冻结记录。
 
+## 2026-07-21 大规模 paired 调度与 evaluator 样本隔离
+
+本轮是 HP_V8 的实验编排修复，不创建新方法版本，也不改变 HybridPatch prompt、
+`hybridpatch/8`、schema、executor、validation gate、partial acceptance、preservation、
+FullRewrite、transport-v4、domain evaluator 或 scoring。
+
+confirmation 和新增 `full234` role 改用 `per_key_work_conserving_v1`。每个 Key 保留稳定
+FIFO 队列和固定 `slots_per_key=4` 上限；worker 结束后立即从同一 Key 补位，不再等待整波
+清空。manifest 保存每 Key 队列、`max_worker_count` 和 `queued_worker_count`，dispatch log
+保存 refill 与槽位释放。full234 自动冻结 `samples_delegate52` 的精确 234-sample 排序集合和
+`sample.json` 摘要，固定 13 个物理唯一 Key、10 RT、seed42；最大并发 52、初始排队 182，
+方法首发为 HP/FR 各 117 个，每 Key 初始四项为 2/2。
+
+`domain.evaluate_context()` 抛出的异常现在被包装成独立
+`EvaluatorIncompleteError`。runner 只在实际 checkpoint 是完整原子前缀时写入
+`evaluator_incomplete` sample outcome、run metadata 和
+`anchorpatch.evaluator_incomplete/2` sidecar，并明确记录失败步骤未提交、未补 0。dispatcher
+复核 worker/PID/invocation、方法顺序、checkpoint、API 响应步骤和 sidecar 后，只终止该
+sample，释放槽位并继续队列；该状态在同一 campaign 内是终态，resume 跳过且不重新 POST。
+证据不完整、普通 runner/local exception、preservation、Git/task-plan drift、重复/半提交或
+无法映射的 API ledger 仍全局停止。transport exhaustion 的既有恢复语义不变。
+
+后处理同时保留每个 incomplete sample 的正式 outcome，`evaluator_incomplete` 不再默认归为
+infrastructure；complete-pair 视图仍保持 missing/null、禁止 0 分插补。历史
+`anchorpatch.evaluator_incomplete/1` source-log SHA 读取语义继续兼容。
+
+零 API 验证：HybridPatch executor `72/72`、dispatcher/transport/runner `114/114`、tools
+`67/67`、splitters byte-exact 全通过；新增测试覆盖滚动补位发生在同 Key 旧 worker 尚未
+全部结束时、每 Key 不超过 4、evaluator incomplete 后继续补位、resume 零 POST、
+preservation 仍全局停止、full234 精确 234 scope 与 117/117 方法首发。V1–V8 replay matrix
+和 preservation regression 均通过。本轮未调用任何 provider API。
+
 ## 运行方式
 
 ```bash

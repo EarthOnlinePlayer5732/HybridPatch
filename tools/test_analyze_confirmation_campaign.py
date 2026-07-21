@@ -634,6 +634,65 @@ class ConfirmationCampaignAnalysisTests(unittest.TestCase):
             )
             self.assertEqual(proof["unaccepted_inspection_errors"], [])
 
+    def test_postrun_accepts_formal_v2_evaluator_incomplete_evidence(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            analysis_dir = root / "analysis"
+            analysis_dir.mkdir()
+            (analysis_dir / "verification.log").write_text(
+                "exit_code=0\n"
+                "HONESTY GATE: PASS — 8 backward RS independently "
+                "reproduced from raw responses\n",
+                encoding="utf-8",
+            )
+            shared = {
+                "sample": "calendar5",
+                "invocation_id": "invocation-calendar5",
+                "status": "evaluator_incomplete",
+                "failure_stage": "evaluator",
+                "result_committed_for_failed_step": False,
+                "score_imputed": False,
+            }
+            self._write_jsonl(
+                root / "evaluator_incomplete_samples.jsonl",
+                [{
+                    "schema": "anchorpatch.evaluator_incomplete/2",
+                    "disposition": "cancel_sample_continue_campaign",
+                    **shared,
+                }],
+            )
+            self._write_jsonl(
+                root / "sample_outcomes.jsonl",
+                [{"schema": "anchorpatch.sample_outcome/1", **shared}],
+            )
+            self._write_jsonl(
+                root / "run_metadata.jsonl",
+                [{
+                    "schema": "anchorpatch.run_metadata/3",
+                    "invocation_id": shared["invocation_id"],
+                    "samples": [shared["sample"]],
+                    "status": "evaluator_incomplete",
+                }],
+            )
+            raw_error = "latest run_metadata invocation failed: calendar5"
+            (analysis_dir / "strict_inspection_postrun.json").write_text(
+                json.dumps({
+                    "errors": [raw_error],
+                    "preservation_violations": 0,
+                }),
+                encoding="utf-8",
+            )
+
+            proof = analysis._postrun_verification(
+                root, expected_backward_rows=8
+            )
+
+            self.assertTrue(proof["valid"], proof["problems"])
+            self.assertEqual(
+                proof["accepted_sample_level_incomplete_errors"], [raw_error]
+            )
+
     def test_critical_failure_threshold_uses_float_tolerance(self) -> None:
         scores = {
             ("fullrewrite", "chess4", 1): 0.8978427515498331,

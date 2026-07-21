@@ -153,6 +153,58 @@ class BuildExperimentRecordProvenanceTests(unittest.TestCase):
                     Path(directory), metadata
                 )
 
+    def test_raw_manifest_reuses_sealed_tree_and_compression_digest(self) -> None:
+        sealed = {
+            "tree": {
+                "algorithm": "sha256-tree-v1",
+                "tree_sha256": "a" * 64,
+                "file_count": 3,
+                "size_bytes": 123,
+                "skipped_sensitive_files": [],
+                "skipped_symlinks": [],
+                "credential_scan": {
+                    "status": "pass_zero_matches",
+                    "exact_local_secret_match_count": 0,
+                },
+            },
+            "archive": {
+                "format": "tar+gzip",
+                "sha256": "b" * 64,
+                "size_bytes": 45,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            manifest = records.raw_manifest_document(
+                {
+                    "experiment_id": "exp_fixture",
+                    "archive_path": "HP_V8/exp_fixture",
+                    "raw_retention": "private",
+                },
+                path,
+                "artifact",
+                skip_tree_hash=False,
+                existing_path=path / "absent.json",
+                source_experiments=[],
+                sealed_manifest=sealed,
+            )
+
+        artifact = manifest["artifacts"][0]
+        self.assertEqual(artifact["tree_sha256"], "a" * 64)
+        self.assertEqual(artifact["archive_status"], "compressed_private")
+        self.assertEqual(artifact["compression"]["sha256"], "b" * 64)
+
+    def test_missing_evaluator_sample_is_not_labeled_infrastructure(self) -> None:
+        classified = records.classify_row(
+            None,
+            missing_reason=(
+                "evaluator_incomplete: domain evaluator raised before commit"),
+        )
+
+        self.assertEqual(classified["failure_label"], "evaluator_incomplete")
+        self.assertEqual(classified["failure_stage"], "evaluator")
+        self.assertEqual(classified["commit_outcome"], "missing")
+
 
 if __name__ == "__main__":
     unittest.main()

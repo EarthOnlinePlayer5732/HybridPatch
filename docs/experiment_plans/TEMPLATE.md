@@ -91,18 +91,21 @@
 ```
 
 - 并发与 worker 划分：
+- dispatcher policy（大规模 paired 默认 `per_key_work_conserving_v1`）：
+- 每 Key worker 上限与 FIFO 队列分配：
 - Key 标签：
 - 预算上限：
 - 预计时长：
 - stdout / stderr / dispatch log：
 - 恢复与断点续跑策略：
+- `infrastructure_incomplete` / `evaluator_incomplete` 的隔离、缺失值和重发政策：
 
 ## 8. Preflight
 
 - [ ] 新版本已创建并处于 active；冻结版本未修改
-- [ ] 零 API 单元/回归测试通过
-- [ ] 数据与 task plan preflight 通过
-- [ ] 样本 runtime evaluator smoke 通过
+- [ ] 零 API preflight receipt 为 PASS；路径和 SHA-256 已记录
+- [ ] dispatcher dry-run 已核对数据、task plan、out_dir 和 manifest
+- [ ] manifest 样本 runtime evaluator preflight 通过（记录执行/缓存复用数量）
 - [ ] Key 最小探针通过
 - [ ] 最终命令、cwd、out_dir 和环境变量复核完成
 - [ ] runner 会记录 `run_git_commit`

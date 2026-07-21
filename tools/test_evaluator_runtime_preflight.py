@@ -5,6 +5,8 @@ import io
 import json
 import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -13,6 +15,20 @@ import evaluator_runtime_preflight as preflight
 
 
 class EvaluatorRuntimePreflightTests(unittest.TestCase):
+    @staticmethod
+    def _worker_result(sample_id: str) -> dict[str, object]:
+        return {
+            "schema": preflight.WORKER_SCHEMA,
+            "sample_id": sample_id,
+            "sample_type": "test",
+            "status": "runtime_runnable",
+            "score": 1.0,
+            "self_score_one": True,
+            "sample_tree_unchanged": True,
+            "new_tmp_eval_artifacts": [],
+            "api_guard_active": True,
+        }
+
     def test_nonunit_self_score_is_runtime_runnable(self) -> None:
         result = preflight.classify_evaluation({"score": 0.95})
         self.assertEqual(result["status"], "runtime_runnable")
@@ -104,6 +120,142 @@ class EvaluatorRuntimePreflightTests(unittest.TestCase):
                 },
             )
             self.assertEqual(list(output.parent.glob(".*.tmp")), [])
+
+    def test_parallel_execution_is_bounded_and_keeps_all_results(self) -> None:
+        active = 0
+        maximum = 0
+        lock = threading.Lock()
+
+        def fake_run(_version, sample_id, _timeout, *, concurrent=False):
+            nonlocal active, maximum
+            self.assertTrue(concurrent)
+            with lock:
+                active += 1
+                maximum = max(maximum, active)
+            time.sleep(0.03)
+            with lock:
+                active -= 1
+            return self._worker_result(sample_id)
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(preflight, "run_sample", side_effect=fake_run),
+        ):
+            selected = [f"sample{index}" for index in range(6)]
+            results = preflight.run_selected_samples(
+                Path(directory),
+                selected,
+                timeout=10.0,
+                jobs=3,
+                quiet=True,
+            )
+
+        self.assertEqual(set(results), set(selected))
+        self.assertGreater(maximum, 1)
+        self.assertLessEqual(maximum, 3)
+
+    def test_reuse_output_skips_matching_successes_and_reruns_changed_sample(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            version = Path(directory) / "HP_V8"
+            sample_root = version / "data" / "samples_delegate52"
+            for sample_id in ("sample1", "sample2"):
+                folder = sample_root / sample_id
+                folder.mkdir(parents=True)
+                (folder / "sample.json").write_text(
+                    '{"sample_type":"test"}\n', encoding="utf-8"
+                )
+            output = Path(directory) / "cache" / "preflight.json"
+
+            def fake_run(_version, sample_id, _timeout, *, concurrent=False):
+                return self._worker_result(sample_id)
+
+            with (
+                mock.patch.object(
+                    preflight, "active_version_root", return_value=version
+                ),
+                mock.patch.object(preflight, "run_sample", side_effect=fake_run),
+            ):
+                self.assertEqual(
+                    preflight.main(
+                        [
+                            "--samples",
+                            "sample1",
+                            "sample2",
+                            "--output",
+                            str(output),
+                            "--jobs",
+                            "2",
+                            "--quiet",
+                        ]
+                    ),
+                    0,
+                )
+
+            with (
+                mock.patch.object(
+                    preflight, "active_version_root", return_value=version
+                ),
+                mock.patch.object(
+                    preflight,
+                    "run_sample",
+                    side_effect=AssertionError("matching cache must skip workers"),
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    preflight.main(
+                        [
+                            "--samples",
+                            "sample1",
+                            "sample2",
+                            "--output",
+                            str(output),
+                            "--reuse-output",
+                            "--quiet",
+                        ]
+                    ),
+                    0,
+                )
+            cached = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(cached["summary"]["reused"], 2)
+            self.assertEqual(cached["summary"]["executed"], 0)
+
+            (sample_root / "sample2" / "sample.json").write_text(
+                '{"sample_type":"test","changed":true}\n', encoding="utf-8"
+            )
+            calls: list[str] = []
+
+            def rerun_changed(_version, sample_id, _timeout, *, concurrent=False):
+                calls.append(sample_id)
+                return self._worker_result(sample_id)
+
+            with (
+                mock.patch.object(
+                    preflight, "active_version_root", return_value=version
+                ),
+                mock.patch.object(
+                    preflight, "run_sample", side_effect=rerun_changed
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    preflight.main(
+                        [
+                            "--samples",
+                            "sample1",
+                            "sample2",
+                            "--output",
+                            str(output),
+                            "--reuse-output",
+                            "--quiet",
+                        ]
+                    ),
+                    0,
+                )
+            refreshed = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(calls, ["sample2"])
+            self.assertEqual(refreshed["summary"]["reused"], 1)
+            self.assertEqual(refreshed["summary"]["executed"], 1)
 
     def test_worker_timeout_is_reported(self) -> None:
         version = preflight.active_version_root()
