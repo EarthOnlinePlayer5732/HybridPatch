@@ -1197,6 +1197,9 @@ def _record_evaluator_incomplete(out_dir, sample_id, methods,
             "sample_outcomes": "sample_outcomes.jsonl",
         },
     }
+    method_phase = os.environ.get("ANCHORPATCH_METHOD_PHASE")
+    if method_phase:
+        details["method_phase"] = method_phase
     outcome = record_sample_outcome(
         out_dir, sample_id, "evaluator_incomplete", **details)
     sidecar = {
@@ -1247,6 +1250,14 @@ def main():
              "preservation violation",
     )
     args = ap.parse_args()
+    method_phase = os.environ.get("ANCHORPATCH_METHOD_PHASE")
+    if method_phase and args.methods != [method_phase]:
+        raise RuntimeError(
+            "phased worker must run exactly its declared method phase"
+        )
+    outcome_phase = (
+        {"method_phase": method_phase} if method_phase else {}
+    )
     if args.max_tokens == 0:
         args.max_tokens = None  # MiniMax model layer substitutes 131072.
     elif args.max_tokens is None and not str(args.model).lower().startswith("minimax-m3"):
@@ -1296,6 +1307,7 @@ def main():
                 methods=list(args.methods),
                 checkpoint_progress=_sample_checkpoint_progress(
                     args.out_dir, args.sample[0], args.methods),
+                **outcome_phase,
             )
     except Exception as exc:
         failure_class = getattr(exc, "_anchorpatch_failure_class", None)
@@ -1346,6 +1358,7 @@ def main():
                     "attempt_ledger": "api_attempt_ledger.jsonl",
                     "run_metadata": "run_metadata.jsonl",
                 },
+                **outcome_phase,
             )
         raise
     finally:

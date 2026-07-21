@@ -570,3 +570,34 @@ python -B src/verify_anchorpatch.py --dir exp_<YYYYMMDD>_<slug>
 
 后续 API campaign 必须使用新的实验编号，重新完成计划、审阅、零 API preflight、
 runtime evaluator smoke、Key 小探针与最终命令复核；顶层凭据不得复制到本目录。
+
+## 2026-07-21 remaining134 阶段式调度（方法语义冻结）
+
+新增 `remaining134` campaign role，只改变实验编排，不改变 HP_V8 方法、prompt、
+`hybridpatch/8`、executor、validation gate、preservation、FullRewrite、transport-v4、evaluator
+或 scoring。范围是当前 234 样本减去 committed mixed confirmation100 的全部 100 个 planned
+sample，固定剩余 134；排除 selection SHA-256 为
+`26da1c3d27a1eb83d70af444197afde7a7f20ade20c6e232f2d6abe605d3d654`，remaining ID list
+SHA-256 为 `835297a349489dd6c69224ad17ae5a4b767cc3da7bc0baef4b6c2f55c2b99ad4`。
+
+调度使用 14 个物理唯一 Key、每 Key 最多 4 个 worker、稳定 FIFO 即时补位。全局阶段顺序为
+HybridPatch 后 FullRewrite：HP 全部达到 finished/evaluator-incomplete 且没有
+infrastructure-incomplete 后，dispatcher 写入带 commit、完整 scope、API 数和 preservation=0
+的唯一持久屏障；每个 FR refill 都在 `Popen` 前重验屏障。HP 基础设施未完成只阻止方法切换，
+不终止同阶段其他 worker；HP evaluator-incomplete 保持 null，并从后续 FR eligible scope 排除。
+每个 phase 的 run metadata 记录实际单方法 invocation，同时 campaign config 仍冻结完整方法集；
+legacy 非阶段运行不新增 `method_phase` 字段。
+
+断电/进程中断恢复新增 `anchorpatch.interrupted_phase_resume/1` 审计证据：只在旧 worker lease
+已释放、launch/PID/invocation、task-plan SHA、checkpoint 和结果原子前缀一致时重新启动；runner
+从第一个未提交 RT 继续，已提交 forward/backward 不再 POST。无法闭合的开放 transport lineage
+仍 fail closed。该证据同时写入 dispatch authorization 与新 run metadata，strict inspector 核对
+二者一致。
+
+零 API 新增测试覆盖：100/134 集合差与 14-Key 队列、HP→FR 事件顺序、FR 启动前屏障、
+HP infrastructure-incomplete 不启动 FR、phase resume 跳过已提交样本、跨 phase terminal outcome
+与 run-metadata campaign identity，并覆盖后处理 strict inspector 的两阶段自动聚合。
+`test_model_openai.py` 当前 124/124 PASS；完整开跑门与计划见
+[`docs/experiment_plans/exp_20260721_hybridv8_transportv4_remaining134_hp_then_fr.md`](../docs/experiment_plans/exp_20260721_hybridv8_transportv4_remaining134_hp_then_fr.md)。
+全局方法顺序没有平衡，必须作为时间/provider-state 混杂披露，不能替代方法顺序平衡的
+canonical comparison。

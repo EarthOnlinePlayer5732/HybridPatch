@@ -2859,6 +2859,50 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
     running.
     """
     del printing  # V3 turns the old fingerprint warning into a hard refusal.
+    method_phase = os.environ.get("ANCHORPATCH_METHOD_PHASE")
+    declared_method_set = os.environ.get("ANCHORPATCH_CAMPAIGN_METHOD_SET")
+    campaign_methods = sorted(set(methods))
+    if declared_method_set:
+        declared = sorted(set(
+            item.strip() for item in declared_method_set.split(",")
+            if item.strip()
+        ))
+        if (method_phase not in declared
+                or list(methods) != [method_phase]
+                or declared != ["fullrewrite", "hybridpatch"]):
+            raise RuntimeError(
+                "phased campaign method declaration is inconsistent"
+            )
+        campaign_methods = declared
+    elif method_phase:
+        raise RuntimeError(
+            "ANCHORPATCH_METHOD_PHASE requires a campaign method set"
+        )
+    interrupted_resume_raw = os.environ.get(
+        "ANCHORPATCH_INTERRUPTED_RESUME_EVIDENCE")
+    interrupted_resume_evidence = None
+    if interrupted_resume_raw:
+        try:
+            interrupted_resume_evidence = json.loads(interrupted_resume_raw)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "interrupted phase resume evidence is invalid JSON") from exc
+        if (not isinstance(interrupted_resume_evidence, dict)
+                or interrupted_resume_evidence.get("schema")
+                != "anchorpatch.interrupted_phase_resume/1"
+                or interrupted_resume_evidence.get("sample")
+                not in set(samples)
+                or interrupted_resume_evidence.get("method_phase")
+                != method_phase
+                or list(methods) != [method_phase]
+                or not isinstance(interrupted_resume_evidence.get(
+                    "prior_invocation_id"), str)
+                or not isinstance(interrupted_resume_evidence.get(
+                    "task_plan_sha256"), str)
+                or not isinstance(interrupted_resume_evidence.get(
+                    "checkpoint_progress"), dict)):
+            raise RuntimeError(
+                "interrupted phase resume evidence is inconsistent")
     os.makedirs(out_dir, exist_ok=True)
     fp = code_fingerprint()
     run_git_commit, git_tree_state = _git_identity()
@@ -3036,7 +3080,7 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                 )
 
         campaign_config = {
-            "method_set": sorted(set(methods)),
+            "method_set": campaign_methods,
             "num_round_trips": num_round_trips,
             "seed": seed,
             "model": model,
@@ -3121,6 +3165,11 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                 if recovery_authorization else None
             ),
         }
+        if method_phase:
+            rec["method_phase"] = method_phase
+        if interrupted_resume_evidence is not None:
+            rec["interrupted_resume_authorization"] = (
+                interrupted_resume_evidence)
         rec.update(provider_runtime)
         rec["context_shuffle_seeded"] = bool(context_shuffle_seeded)
         rec["context_shuffle_seed_version"] = (

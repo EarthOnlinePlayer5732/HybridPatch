@@ -2,10 +2,11 @@
 
 The dispatcher never prints key values.  It pre-generates and hashes every
 task plan, records a deterministic sample/key-label/method-order manifest,
-launches one process per sample through work-conserving per-key queues, isolates
-only fully evidenced provider/transport exhaustion or domain-evaluator failure
-to that sample, and stops all workers on preservation or shared
-campaign-integrity failures.
+launches one process per sample through work-conserving per-key queues, can
+enforce a durable all-HP-before-any-FR phase barrier, isolates only fully
+evidenced provider/transport exhaustion or domain-evaluator failure to that
+sample, and stops all workers on preservation or shared campaign-integrity
+failures.
 """
 
 import argparse
@@ -90,7 +91,23 @@ CONFIRMATION_GRID_STEPS = 2720
 FULL234_SAMPLE_COUNT = 234
 FULL234_KEY_COUNT = 13
 FULL234_SLOTS_PER_KEY = 4
+REMAINING134_SAMPLE_COUNT = 134
+REMAINING134_EXCLUDED_SAMPLE_COUNT = 100
+REMAINING134_KEY_COUNT = 14
+REMAINING134_SLOTS_PER_KEY = 4
+REMAINING134_METHOD_PHASES = ("hybridpatch", "fullrewrite")
+REMAINING134_SELECTION_PATH = os.path.join(
+    _ROOT, "analysis", "20260719_hybridv8_transportv4_mixed_confirmation100",
+    "selection.json",
+)
+REMAINING134_SELECTION_SHA256 = (
+    "26da1c3d27a1eb83d70af444197afde7a7f20ade20c6e232f2d6abe605d3d654"
+)
 WORK_CONSERVING_DISPATCH_POLICY = "per_key_work_conserving_v1"
+PHASED_WORK_CONSERVING_DISPATCH_POLICY = (
+    "per_key_work_conserving_hp_then_fr_v1"
+)
+METHOD_PHASE_COMPLETE_SCHEMA = "anchorpatch.method_phase_complete/1"
 CONFIRMATION_KNOWN_USAGE_LIMIT_USD = 130.0
 CONFIRMATION_EXPERIMENT_ID = (
     "exp_20260719_hybridv8_transportv4_method_unseen_confirmation68"
@@ -534,6 +551,22 @@ def _assignment_key_queues(assignments):
     ]
 
 
+def _assignments_for_method_phase(assignments, method_phase):
+    if method_phase not in REMAINING134_METHOD_PHASES:
+        raise RuntimeError(f"unsupported method phase: {method_phase!r}")
+    phased = []
+    for item in assignments:
+        clone = dict(item)
+        clone["methods"] = [method_phase]
+        clone["method_phase"] = method_phase
+        clone["console_log"] = (
+            f"dispatch_logs/{item['sample']}__{item['key_label']}__"
+            f"{method_phase}.console.log"
+        )
+        phased.append(clone)
+    return phased
+
+
 def _validate_campaign_grid(args):
     if args.seed != 42:
         raise RuntimeError("formal paired campaigns require seed=42")
@@ -601,6 +634,21 @@ def _validate_campaign_grid(args):
         if (getattr(args, "slots_per_key", None)
                 != FULL234_SLOTS_PER_KEY):
             raise RuntimeError("full234 requires --slots_per_key 4")
+    elif args.campaign_role == "remaining134":
+        scope = _argument_value(args, "_remaining134_scope_record", {}) or {}
+        if (scope.get("schema") != "anchorpatch.remaining134_scope/1"
+                or list(args.samples) != list(scope.get("sample_ids") or [])
+                or len(args.samples) != REMAINING134_SAMPLE_COUNT
+                or args.num_round_trips != 10):
+            raise RuntimeError(
+                "remaining134 requires the exact unselected 134-sample "
+                "inventory at 10 RT"
+            )
+        if getattr(args, "smoke_dir", None):
+            raise RuntimeError("remaining134 cannot declare --smoke_dir")
+        if (getattr(args, "slots_per_key", None)
+                != REMAINING134_SLOTS_PER_KEY):
+            raise RuntimeError("remaining134 requires --slots_per_key 4")
     else:
         raise RuntimeError(f"unsupported campaign role: {args.campaign_role}")
 
@@ -660,6 +708,73 @@ def _resolve_full234_scope(args):
     if manual not in (None, []) and list(manual) != samples:
         raise RuntimeError(
             "full234 samples are the exact sorted samples_delegate52 inventory"
+        )
+    args.samples = samples
+    return dict(cached)
+
+
+def _load_remaining134_scope():
+    """Freeze all samples outside the prior planned confirmation100 scope."""
+    all_samples, _full_scope = _load_full234_scope()
+    selection_path = Path(REMAINING134_SELECTION_PATH)
+    if (not selection_path.is_file()
+            or _sha256(selection_path) != REMAINING134_SELECTION_SHA256):
+        raise RuntimeError(
+            "remaining134 exclusion selection is missing or changed"
+        )
+    selection = _read_json(selection_path)
+    excluded = selection.get("selected_sample_ids") or []
+    if (selection.get("schema") != MIXED_CONFIRMATION_SELECTION_SCHEMA
+            or selection.get("experiment_id")
+            != MIXED_CONFIRMATION_EXPERIMENT_ID
+            or len(excluded) != REMAINING134_EXCLUDED_SAMPLE_COUNT
+            or len(set(excluded)) != REMAINING134_EXCLUDED_SAMPLE_COUNT
+            or not set(excluded).issubset(all_samples)):
+        raise RuntimeError(
+            "remaining134 exclusion selection is not the frozen planned100"
+        )
+    samples = sorted(set(all_samples) - set(excluded))
+    if len(samples) != REMAINING134_SAMPLE_COUNT:
+        raise RuntimeError(
+            "remaining134 complement does not contain exactly 134 samples"
+        )
+    sample_hashes = {
+        sample: _sha256(Path(SAMPLES_ROOT, sample, "sample.json"))
+        for sample in samples
+    }
+    excluded_digest = hashlib.sha256(
+        _canonical_json_bytes(sorted(excluded))).hexdigest()
+    return samples, {
+        "schema": "anchorpatch.remaining134_scope/1",
+        "sample_count": len(samples),
+        "sample_ids": samples,
+        "sample_json_sha256": hashlib.sha256(
+            _canonical_json_bytes(sample_hashes)).hexdigest(),
+        "excluded_sample_count": len(excluded),
+        "excluded_sample_ids_sha256": excluded_digest,
+        "exclusion_source": {
+            "experiment_id": MIXED_CONFIRMATION_EXPERIMENT_ID,
+            "path": os.path.relpath(selection_path, _ROOT).replace("\\", "/"),
+            "sha256": REMAINING134_SELECTION_SHA256,
+        },
+        "method_phases": list(REMAINING134_METHOD_PHASES),
+    }
+
+
+def _resolve_remaining134_scope(args):
+    if _argument_value(args, "campaign_role") != "remaining134":
+        return None
+    cached = _argument_value(args, "_remaining134_scope_record")
+    if cached is None:
+        samples, cached = _load_remaining134_scope()
+        args._remaining134_scope_record = cached
+    else:
+        samples = list(cached.get("sample_ids") or [])
+    manual = _argument_value(args, "samples")
+    if manual not in (None, []) and list(manual) != samples:
+        raise RuntimeError(
+            "remaining134 samples are the exact complement of the frozen "
+            "confirmation100 selection"
         )
     args.samples = samples
     return dict(cached)
@@ -1461,19 +1576,26 @@ def _read_jsonl(path):
     return records
 
 
-def _latest_sample_outcomes(out_dir, expected_samples=None):
+def _latest_sample_outcomes(
+        out_dir, expected_samples=None, *, method_phase=None):
     latest = {}
+    latest_by_phase = {}
     expected = set(expected_samples or [])
     for index, record in enumerate(read_sample_outcomes(out_dir), 1):
         sample = record.get("sample")
         status = record.get("status")
+        record_phase = record.get("method_phase")
         if (not isinstance(sample, str) or not sample
                 or status not in {
                     "finished", "infrastructure_incomplete",
                     "evaluator_incomplete",
-                }):
+                }
+                or (record_phase is not None
+                    and (record_phase not in REMAINING134_METHOD_PHASES
+                         or record.get("methods") != [record_phase]))):
             raise RuntimeError(f"invalid sample outcome row {index}")
-        if expected and sample not in expected:
+        if (expected and sample not in expected
+                and (method_phase is None or record_phase == method_phase)):
             raise RuntimeError(
                 f"sample outcome row {index} is outside campaign: {sample}")
         try:
@@ -1484,11 +1606,15 @@ def _latest_sample_outcomes(out_dir, expected_samples=None):
         if created_at.tzinfo is None:
             raise RuntimeError(
                 f"sample outcome row {index} timestamp lacks timezone")
-        prior = latest.get(sample)
+        key = (sample, record_phase)
+        prior = latest_by_phase.get(key)
         if prior and prior.get("status") == "finished":
             raise RuntimeError(
-                f"sample outcome appears after finished state: {sample}")
-        latest[sample] = record
+                "sample outcome appears after finished state: "
+                f"{sample}/{record_phase or 'legacy'}")
+        latest_by_phase[key] = record
+        if method_phase is None or record_phase == method_phase:
+            latest[sample] = record
     return latest
 
 
@@ -1554,7 +1680,25 @@ def _record_mentions_sample(record, sample):
     return False
 
 
-def _queued_pending_evidence(out_dir, sample, methods):
+def _record_mentions_method(record, method):
+    if not isinstance(record, dict):
+        return False
+    if record.get("method") == method or record.get("method_phase") == method:
+        return True
+    methods = record.get("methods")
+    if isinstance(methods, list) and method in methods:
+        return True
+    for field in (
+            "semantic_call_id", "semantic_root_id",
+            "parent_semantic_call_id"):
+        value = record.get(field)
+        if isinstance(value, str) and value.split("/", 1)[0] == method:
+            return True
+    return False
+
+
+def _queued_pending_evidence(
+        out_dir, sample, methods, *, method_phase=None):
     """List durable evidence that a nominally pending worker ever started.
 
     Task plans and the dispatch manifest are intentionally absent: they are
@@ -1590,7 +1734,9 @@ def _queued_pending_evidence(out_dir, sample, methods):
     for filename in record_files:
         path = os.path.join(out_dir, filename)
         for row_number, record in enumerate(_read_jsonl(path), 1):
-            if _record_mentions_sample(record, sample):
+            if (_record_mentions_sample(record, sample)
+                    and (method_phase is None
+                         or _record_mentions_method(record, method_phase))):
                 evidence.append(f"{filename}:{row_number}")
 
     attempt_path = os.path.join(out_dir, "api_attempt_ledger.jsonl")
@@ -1601,7 +1747,9 @@ def _queued_pending_evidence(out_dir, sample, methods):
                 "queued pending audit cannot map attempt ledger row "
                 f"{row_number}"
             )
-        if identity["sample"] == sample:
+        if (identity["sample"] == sample
+                and (method_phase is None
+                     or identity["method"] == method_phase)):
             evidence.append(f"api_attempt_ledger.jsonl:{row_number}")
 
     dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
@@ -1634,7 +1782,12 @@ def _queued_pending_evidence(out_dir, sample, methods):
                     "completed_samples",
                 )
             )
-        if mentions:
+        phase_matches = (
+            method_phase is None
+            or record.get("method_phase") == method_phase
+            or _record_mentions_method(record, method_phase)
+        )
+        if mentions and phase_matches:
             evidence.append(f"dispatch_log.jsonl:{row_number}")
 
     journal_dir = Path(out_dir, "api_journal")
@@ -1660,13 +1813,18 @@ def _queued_pending_evidence(out_dir, sample, methods):
                     "queued pending audit cannot map response journal: "
                     f"{path.name}"
                 )
-            if identity["sample"] == sample:
+            if (identity["sample"] == sample
+                    and (method_phase is None
+                         or identity["method"] == method_phase)):
                 evidence.append(os.path.relpath(path, out_dir))
 
     barrier_dir = Path(out_dir, "worker_barriers")
     if barrier_dir.is_dir():
         for path in sorted(barrier_dir.glob("*.json")):
-            if _record_mentions_sample(_read_json(path), sample):
+            payload = _read_json(path)
+            if (_record_mentions_sample(payload, sample)
+                    and (method_phase is None
+                         or _record_mentions_method(payload, method_phase))):
                 evidence.append(os.path.relpath(path, out_dir))
 
     active_path = os.path.join(out_dir, "active_worker_set.json")
@@ -1687,6 +1845,8 @@ def _queued_pending_evidence(out_dir, sample, methods):
             os.path.relpath(path, out_dir)
             for path in sorted(dispatch_dir.glob(
                 f"{safe_sample}__*.console.log"))
+            if (method_phase is None
+                or f"__{method_phase}.console.log" in path.name)
         )
     if _worker_lease_is_held(out_dir, sample):
         evidence.append(os.path.relpath(
@@ -1694,17 +1854,232 @@ def _queued_pending_evidence(out_dir, sample, methods):
     return sorted(set(evidence))
 
 
-def _verify_queued_pending_samples(out_dir, assignments):
+def _verify_queued_pending_samples(
+        out_dir, assignments, *, method_phase=None):
     """Allow only samples proven never launched in a queued campaign."""
     for item in assignments:
         sample = item["sample"]
         evidence = _queued_pending_evidence(
-            out_dir, sample, item.get("methods") or [])
+            out_dir, sample, item.get("methods") or [],
+            method_phase=method_phase)
         if evidence:
             raise RuntimeError(
                 "queued resume cannot prove pending sample was never "
                 f"started: {sample}; evidence={evidence}"
             )
+
+
+def _verify_pristine_method_phase(out_dir, assignments, method_phase):
+    """Prove a queued phase has no execution evidence in one bounded scan."""
+    if method_phase not in REMAINING134_METHOD_PHASES:
+        raise RuntimeError("invalid pristine method phase")
+    samples = {item["sample"] for item in assignments}
+    evidence = {sample: [] for sample in samples}
+    for sample in samples:
+        safe_sample = "".join(
+            char if char.isalnum() or char in "._-" else "_"
+            for char in sample
+        )
+        for suffix in (".jsonl", ".ckpt.json"):
+            path = os.path.join(out_dir, method_phase, f"{sample}{suffix}")
+            if os.path.exists(path):
+                evidence[sample].append(os.path.relpath(path, out_dir))
+        paths = (
+            Path(out_dir, "docs", method_phase, safe_sample),
+            Path(out_dir, "api_raw", method_phase, safe_sample),
+            Path(out_dir, "logs", f"{method_phase}__{safe_sample}.log"),
+        )
+        for path in paths:
+            if path.exists():
+                evidence[sample].append(os.path.relpath(path, out_dir))
+        dispatch_dir = Path(out_dir, "dispatch_logs")
+        if dispatch_dir.is_dir():
+            for path in dispatch_dir.glob(
+                    f"{safe_sample}__*__{method_phase}.console.log"):
+                evidence[sample].append(os.path.relpath(path, out_dir))
+
+    for filename in (
+            "sample_outcomes.jsonl", "run_metadata.jsonl", "api_calls.jsonl",
+            "api_anomalies.jsonl", "evaluator_incomplete_samples.jsonl"):
+        for row_number, record in enumerate(
+                _read_jsonl(os.path.join(out_dir, filename)), 1):
+            if not _record_mentions_method(record, method_phase):
+                continue
+            for sample in samples:
+                if _record_mentions_sample(record, sample):
+                    evidence[sample].append(f"{filename}:{row_number}")
+
+    for row_number, record in enumerate(_read_jsonl(os.path.join(
+            out_dir, "api_attempt_ledger.jsonl")), 1):
+        identity = _parse_semantic_call_id(record.get("semantic_call_id"))
+        if identity is None:
+            raise RuntimeError(
+                f"phase pending audit cannot map attempt row {row_number}")
+        if (identity["method"] == method_phase
+                and identity["sample"] in samples):
+            evidence[identity["sample"]].append(
+                f"api_attempt_ledger.jsonl:{row_number}")
+
+    journal_dir = Path(out_dir, "api_journal")
+    if journal_dir.is_dir():
+        for path in sorted(journal_dir.glob("*.json")):
+            payload = _read_json(path)
+            semantic_call_id = (
+                payload.get("semantic_call_id")
+                if isinstance(payload, dict) else None
+            )
+            identity = _parse_semantic_call_id(semantic_call_id)
+            expected_name = (
+                hashlib.sha256(semantic_call_id.encode("utf-8"))
+                .hexdigest()[:24] + ".response.json"
+                if identity is not None else None
+            )
+            if (not isinstance(payload, dict)
+                    or payload.get("schema") != API_RESPONSE_JOURNAL_SCHEMA
+                    or identity is None
+                    or path.name != expected_name):
+                raise RuntimeError(
+                    "phase pending audit cannot map response journal: "
+                    f"{path.name}")
+            if (identity["method"] == method_phase
+                    and identity["sample"] in samples):
+                evidence[identity["sample"]].append(
+                    os.path.relpath(path, out_dir))
+
+    for row_number, record in enumerate(_read_jsonl(os.path.join(
+            out_dir, "dispatch_log.jsonl")), 1):
+        if (record.get("method_phase") != method_phase
+                and not _record_mentions_method(record, method_phase)):
+            continue
+        mentioned = set()
+        sample = record.get("sample")
+        if sample in samples:
+            mentioned.add(sample)
+        for field in (
+                "samples", "completed_samples",
+                "infrastructure_incomplete_samples",
+                "evaluator_incomplete_samples"):
+            mentioned.update(samples & set(record.get(field) or []))
+        for sample in mentioned:
+            evidence[sample].append(f"dispatch_log.jsonl:{row_number}")
+
+    failures = {
+        sample: sorted(set(items))
+        for sample, items in evidence.items() if items
+    }
+    if failures:
+        sample = sorted(failures)[0]
+        raise RuntimeError(
+            "queued resume cannot prove method phase was never started: "
+            f"{method_phase}/{sample}; evidence={failures[sample]}"
+        )
+
+
+def _verified_interrupted_phase_resume(
+        out_dir, item, target_round_trips, task_plan):
+    """Authorize a stopped worker with an atomic committed RT prefix."""
+    sample = item.get("sample")
+    method_phase = item.get("method_phase")
+    methods = item.get("methods")
+    if (not isinstance(sample, str) or not sample
+            or method_phase not in REMAINING134_METHOD_PHASES
+            or methods != [method_phase]
+            or not isinstance(task_plan, dict)
+            or not isinstance(task_plan.get("sha256"), str)):
+        return None
+    candidates = [
+        record for record in read_run_metadata_snapshot(out_dir)
+        if record.get("samples") == [sample]
+        and record.get("methods") == [method_phase]
+        and record.get("method_phase") == method_phase
+        and record.get("status") in {
+            "running", "interrupted_before_audited_resume"}
+    ]
+    if not candidates:
+        return None
+    record = candidates[-1]
+    invocation_id = record.get("invocation_id")
+    worker_id = record.get("worker_launch_id")
+    worker_pid = record.get("worker_pid")
+    if (not isinstance(invocation_id, str) or not invocation_id
+            or not isinstance(worker_id, str) or not worker_id
+            or not _is_exact_int(worker_pid) or worker_pid <= 0):
+        raise RuntimeError(
+            f"interrupted phase metadata identity is invalid: {sample}")
+    expected_registration = {
+        "sha256": task_plan["sha256"],
+        "round_trips": target_round_trips,
+    }
+    if (record.get("task_plans") or {}).get(sample) != expected_registration:
+        raise RuntimeError(
+            f"interrupted phase task plan is invalid: {sample}")
+    if _worker_lease_is_held(out_dir, sample):
+        raise RuntimeError(
+            f"interrupted phase worker lease is still held: {sample}")
+
+    dispatch_rows = _read_jsonl(os.path.join(out_dir, "dispatch_log.jsonl"))
+    intents = [
+        row for row in dispatch_rows
+        if row.get("event") == "launch_intent"
+        and row.get("worker_launch_id") == worker_id
+    ]
+    launches = [
+        row for row in dispatch_rows
+        if row.get("event") == "launch"
+        and row.get("worker_launch_id") == worker_id
+    ]
+    expected_identity = {
+        "sample": sample,
+        "methods": [method_phase],
+        "method_phase": method_phase,
+    }
+    if (len(intents) != 1 or len(launches) != 1
+            or any(intents[0].get(key) != value
+                   for key, value in expected_identity.items())
+            or launches[0].get("sample") != sample
+            or launches[0].get("pid") != worker_pid
+            or launches[0].get("method_phase") != method_phase):
+        raise RuntimeError(
+            f"interrupted phase launch provenance is invalid: {sample}")
+    if record.get("status") == "running":
+        audited = _audit_running_invocation_provenance(out_dir)
+        if not any(
+                row.get("invocation_id") == invocation_id
+                and row.get("worker_launch_id") == worker_id
+                and row.get("method_phase") == method_phase
+                for row in audited):
+            raise RuntimeError(
+                f"running phase interruption was not audited: {sample}")
+    else:
+        reconciled = [
+            row for row in dispatch_rows
+            if row.get("event") == "stale_worker_reconciled"
+            and row.get("invocation_id") == invocation_id
+            and row.get("worker_launch_id") == worker_id
+            and row.get("sample") == sample
+            and row.get("pid") == worker_pid
+        ]
+        if len(reconciled) != 1:
+            raise RuntimeError(
+                f"interrupted phase reconciliation is invalid: {sample}")
+    progress = _actual_sample_progress(out_dir, sample, [method_phase])
+    phase_progress = progress[method_phase]
+    completed = phase_progress["completed_round_trips"]
+    if (completed > target_round_trips
+            or phase_progress["committed_rows"] != 2 * completed):
+        raise RuntimeError(
+            f"interrupted phase checkpoint exceeds target: {sample}")
+    return {
+        "schema": "anchorpatch.interrupted_phase_resume/1",
+        "sample": sample,
+        "method_phase": method_phase,
+        "prior_invocation_id": invocation_id,
+        "prior_worker_launch_id": worker_id,
+        "prior_worker_pid": worker_pid,
+        "prior_status": record["status"],
+        "checkpoint_progress": progress,
+        "task_plan_sha256": task_plan["sha256"],
+    }
 
 
 def _verified_infrastructure_incomplete(out_dir, sample, item):
@@ -1716,7 +2091,9 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
     if read_campaign_stop_conditions(out_dir):
         raise RuntimeError(
             "campaign-wide stop latch forbids sample-local isolation")
-    latest = _latest_sample_outcomes(out_dir)
+    method_phase = item.get("method_phase")
+    latest = _latest_sample_outcomes(
+        out_dir, method_phase=method_phase)
     outcome = latest.get(sample)
     if (not isinstance(outcome, dict)
             or outcome.get("status") != "infrastructure_incomplete"):
@@ -1730,7 +2107,8 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
     if (outcome.get("worker_launch_id") != worker_id
             or outcome.get("worker_pid") != worker_pid
             or outcome.get("methods") != item.get("methods")
-            or outcome.get("classification") != "provider/API failure"):
+            or outcome.get("classification") != "provider/API failure"
+            or outcome.get("method_phase") != method_phase):
         raise RuntimeError(
             f"worker {sample} infrastructure outcome provenance mismatch")
     if _worker_lease_is_held(out_dir, sample):
@@ -1977,7 +2355,9 @@ def _verified_evaluator_incomplete(out_dir, sample, item):
     if read_campaign_stop_conditions(out_dir):
         raise RuntimeError(
             "campaign-wide stop latch forbids sample-local isolation")
-    latest = _latest_sample_outcomes(out_dir)
+    method_phase = item.get("method_phase")
+    latest = _latest_sample_outcomes(
+        out_dir, method_phase=method_phase)
     outcome = latest.get(sample)
     if (not isinstance(outcome, dict)
             or outcome.get("status") != "evaluator_incomplete"):
@@ -1994,7 +2374,8 @@ def _verified_evaluator_incomplete(out_dir, sample, item):
             or outcome.get("methods") != methods
             or outcome.get("failure_stage") != "evaluator"
             or outcome.get("result_committed_for_failed_step") is not False
-            or outcome.get("score_imputed") is not False):
+            or outcome.get("score_imputed") is not False
+            or outcome.get("method_phase") != method_phase):
         raise RuntimeError(
             f"worker {sample} evaluator outcome provenance mismatch")
     if _worker_lease_is_held(out_dir, sample):
@@ -2109,9 +2490,10 @@ def _verified_evaluator_incomplete(out_dir, sample, item):
     }
 
 
-def _select_invocation_assignments(out_dir, assignments, *, resume,
-                                   target_round_trips,
-                                   allow_pristine_pending=False):
+def _select_invocation_assignments(
+        out_dir, assignments, *, resume, target_round_trips,
+        allow_pristine_pending=False, method_phase=None,
+        allow_audited_interrupted=False, task_plans=None):
     """Select all samples for a new campaign, only incomplete ones on resume."""
     if not resume:
         if read_sample_outcomes(out_dir):
@@ -2119,23 +2501,46 @@ def _select_invocation_assignments(out_dir, assignments, *, resume,
                 "new campaign directory already contains sample outcomes")
         return list(assignments), {}
     latest = _latest_sample_outcomes(
-        out_dir, [item["sample"] for item in assignments])
+        out_dir, [item["sample"] for item in assignments],
+        method_phase=method_phase)
     missing_assignments = [
         item for item in assignments if item["sample"] not in latest
     ]
     missing = [item["sample"] for item in missing_assignments]
+    interrupted_evidence = {}
+    if missing and allow_audited_interrupted:
+        for item in missing_assignments:
+            sample = item["sample"]
+            evidence = _verified_interrupted_phase_resume(
+                out_dir, item, target_round_trips,
+                (task_plans or {}).get(sample))
+            if evidence is not None:
+                interrupted_evidence[sample] = evidence
+        missing_assignments = [
+            item for item in missing_assignments
+            if item["sample"] not in interrupted_evidence
+        ]
+        missing = [item["sample"] for item in missing_assignments]
     if missing:
         if not allow_pristine_pending:
             raise RuntimeError(
                 f"resume is limited to explicitly incomplete samples; "
                 f"missing outcomes: {missing}")
-        _verify_queued_pending_samples(out_dir, missing_assignments)
+        if method_phase is None:
+            _verify_queued_pending_samples(out_dir, missing_assignments)
+        else:
+            _verify_pristine_method_phase(
+                out_dir, missing_assignments, method_phase)
     selected = []
     authorizations = {}
     for item in assignments:
         sample = item["sample"]
         if sample not in latest:
-            selected.append(item)
+            selected_item = dict(item)
+            if sample in interrupted_evidence:
+                selected_item["interrupted_resume_evidence"] = (
+                    interrupted_evidence[sample])
+            selected.append(selected_item)
             continue
         outcome = latest[sample]
         if outcome["status"] == "finished":
@@ -2160,6 +2565,7 @@ def _select_invocation_assignments(out_dir, assignments, *, resume,
                     "worker_pid": outcome.get("worker_pid"),
                     "methods": item["methods"],
                     "target_round_trips": target_round_trips,
+                    "method_phase": method_phase,
                 })
             # An evaluator-broken sample is terminal for this campaign.  Its
             # missing endpoint stays null; resume must not issue another POST.
@@ -2170,6 +2576,7 @@ def _select_invocation_assignments(out_dir, assignments, *, resume,
                 "worker_pid": outcome.get("worker_pid"),
                 "methods": item["methods"],
                 "target_round_trips": target_round_trips,
+                "method_phase": method_phase,
             })
         prior_generation = evidence.get("generation_index")
         if not _is_exact_int(prior_generation) or prior_generation < 0:
@@ -2195,6 +2602,137 @@ def _select_invocation_assignments(out_dir, assignments, *, resume,
             "prior_invocation_id": evidence["invocation_id"],
         }
     return selected, authorizations
+
+
+def _method_phase_outcome_sets(out_dir, samples, method_phase):
+    """Return the mutually exclusive terminal/retry states for one phase."""
+    sample_set = set(samples)
+    latest = _latest_sample_outcomes(
+        out_dir, sample_set, method_phase=method_phase)
+    states = {
+        "finished": set(),
+        "evaluator_incomplete": set(),
+        "infrastructure_incomplete": set(),
+        "missing": sample_set - set(latest),
+    }
+    for sample, outcome in latest.items():
+        states[outcome["status"]].add(sample)
+    covered = set().union(*states.values())
+    if covered != sample_set or sum(len(items) for items in states.values()) != len(
+            sample_set):
+        raise RuntimeError(
+            f"method phase outcome partition is invalid: {method_phase}")
+    return states
+
+
+def _sample_ids_sha256(samples):
+    return hashlib.sha256(
+        _canonical_json_bytes(sorted(samples))).hexdigest()
+
+
+def _phase_api_call_count(out_dir, method_phase):
+    return sum(
+        record.get("method") == method_phase
+        for record in _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    )
+
+
+def _method_phase_complete_events(out_dir, method_phase):
+    return [
+        row for row in _read_jsonl(os.path.join(out_dir, "dispatch_log.jsonl"))
+        if row.get("event") == "method_phase_complete"
+        and row.get("method_phase") == method_phase
+    ]
+
+
+def _record_method_phase_complete(
+        out_dir, manifest, method_phase, eligible_assignments,
+        *, next_phase=None, next_phase_assignments=None):
+    """Verify one phase is terminal and durably publish its phase barrier."""
+    samples = [item["sample"] for item in eligible_assignments]
+    if len(samples) != len(set(samples)):
+        raise RuntimeError("method phase contains duplicate sample assignments")
+    states = _method_phase_outcome_sets(out_dir, samples, method_phase)
+    if states["missing"] or states["infrastructure_incomplete"]:
+        raise RuntimeError(
+            f"method phase is not terminal: {method_phase}; "
+            f"missing={sorted(states['missing'])}; "
+            "infrastructure_incomplete="
+            f"{sorted(states['infrastructure_incomplete'])}"
+        )
+    inspection = inspect_campaign(
+        out_dir, manifest,
+        required_complete_samples=states["finished"],
+        method_phase=method_phase,
+    )
+    if inspection["errors"]:
+        raise RuntimeError(
+            f"method phase completion audit failed: {method_phase}; "
+            + "; ".join(inspection["errors"])
+        )
+    expected = {
+        "schema": METHOD_PHASE_COMPLETE_SCHEMA,
+        "event": "method_phase_complete",
+        "method_phase": method_phase,
+        "next_method_phase": next_phase,
+        "eligible_sample_count": len(samples),
+        "eligible_sample_ids_sha256": _sample_ids_sha256(samples),
+        "finished_samples": sorted(states["finished"]),
+        "evaluator_incomplete_samples": sorted(
+            states["evaluator_incomplete"]),
+        "phase_api_calls": _phase_api_call_count(out_dir, method_phase),
+        "preservation_violations": 0,
+        "run_git_commit": manifest["run_git_commit"],
+    }
+    prior = _method_phase_complete_events(out_dir, method_phase)
+    if len(prior) > 1:
+        raise RuntimeError(
+            f"duplicate method phase completion record: {method_phase}")
+    if prior:
+        observed = {
+            key: prior[0].get(key) for key in expected
+        }
+        if observed != expected:
+            raise RuntimeError(
+                f"method phase completion record drift: {method_phase}")
+        return prior[0]
+    if next_phase is not None:
+        if next_phase not in REMAINING134_METHOD_PHASES:
+            raise RuntimeError(f"invalid next method phase: {next_phase}")
+        _verify_pristine_method_phase(
+            out_dir, next_phase_assignments or [], next_phase)
+    record = {
+        **expected,
+        "created_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+    }
+    append_jsonl_locked(
+        os.path.join(out_dir, "dispatch_log.jsonl"), record)
+    return record
+
+
+def _require_hybridpatch_phase_barrier(out_dir, manifest):
+    """Refuse every FR launch until the exact HP terminal barrier exists."""
+    records = _method_phase_complete_events(out_dir, "hybridpatch")
+    if len(records) != 1:
+        raise RuntimeError(
+            "fullrewrite launch requires exactly one hybridpatch phase barrier"
+        )
+    record = records[0]
+    expected_samples = manifest["config"]["samples"]
+    if (record.get("schema") != METHOD_PHASE_COMPLETE_SCHEMA
+            or record.get("next_method_phase") != "fullrewrite"
+            or record.get("run_git_commit") != manifest["run_git_commit"]
+            or record.get("eligible_sample_count") != len(expected_samples)
+            or record.get("eligible_sample_ids_sha256")
+            != _sample_ids_sha256(expected_samples)
+            or record.get("preservation_violations") != 0):
+        raise RuntimeError("hybridpatch phase barrier identity is invalid")
+    terminal = set(record.get("finished_samples") or []) | set(
+        record.get("evaluator_incomplete_samples") or [])
+    if terminal != set(expected_samples):
+        raise RuntimeError("hybridpatch phase barrier scope is incomplete")
+    return record
 
 
 def _worker_lease_path(out_dir, sample):
@@ -2345,6 +2883,12 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
             if metadata_resume != expected_metadata_resume:
                 raise RuntimeError(
                     f"worker transport-resume handshake mismatch: {sample}")
+            expected_interrupted = item.get(
+                "interrupted_resume_evidence")
+            if matches[0].get(
+                    "interrupted_resume_authorization") != expected_interrupted:
+                raise RuntimeError(
+                    f"worker interrupted-resume handshake mismatch: {sample}")
             ready_by_sample[sample] = ready
         if len(ready_by_sample) == len(running):
             break
@@ -2374,6 +2918,8 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                     timespec="seconds"),
                 "transport_resume_authorization": item.get(
                     "resume_authorization"),
+                "interrupted_resume_evidence": item.get(
+                    "interrupted_resume_evidence"),
                 **ack,
             },
         )
@@ -2437,6 +2983,15 @@ def _audit_running_invocation_provenance(out_dir):
                 "cannot audit stale invocation provenance: "
                 f"{record.get('invocation_id')}"
             )
+        record_phase = record.get("method_phase")
+        if record_phase is not None and (
+                intent.get("method_phase") != record_phase
+                or intent.get("methods") != [record_phase]
+                or record.get("methods") != [record_phase]):
+            raise RuntimeError(
+                "stale phased invocation intent mismatch: "
+                f"{record.get('invocation_id')}"
+            )
         seen_invocations.add(invocation_id)
         if launch is not None and (
                 launch.get("sample") != samples[0]
@@ -2450,6 +3005,7 @@ def _audit_running_invocation_provenance(out_dir):
             "worker_launch_id": worker_launch_id,
             "worker_pid": worker_pid,
             "sample": samples[0],
+            "method_phase": record_phase,
             "launch_recorded": launch is not None,
         })
     return audited
@@ -2514,20 +3070,23 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
         "task_plans": task_plans,
         "upstream_smoke_gate": upstream_smoke_gate,
     }
-    if args.campaign_role in {"confirmation", "full234"}:
-        slots_per_key = (
-            CONFIRMATION_SLOTS_PER_KEY
-            if args.campaign_role == "confirmation"
-            else FULL234_SLOTS_PER_KEY
-        )
-        key_count = (
-            CONFIRMATION_KEY_COUNT
-            if args.campaign_role == "confirmation"
-            else FULL234_KEY_COUNT
-        )
+    if args.campaign_role in {"confirmation", "full234", "remaining134"}:
+        if args.campaign_role == "confirmation":
+            slots_per_key = CONFIRMATION_SLOTS_PER_KEY
+            key_count = CONFIRMATION_KEY_COUNT
+        elif args.campaign_role == "full234":
+            slots_per_key = FULL234_SLOTS_PER_KEY
+            key_count = FULL234_KEY_COUNT
+        else:
+            slots_per_key = REMAINING134_SLOTS_PER_KEY
+            key_count = REMAINING134_KEY_COUNT
         queues = _assignment_key_queues(assignments)
         manifest["config"].update({
-            "dispatch_policy": WORK_CONSERVING_DISPATCH_POLICY,
+            "dispatch_policy": (
+                PHASED_WORK_CONSERVING_DISPATCH_POLICY
+                if args.campaign_role == "remaining134"
+                else WORK_CONSERVING_DISPATCH_POLICY
+            ),
             "slots_per_key": slots_per_key,
             "key_count": key_count,
             "max_worker_count": slots_per_key * key_count,
@@ -2548,6 +3107,15 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
     elif args.campaign_role == "full234":
         manifest["full234_scope"] = dict(
             _argument_value(args, "_full234_scope_record") or {})
+    elif args.campaign_role == "remaining134":
+        manifest["remaining134_scope"] = dict(
+            _argument_value(args, "_remaining134_scope_record") or {})
+        manifest["config"].update({
+            "method_phases": list(REMAINING134_METHOD_PHASES),
+            "phase_barrier": "all_hybridpatch_terminal_before_fullrewrite",
+            "phase_worker_count": len(samples),
+            "total_worker_invocations": len(samples) * 2,
+        })
     return manifest
 
 
@@ -2620,8 +3188,37 @@ def write_or_verify_manifest(out_dir, manifest, *, resume=False):
 
 
 def inspect_campaign(out_dir, manifest, *, require_complete=False,
-                     active_samples=None, required_complete_samples=None):
+                     active_samples=None, required_complete_samples=None,
+                     method_phase=None):
     config = manifest["config"]
+    declared_phases = config.get("method_phases")
+    if method_phase is None and declared_phases is not None:
+        if declared_phases != list(REMAINING134_METHOD_PHASES):
+            raise RuntimeError("campaign method phases are invalid")
+        phase_results = [
+            inspect_campaign(
+                out_dir, manifest, require_complete=require_complete,
+                active_samples=active_samples,
+                required_complete_samples=required_complete_samples,
+                method_phase=phase,
+            )
+            for phase in declared_phases
+        ]
+        merged = dict(phase_results[0])
+        merged["errors"] = list(dict.fromkeys(
+            error
+            for result in phase_results
+            for error in result.get("errors") or []
+        ))
+        for key in (
+                "api_calls", "semantic_calls", "preservation_violations",
+                "latched_preservation_violations",
+                "preservation_not_applicable", "stop_conditions"):
+            values = [result.get(key) for result in phase_results]
+            if any(value != values[0] for value in values[1:]):
+                merged["errors"].append(
+                    f"method phase inspection disagrees on {key}")
+        return merged
     expected_samples = set(config["samples"])
     expected_methods = set(config["method_set"])
     target_rt = config["num_round_trips"]
@@ -2634,15 +3231,21 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         expected_samples if require_complete
         else set(required_complete_samples or [])
     )
+    completion_methods = (
+        {method_phase} if method_phase else set(expected_methods)
+    )
     active_samples = set(active_samples or [])
-    default_methods = list(config["method_set"])
+    default_methods = (
+        [method_phase] if method_phase else list(config["method_set"])
+    )
     methods_by_sample = {
         sample: list(default_methods) for sample in config["samples"]
     }
     for assignment in manifest.get("assignments") or []:
         sample = assignment.get("sample")
         methods = assignment.get("methods")
-        if (sample in expected_samples and isinstance(methods, list)
+        if (method_phase is None and sample in expected_samples
+                and isinstance(methods, list)
                 and methods):
             methods_by_sample[sample] = list(methods)
     active_worker_rows = {}
@@ -2710,6 +3313,24 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             errors.append(f"duplicate {event} record: {worker_id}")
         else:
             target[worker_id] = row
+
+    for worker_id, authorization in authorizations_by_worker.items():
+        worker_metadata = metadata_by_worker.get(worker_id) or []
+        dispatch_interrupted = authorization.get(
+            "interrupted_resume_evidence")
+        metadata_interrupted = (
+            worker_metadata[0].get("interrupted_resume_authorization")
+            if len(worker_metadata) == 1 else None
+        )
+        if dispatch_interrupted != metadata_interrupted:
+            errors.append(
+                f"interrupted resume provenance mismatch: {worker_id}")
+        elif (dispatch_interrupted is not None
+              and (not isinstance(dispatch_interrupted, dict)
+                   or dispatch_interrupted.get("schema")
+                   != "anchorpatch.interrupted_phase_resume/1")):
+            errors.append(
+                f"invalid interrupted resume authorization: {worker_id}")
 
     commit, tree_state = _git_identity()
     recovery_authorization = read_campaign_recovery_authorization(out_dir)
@@ -3449,8 +4070,10 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                     )
             elif rows:
                 errors.append(f"missing checkpoint: {method}/{sample}")
-            if sample in completion_samples and (
-                    completed != target_rt or len(rows) != 2 * target_rt):
+            if (sample in completion_samples
+                    and method in completion_methods
+                    and (completed != target_rt
+                         or len(rows) != 2 * target_rt)):
                 errors.append(
                     f"incomplete task: {method}/{sample} "
                     f"checkpoint={completed}/{target_rt} rows={len(rows)}/{2 * target_rt}"
@@ -3461,12 +4084,15 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
 
     try:
         latest_outcomes = _latest_sample_outcomes(
-            out_dir, expected_samples)
+            out_dir, expected_samples, method_phase=method_phase)
     except RuntimeError as exc:
         latest_outcomes = {}
         errors.append(str(exc))
     latest_by_sample = {}
     for record in metadata:
+        if (method_phase is not None
+                and record.get("methods") != [method_phase]):
+            continue
         for sample in record.get("samples") or []:
             if sample in expected_samples:
                 latest_by_sample[sample] = record
@@ -3531,6 +4157,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                         "methods": methods_by_sample.get(
                             sample, default_methods),
                         "target_round_trips": target_rt,
+                        "method_phase": method_phase,
                     })
             except RuntimeError as exc:
                 errors.append(str(exc))
@@ -3987,7 +4614,9 @@ def _record_worker_exit(out_dir, running, sample, item, returncode,
         del running[sample]
         return "finished"
     try:
-        outcome = _latest_sample_outcomes(out_dir).get(sample) or {}
+        outcome = _latest_sample_outcomes(
+            out_dir, method_phase=item.get("method_phase")
+        ).get(sample) or {}
         status = outcome.get("status")
         if status == "infrastructure_incomplete":
             evidence = _verified_infrastructure_incomplete(
@@ -4017,6 +4646,12 @@ def _launch_worker_batch(
         args, out_dir, inspection_manifest, task_plans, keys, assignments,
         resume_authorizations, dispatch_log, running):
     """Launch and authorize one refill batch while existing workers continue."""
+    phases = {item.get("method_phase") for item in assignments}
+    if len(phases) > 1:
+        raise RuntimeError("one launch batch cannot mix method phases")
+    method_phase = next(iter(phases), None)
+    if method_phase == "fullrewrite":
+        _require_hybridpatch_phase_barrier(out_dir, inspection_manifest)
     recovery_authorization = read_campaign_recovery_authorization(out_dir)
     runtime_git_commit = (
         recovery_authorization.get("recovery_git_commit")
@@ -4084,6 +4719,24 @@ def _launch_worker_batch(
                 os.path.join(out_dir, task_plans[sample]["path"])
             ),
         )
+        item_method_phase = item.get("method_phase")
+        if item_method_phase:
+            environment["ANCHORPATCH_METHOD_PHASE"] = item_method_phase
+            environment["ANCHORPATCH_CAMPAIGN_METHOD_SET"] = ",".join(
+                REMAINING134_METHOD_PHASES)
+        else:
+            environment.pop("ANCHORPATCH_METHOD_PHASE", None)
+            environment.pop("ANCHORPATCH_CAMPAIGN_METHOD_SET", None)
+        interrupted_resume = item.get("interrupted_resume_evidence")
+        if interrupted_resume is not None:
+            environment["ANCHORPATCH_INTERRUPTED_RESUME_EVIDENCE"] = (
+                json.dumps(
+                    interrupted_resume, ensure_ascii=False,
+                    sort_keys=True, separators=(",", ":"))
+            )
+        else:
+            environment.pop(
+                "ANCHORPATCH_INTERRUPTED_RESUME_EVIDENCE", None)
         environment.pop(
             "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID", None)
         environment.pop(
@@ -4114,6 +4767,8 @@ def _launch_worker_batch(
                 "key_label": label, "methods": item["methods"],
                 "worker_launch_id": worker_id,
                 "console_log": item["console_log"],
+                "method_phase": item_method_phase,
+                "interrupted_resume_evidence": interrupted_resume,
             },
         )
         log_path = os.path.join(out_dir, item["console_log"])
@@ -4131,6 +4786,8 @@ def _launch_worker_batch(
             "target_round_trips": args.num_round_trips,
             "resume_authorization": authorization,
             "worker_launch_id": worker_id,
+            "method_phase": item_method_phase,
+            "interrupted_resume_evidence": interrupted_resume,
             "ready_path": ready_path,
             "ack_path": ack_path,
             "exit_recorded": False,
@@ -4143,6 +4800,7 @@ def _launch_worker_batch(
                 "key_label": label, "methods": item["methods"],
                 "pid": process.pid, "worker_launch_id": worker_id,
                 "console_log": item["console_log"],
+                "method_phase": item_method_phase,
             },
         )
 
@@ -4192,12 +4850,20 @@ def _run_worker_queue(
             raise RuntimeError("worker queue assignment identity is invalid")
         seen_samples.add(sample)
         pending_by_key.setdefault(label, []).append(item)
+    phases = {item.get("method_phase") for item in assignments}
+    if len(phases) > 1:
+        raise RuntimeError("one worker queue cannot mix method phases")
+    method_phase = next(iter(phases), None)
     append_jsonl_locked(
         dispatch_log,
         {
             "event": "queue_start",
-            "dispatch_policy": WORK_CONSERVING_DISPATCH_POLICY,
+            "dispatch_policy": (
+                PHASED_WORK_CONSERVING_DISPATCH_POLICY
+                if method_phase else WORK_CONSERVING_DISPATCH_POLICY
+            ),
             "slots_per_key": slots_per_key,
+            "method_phase": method_phase,
             "pending_by_key": {
                 label: len(items) for label, items in pending_by_key.items()
             },
@@ -4224,6 +4890,7 @@ def _run_worker_queue(
                 {
                     "event": "queue_refill",
                     "refill_index": refill_index,
+                    "method_phase": method_phase,
                     "samples": launched,
                     "running_by_key": {
                         label: sum(
@@ -4246,6 +4913,7 @@ def _run_worker_queue(
         last_inspection = inspect_campaign(
             out_dir, inspection_manifest,
             active_samples=set(running),
+            method_phase=method_phase,
         )
         if last_inspection["errors"]:
             raise RuntimeError("; ".join(last_inspection["errors"]))
@@ -4271,6 +4939,7 @@ def _run_worker_queue(
                 out_dir, inspection_manifest,
                 active_samples=set(running),
                 required_complete_samples={sample},
+                method_phase=method_phase,
             )
             if sample_inspection["errors"]:
                 raise RuntimeError(
@@ -4282,6 +4951,7 @@ def _run_worker_queue(
                 {
                     "event": "queue_slots_released",
                     "refill_index": refill_index,
+                    "method_phase": method_phase,
                     "workers": exited,
                 },
             )
@@ -4300,6 +4970,7 @@ def _run_worker_queue(
         {
             "event": "queue_complete",
             "refill_count": refill_index,
+            "method_phase": method_phase,
             "completed_samples": sorted(completed_samples),
             "infrastructure_incomplete_samples": sorted(
                 infrastructure_incomplete_samples),
@@ -4313,9 +4984,213 @@ def _run_worker_queue(
             phase="pre_final")
 
 
+def _append_remaining134_incomplete(
+        out_dir, manifest, method_phase, states, *, skipped_samples=None):
+    inspection = inspect_campaign(
+        out_dir, manifest,
+        required_complete_samples=states["finished"],
+        method_phase=method_phase,
+    )
+    if inspection["errors"]:
+        raise RuntimeError("; ".join(inspection["errors"]))
+    record = {
+        "event": "campaign_incomplete",
+        "campaign_role": "remaining134",
+        "method_phase": method_phase,
+        "infrastructure_incomplete_samples": sorted(
+            states["infrastructure_incomplete"]),
+        "evaluator_incomplete_samples": sorted(
+            states["evaluator_incomplete"]),
+        "missing_samples": sorted(states["missing"]),
+        "skipped_samples": sorted(skipped_samples or []),
+        "completed_samples": sorted(states["finished"]),
+        "api_calls": inspection["api_calls"],
+        "preservation_violations": 0,
+    }
+    append_jsonl_locked(
+        os.path.join(out_dir, "dispatch_log.jsonl"), record)
+    print(
+        f"RESULT INCOMPLETE method_phase={method_phase} "
+        "infrastructure_samples="
+        + ",".join(sorted(states["infrastructure_incomplete"]))
+        + " evaluator_samples="
+        + ",".join(sorted(states["evaluator_incomplete"])),
+        file=sys.stderr, flush=True,
+    )
+
+
+def _run_remaining134_phase(
+        args, out_dir, manifest, task_plans, keys, base_assignments,
+        method_phase, *, resume, dispatch_log, running,
+        next_phase=None, next_phase_assignments=None,
+        skipped_samples=None, audited_stale=None, closed_stale=None):
+    """Drain one method phase and return its audited outcome partition."""
+    phase_assignments = _assignments_for_method_phase(
+        base_assignments, method_phase)
+    states = _method_phase_outcome_sets(
+        out_dir, [item["sample"] for item in phase_assignments],
+        method_phase)
+    launch_assignments, resume_authorizations = (
+        _select_invocation_assignments(
+            out_dir, phase_assignments, resume=resume,
+            target_round_trips=args.num_round_trips,
+            allow_pristine_pending=True,
+            method_phase=method_phase,
+            allow_audited_interrupted=resume,
+            task_plans=task_plans,
+        )
+    )
+    preflight = inspect_campaign(
+        out_dir, manifest,
+        active_samples={item["sample"] for item in launch_assignments},
+        required_complete_samples=states["finished"],
+        method_phase=method_phase,
+    )
+    if preflight["errors"]:
+        raise RuntimeError(
+            f"{method_phase} phase preflight failed before worker launch: "
+            + "; ".join(preflight["errors"])
+        )
+    append_jsonl_locked(
+        dispatch_log,
+        {
+            "event": "method_phase_start",
+            "method_phase": method_phase,
+            "next_method_phase": next_phase,
+            "resume": bool(resume),
+            "reason": args.resume_reason if args.resume else None,
+            "workers_stopped_confirmed": bool(
+                args.confirm_workers_stopped) if args.resume else None,
+            "audited_stale_invocations": list(audited_stale or []),
+            "closed_stale_invocations": list(closed_stale or []),
+            "eligible_sample_count": len(phase_assignments),
+            "eligible_sample_ids_sha256": _sample_ids_sha256(
+                item["sample"] for item in phase_assignments),
+            "launch_samples": [
+                item["sample"] for item in launch_assignments],
+            "skipped_finished_samples": sorted(states["finished"]),
+            "skipped_evaluator_incomplete_samples": sorted(
+                states["evaluator_incomplete"]),
+            "excluded_by_prior_phase_samples": sorted(
+                skipped_samples or []),
+            "transport_authorizations": resume_authorizations,
+            "interrupted_resume_evidence": {
+                item["sample"]: item["interrupted_resume_evidence"]
+                for item in launch_assignments
+                if item.get("interrupted_resume_evidence") is not None
+            },
+        },
+    )
+    launch_samples = {item["sample"] for item in launch_assignments}
+    infrastructure_incomplete = (
+        set(states["infrastructure_incomplete"]) - launch_samples
+    )
+    evaluator_incomplete = set(states["evaluator_incomplete"])
+    completed = set(states["finished"])
+    if launch_assignments:
+        _run_worker_queue(
+            args, out_dir, manifest, task_plans, keys,
+            launch_assignments, resume_authorizations, dispatch_log,
+            running, infrastructure_incomplete, evaluator_incomplete,
+            completed, len(phase_assignments), REMAINING134_SLOTS_PER_KEY,
+        )
+    states = _method_phase_outcome_sets(
+        out_dir, [item["sample"] for item in phase_assignments],
+        method_phase)
+    if states["missing"] or states["infrastructure_incomplete"]:
+        _append_remaining134_incomplete(
+            out_dir, manifest, method_phase, states,
+            skipped_samples=skipped_samples)
+        return states, False
+    _record_method_phase_complete(
+        out_dir, manifest, method_phase, phase_assignments,
+        next_phase=next_phase,
+        next_phase_assignments=next_phase_assignments,
+    )
+    return states, True
+
+
+def _run_remaining134_campaign(
+        args, out_dir, manifest, task_plans, keys, assignments,
+        dispatch_log, running, *, audited_stale=None, closed_stale=None):
+    """Run all HP samples, publish a barrier, then run eligible FR samples."""
+    fr_assignments = _assignments_for_method_phase(
+        assignments, "fullrewrite")
+    hp_states, hp_terminal = _run_remaining134_phase(
+        args, out_dir, manifest, task_plans, keys, assignments,
+        "hybridpatch", resume=args.resume,
+        dispatch_log=dispatch_log, running=running,
+        next_phase="fullrewrite",
+        next_phase_assignments=fr_assignments,
+        audited_stale=audited_stale, closed_stale=closed_stale,
+    )
+    if not hp_terminal:
+        return 2
+
+    _require_hybridpatch_phase_barrier(out_dir, manifest)
+    hp_evaluator_incomplete = set(hp_states["evaluator_incomplete"])
+    fr_base_assignments = [
+        item for item in assignments
+        if item["sample"] not in hp_evaluator_incomplete
+    ]
+    fr_states, fr_terminal = _run_remaining134_phase(
+        args, out_dir, manifest, task_plans, keys, fr_base_assignments,
+        "fullrewrite", resume=True,
+        dispatch_log=dispatch_log, running=running,
+        skipped_samples=hp_evaluator_incomplete,
+    )
+    if not fr_terminal:
+        return 2
+
+    all_evaluator_incomplete = (
+        hp_evaluator_incomplete | set(fr_states["evaluator_incomplete"])
+    )
+    if all_evaluator_incomplete:
+        _append_remaining134_incomplete(
+            out_dir, manifest, "fullrewrite", fr_states,
+            skipped_samples=hp_evaluator_incomplete)
+        return 2
+
+    for phase in REMAINING134_METHOD_PHASES:
+        inspection = inspect_campaign(
+            out_dir, manifest, require_complete=True,
+            method_phase=phase)
+        if inspection["errors"]:
+            raise RuntimeError("; ".join(inspection["errors"]))
+    prior_complete = [
+        row for row in _read_jsonl(dispatch_log)
+        if row.get("event") == "campaign_complete"
+    ]
+    if len(prior_complete) > 1:
+        raise RuntimeError("duplicate campaign completion record")
+    if not prior_complete:
+        append_jsonl_locked(
+            dispatch_log,
+            {
+                "event": "campaign_complete",
+                "campaign_role": "remaining134",
+                "method_phases": list(REMAINING134_METHOD_PHASES),
+                "sample_count": len(assignments),
+                "sample_ids_sha256": _sample_ids_sha256(
+                    item["sample"] for item in assignments),
+                "api_calls": sum(
+                    _phase_api_call_count(out_dir, phase)
+                    for phase in REMAINING134_METHOD_PHASES),
+                "preservation_violations": 0,
+            },
+        )
+    print(
+        f"RESULT PASS samples={len(assignments)} "
+        "method_phases=hybridpatch->fullrewrite preservation=0",
+        flush=True,
+    )
+    return 0
+
+
 def _launch_under_lease(args, out_dir):
     _resolve_confirmation_selection(args, out_dir=out_dir)
     _resolve_full234_scope(args)
+    _resolve_remaining134_scope(args)
     _validate_campaign_grid(args)
     _require_formal_opencode_transport("minimax-m3")
     upstream_smoke_gate = None
@@ -4327,7 +5202,9 @@ def _launch_under_lease(args, out_dir):
     required_key_count = (
         CONFIRMATION_KEY_COUNT
         if args.campaign_role == "confirmation"
-        else FULL234_KEY_COUNT if args.campaign_role == "full234" else None
+        else FULL234_KEY_COUNT if args.campaign_role == "full234"
+        else REMAINING134_KEY_COUNT
+        if args.campaign_role == "remaining134" else None
     )
     if (required_key_count is not None
             and len(selected_labels) != required_key_count):
@@ -4338,7 +5215,7 @@ def _launch_under_lease(args, out_dir):
     missing_labels = [label for label in selected_labels if label not in keys]
     if missing_labels:
         raise RuntimeError(f"unknown key labels: {missing_labels}")
-    if args.campaign_role in {"confirmation", "full234"}:
+    if args.campaign_role in {"confirmation", "full234", "remaining134"}:
         _require_unique_key_values_for_queued_campaign(keys, selected_labels)
     slots_per_key = getattr(args, "slots_per_key", 1)
     if not _is_exact_int(slots_per_key):
@@ -4358,8 +5235,12 @@ def _launch_under_lease(args, out_dir):
             args.campaign_role in {
                 "supplemental", "confirmation", "full234"}
         ),
-        allow_queue=(args.campaign_role in {"confirmation", "full234"}),
+        allow_queue=(args.campaign_role in {
+            "confirmation", "full234", "remaining134"}),
     )
+    if args.campaign_role == "remaining134":
+        for item in assignments:
+            item["methods"] = list(REMAINING134_METHOD_PHASES)
 
     task_plans = prepare_task_plans(
         out_dir, args.samples, args.num_round_trips, args.seed)
@@ -4376,6 +5257,73 @@ def _launch_under_lease(args, out_dir):
             flush=True,
         )
     if args.dry_run:
+        if args.campaign_role == "remaining134":
+            hp_assignments = _assignments_for_method_phase(
+                assignments, "hybridpatch")
+            hp_states = _method_phase_outcome_sets(
+                out_dir, args.samples, "hybridpatch")
+            if (hp_states["missing"]
+                    or hp_states["infrastructure_incomplete"]):
+                dry_phase = "hybridpatch"
+                dry_phase_assignments = hp_assignments
+                dry_resume = args.resume
+                dry_states = hp_states
+            else:
+                hp_audit = inspect_campaign(
+                    out_dir, inspection_manifest,
+                    required_complete_samples=hp_states["finished"],
+                    method_phase="hybridpatch")
+                if hp_audit["errors"]:
+                    raise RuntimeError(
+                        "dry-run hybridpatch phase audit failed: "
+                        + "; ".join(hp_audit["errors"]))
+                fr_assignments = _assignments_for_method_phase(
+                    [
+                        item for item in assignments
+                        if item["sample"]
+                        not in hp_states["evaluator_incomplete"]
+                    ],
+                    "fullrewrite",
+                )
+                barrier = _method_phase_complete_events(
+                    out_dir, "hybridpatch")
+                if barrier:
+                    _require_hybridpatch_phase_barrier(
+                        out_dir, inspection_manifest)
+                else:
+                    _verify_pristine_method_phase(
+                        out_dir, fr_assignments, "fullrewrite")
+                dry_phase = "fullrewrite"
+                dry_phase_assignments = fr_assignments
+                dry_resume = True
+                dry_states = _method_phase_outcome_sets(
+                    out_dir,
+                    [item["sample"] for item in fr_assignments],
+                    "fullrewrite")
+            dry_assignments, _dry_authorizations = (
+                _select_invocation_assignments(
+                    out_dir, dry_phase_assignments,
+                    resume=dry_resume,
+                    target_round_trips=args.num_round_trips,
+                    allow_pristine_pending=True,
+                    method_phase=dry_phase,
+                    allow_audited_interrupted=args.resume,
+                    task_plans=task_plans,
+                )
+            )
+            _write_active_worker_set(out_dir, inspection_manifest, [])
+            dry_inspection = inspect_campaign(
+                out_dir, inspection_manifest,
+                active_samples={
+                    item["sample"] for item in dry_assignments},
+                required_complete_samples=dry_states["finished"],
+                method_phase=dry_phase,
+            )
+            if dry_inspection["errors"]:
+                raise RuntimeError(
+                    "dry-run campaign preflight failed: "
+                    + "; ".join(dry_inspection["errors"]))
+            return 0
         dry_assignments, _dry_authorizations = (
             _select_invocation_assignments(
                 out_dir, assignments, resume=args.resume,
@@ -4417,6 +5365,8 @@ def _launch_under_lease(args, out_dir):
     incomplete_samples = set()
     evaluator_incomplete_samples = set()
     completed_samples = set()
+    audited_stale = []
+    stale = []
     try:
         # Never revoke a prior worker's authorization before proving its
         # process lease is free. A live orphan must remain globally visible
@@ -4466,6 +5416,12 @@ def _launch_under_lease(args, out_dir):
                     },
                 )
         _write_active_worker_set(out_dir, inspection_manifest, [])
+        if args.campaign_role == "remaining134":
+            return _run_remaining134_campaign(
+                args, out_dir, inspection_manifest, task_plans, keys,
+                assignments, dispatch_log, running,
+                audited_stale=audited_stale, closed_stale=stale,
+            )
         preflight = inspect_campaign(
             out_dir, inspection_manifest,
             active_samples=set(args.samples),
@@ -4643,7 +5599,8 @@ def main():
     parser.add_argument(
         "--campaign_role",
         choices=(
-            "smoke", "main", "supplemental", "confirmation", "full234"),
+            "smoke", "main", "supplemental", "confirmation", "full234",
+            "remaining134"),
         required=True)
     parser.add_argument(
         "--smoke_dir",
@@ -4688,17 +5645,20 @@ def main():
             _resolve_confirmation_selection(args, out_dir=args.out_dir)
         except RuntimeError as exc:
             parser.error(str(exc))
-    elif args.campaign_role == "full234":
+    elif args.campaign_role in {"full234", "remaining134"}:
         if manual_samples:
             parser.error(
-                "full234 samples come only from samples_delegate52"
+                f"{args.campaign_role} samples are derived automatically"
             )
         if args.selection_manifest:
             parser.error(
                 "--selection_manifest is only valid for confirmation"
             )
         try:
-            _resolve_full234_scope(args)
+            if args.campaign_role == "full234":
+                _resolve_full234_scope(args)
+            else:
+                _resolve_remaining134_scope(args)
         except RuntimeError as exc:
             parser.error(str(exc))
     else:
@@ -4752,7 +5712,7 @@ def main():
             parser.error("--smoke_dir is not valid for confirmation")
         if args.slots_per_key != CONFIRMATION_SLOTS_PER_KEY:
             parser.error("confirmation requires --slots_per_key 4")
-    else:
+    elif args.campaign_role == "full234":
         if (len(args.samples) != FULL234_SAMPLE_COUNT
                 or args.num_round_trips != 10):
             parser.error(
@@ -4762,6 +5722,17 @@ def main():
             parser.error("--smoke_dir is not valid for full234")
         if args.slots_per_key != FULL234_SLOTS_PER_KEY:
             parser.error("full234 requires --slots_per_key 4")
+    else:
+        if (len(args.samples) != REMAINING134_SAMPLE_COUNT
+                or args.num_round_trips != 10):
+            parser.error(
+                "remaining134 requires the exact complement of the prior "
+                "planned100 with 10 round trips"
+            )
+        if args.smoke_dir:
+            parser.error("--smoke_dir is not valid for remaining134")
+        if args.slots_per_key != REMAINING134_SLOTS_PER_KEY:
+            parser.error("remaining134 requires --slots_per_key 4")
     if args.num_round_trips < 1:
         parser.error("--num_round_trips must be >= 1")
     if args.poll_interval < 1 or args.progress_interval < 1:

@@ -795,3 +795,31 @@
   private/source-only rather than rewriting historical evidence. In restored state `--records-only`
   passes 13 records; source-linked validation reports the same 21 expected stale source-hash errors caused
   by active research-doc evolution, which are disclosed rather than repaired by rewriting frozen records.
+
+## 2026-07-21 - Before Experiment: remaining134 global HP then FR
+
+- experiment: `exp_20260721_hybridv8_transportv4_remaining134_hp_then_fr`; plan:
+  `docs/experiment_plans/exp_20260721_hybridv8_transportv4_remaining134_hp_then_fr.md`.
+- scope: exact complement of the prior committed mixed confirmation100 selection inside the current
+  234-sample inventory. All 100 planned IDs are excluded, including the two incomplete
+  samples; remaining count is 134, overlap 0, union 234, sample-ID list SHA-256 `835297a349489dd6c69224ad17ae5a4b767cc3da7bc0baef4b6c2f55c2b99ad4`.
+- exposure: this is not provider-unseen because the frozen FR baseline covered 234/234, and some remaining
+  samples have prior HP/method exposure. Frozen top-level data is not rewritten; the committed plan and
+  immutable campaign manifest are the additive exposure overlay after the first HP POST.
+- exposure strata: 21 prior method/developer-unseen reserve, 69 historical-exposed reserve and 44 recent
+  paired10/supplement40 HP samples; therefore 21 method-unseen versus 113 HP/method-exposed under the
+  existing policy, with prior FullRewrite provider exposure for all 134.
+- fixed comparison: MiniMax-M3, transport-v4, HP_V8 vs FullRewrite, seed42, distractor-on, shared 10-RT
+  task plans, 14 physically unique Keys and max four workers per Key. Each Key has a stable FIFO and
+  refills immediately when a slot opens.
+- user-directed phase order: queue and drain all eligible HybridPatch workers first. Only after a durable
+  134-sample HP terminal barrier may any FullRewrite process launch. This order is intentionally not
+  balanced and is disclosed as a time/provider-state confound; the campaign is supporting evidence.
+- isolation/recovery: HP infrastructure-incomplete blocks the method transition but not sibling HP workers;
+  evaluator-incomplete cancels that sample's later FR phase and remains null. Resume never reposts a
+  committed HP or FR step.
+- launch status: independent read-only plan review returned final `GO`, and the zero-API regression suite
+  passed (executor 72/72, dispatcher/transport/runner 124/124, analyze 5/5, tools 67/67, splitters
+  byte-exact). Formal POST remains `NO-GO` until this change is committed on a clean tree, unified zero-API
+  preflight confirms all 134 runtime evaluators, 14/14 Key probe passes, and the final command is rechecked.
+  No provider call was made during implementation or preflight.

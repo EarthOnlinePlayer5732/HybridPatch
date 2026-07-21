@@ -1991,6 +1991,121 @@ class IntegrationContractTests(unittest.TestCase):
             provider_post.assert_not_called()
             edit_step.assert_not_called()
 
+    def test_interrupted_phase_prefix_resumes_without_reposting_committed_rt(self):
+        class DummyDomain:
+            samples_folder = None
+
+        sample_id = "sample"
+        method = "hybridpatch"
+        plan_hash = "a" * 64
+        states = {
+            "initial": {
+                "context": ["a.txt"], "solution_folder": "solution",
+                "prompts": [{"target_state": "target",
+                             "prompt": "forward"}],
+            },
+            "target": {
+                "context": ["a.txt"], "solution_folder": "solution",
+                "prompts": [{"target_state": "initial",
+                             "prompt": "backward"}],
+            },
+        }
+        sample = {"start_state": "initial", "sample_type": "dummy"}
+        with tempfile.TemporaryDirectory() as out_dir:
+            method_dir = os.path.join(out_dir, method)
+            os.makedirs(method_dir, exist_ok=True)
+            utils_relay_plan.save_relay_task_plan(
+                os.path.join(out_dir, "sample.task_plan.json"), ["target"])
+            with open(
+                    os.path.join(method_dir, "sample.jsonl"),
+                    "w", encoding="utf-8") as handle:
+                for direction in ("forward", "backward"):
+                    handle.write(json.dumps({
+                        "sample_id": sample_id,
+                        "method": method,
+                        "round_trip_num": 1,
+                        "round_trip_direction": direction,
+                    }) + "\n")
+            run_meta.write_json_atomic(
+                os.path.join(method_dir, "sample.ckpt.json"), {
+                    "completed_round_trips": 1,
+                    "current_context": {"a.txt": "already committed"},
+                    "rid_chain": ["rid-forward", "rid-backward"],
+                    "state_chain": ["initial", "target", "initial"],
+                    "context_shuffle_random_state": None,
+                })
+            run_meta._write_jsonl_atomic(
+                os.path.join(out_dir, "run_metadata.jsonl"), [{
+                    "invocation_id": "inv-old",
+                    "worker_launch_id": "worker-old",
+                    "worker_pid": 101,
+                    "samples": [sample_id],
+                    "methods": [method],
+                    "method_phase": method,
+                    "status": "interrupted_before_audited_resume",
+                    "task_plans": {sample_id: {
+                        "sha256": plan_hash, "round_trips": 1}},
+                }])
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            for row in (
+                {"event": "launch_intent", "sample": sample_id,
+                 "methods": [method], "method_phase": method,
+                 "worker_launch_id": "worker-old"},
+                {"event": "launch", "sample": sample_id,
+                 "method_phase": method, "worker_launch_id": "worker-old",
+                 "pid": 101},
+                {"event": "stale_worker_reconciled", "sample": sample_id,
+                 "worker_launch_id": "worker-old", "pid": 101,
+                 "invocation_id": "inv-old"},
+            ):
+                run_meta.append_jsonl_locked(dispatch_log, row)
+            assignment = {
+                "sample": sample_id, "key_label": "KEY_01",
+                "methods": [method], "method_phase": method,
+            }
+            selected, transport_authorizations = (
+                paired_dispatch._select_invocation_assignments(
+                    out_dir, [assignment], resume=True,
+                    target_round_trips=1,
+                    allow_pristine_pending=True,
+                    method_phase=method,
+                    allow_audited_interrupted=True,
+                    task_plans={sample_id: {"sha256": plan_hash}}))
+            self.assertEqual(len(selected), 1)
+            self.assertEqual(transport_authorizations, {})
+            self.assertEqual(
+                selected[0]["interrupted_resume_evidence"][
+                    "checkpoint_progress"][method][
+                        "completed_round_trips"],
+                1)
+
+            provider_post = mock.Mock(
+                side_effect=AssertionError("committed RT was reposted"))
+            with mock.patch.object(
+                    experiment_runner,
+                    "_require_formal_opencode_transport"), mock.patch.object(
+                        experiment_runner, "load_sample",
+                        return_value=(sample, out_dir, states)), mock.patch.object(
+                            experiment_runner, "get_domain",
+                            return_value=DummyDomain()), mock.patch.object(
+                                experiment_runner,
+                                "load_distractor_context",
+                                return_value={}), mock.patch.object(
+                                    experiment_runner,
+                                    "register_task_plan",
+                                    return_value={"sha256": plan_hash,
+                                                  "round_trips": 1}), \
+                    mock.patch.object(
+                        experiment_runner, "_edit_step",
+                        side_effect=AssertionError(
+                            "committed RT must not be regenerated")):
+                experiment_runner.run_relay(
+                    method, sample_id, num_round_trips=1,
+                    include_distractor=True, out_dir=out_dir,
+                    model="offline-test-model", max_tokens=16,
+                    generate_fn=provider_post, printing=False)
+            provider_post.assert_not_called()
+
     def test_resume_selects_only_incomplete_sample_and_skips_committed_sample(self):
         methods_a = ["hybridpatch", "fullrewrite"]
         methods_b = ["fullrewrite", "hybridpatch"]
@@ -5074,6 +5189,395 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertEqual(manifest["config"]["queued_worker_count"], 182)
         self.assertNotIn("assignment_waves", manifest)
 
+    def test_remaining134_scope_excludes_planned100_and_uses_fourteen_keys(self):
+        all_samples, _full_scope = paired_dispatch._load_full234_scope()
+        samples, scope = paired_dispatch._load_remaining134_scope()
+        selection = json.loads(pathlib.Path(
+            paired_dispatch.REMAINING134_SELECTION_PATH
+        ).read_text(encoding="utf-8"))
+        excluded = set(selection["selected_sample_ids"])
+        self.assertEqual(len(all_samples), 234)
+        self.assertEqual(len(excluded), 100)
+        self.assertEqual(len(samples), 134)
+        self.assertFalse(excluded & set(samples))
+        self.assertEqual(excluded | set(samples), set(all_samples))
+        self.assertEqual(scope["sample_count"], 134)
+        self.assertEqual(
+            scope["exclusion_source"]["sha256"],
+            paired_dispatch.REMAINING134_SELECTION_SHA256)
+
+        args = mock.Mock(
+            campaign_role="remaining134", smoke_dir=None, samples=None,
+            num_round_trips=10, seed=42, slots_per_key=4,
+        )
+        resolved = paired_dispatch._resolve_remaining134_scope(args)
+        self.assertEqual(resolved, scope)
+        self.assertEqual(args.samples, samples)
+        paired_dispatch._validate_campaign_grid(args)
+
+        labels = [f"KEY_{index:02d}" for index in range(1, 15)]
+        assignments = paired_dispatch.build_key_assignments(
+            samples, labels, 4, allow_queue=True)
+        for item in assignments:
+            item["methods"] = list(paired_dispatch.REMAINING134_METHOD_PHASES)
+        with mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"unit": "test"}):
+            manifest = paired_dispatch.build_manifest(
+                "out", samples, assignments, {}, args)
+        self.assertEqual(manifest["remaining134_scope"], scope)
+        self.assertEqual(len(manifest["assignment_queues"]), 14)
+        self.assertEqual(
+            sorted(queue["worker_count"]
+                   for queue in manifest["assignment_queues"]),
+            [9] * 6 + [10] * 8,
+        )
+        self.assertTrue(all(
+            queue["hybridpatch_first"] == queue["worker_count"]
+            and queue["fullrewrite_first"] == 0
+            for queue in manifest["assignment_queues"]
+        ))
+        self.assertEqual(manifest["config"]["key_count"], 14)
+        self.assertEqual(manifest["config"]["max_worker_count"], 56)
+        self.assertEqual(manifest["config"]["queued_worker_count"], 78)
+        self.assertEqual(manifest["config"]["total_worker_invocations"], 268)
+        self.assertEqual(
+            manifest["config"]["method_phases"],
+            ["hybridpatch", "fullrewrite"])
+
+    def test_remaining134_runs_all_hp_before_any_fr_and_persists_barrier(self):
+        samples = ["sample-a", "sample-b"]
+        assignments = [
+            {"sample": sample, "key_label": f"KEY_0{index}",
+             "methods": ["hybridpatch", "fullrewrite"],
+             "console_log": f"dispatch_logs/{sample}.log"}
+            for index, sample in enumerate(samples, 1)
+        ]
+        manifest = {
+            "run_git_commit": "1" * 40,
+            "config": {"samples": samples, "method_set": [
+                "fullrewrite", "hybridpatch"], "num_round_trips": 10},
+        }
+        args = mock.Mock(
+            num_round_trips=10, resume=False, resume_reason=None,
+            confirm_workers_stopped=False,
+        )
+        phases = []
+
+        def fake_queue(
+                _args, out_dir, _manifest, _plans, _keys, phase_items,
+                _authorizations, _dispatch_log, _running, _infra, _eval,
+                completed, _total, _slots):
+            phase = phase_items[0]["method_phase"]
+            phases.append(phase)
+            if phase == "fullrewrite":
+                paired_dispatch._require_hybridpatch_phase_barrier(
+                    out_dir, manifest)
+                hp = paired_dispatch._latest_sample_outcomes(
+                    out_dir, samples, method_phase="hybridpatch")
+                self.assertEqual(set(hp), set(samples))
+            for item in phase_items:
+                run_meta.record_sample_outcome(
+                    out_dir, item["sample"], "finished",
+                    methods=[phase], method_phase=phase,
+                    checkpoint_progress={})
+                completed.add(item["sample"])
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                paired_dispatch, "inspect_campaign",
+                return_value={"errors": [], "api_calls": 0,
+                              "preservation_violations": 0}), mock.patch.object(
+                    paired_dispatch, "_run_worker_queue",
+                    side_effect=fake_queue):
+            result = paired_dispatch._run_remaining134_campaign(
+                args, out_dir, manifest, {}, {}, assignments,
+                os.path.join(out_dir, "dispatch_log.jsonl"), {})
+            rows = paired_dispatch._read_jsonl(
+                os.path.join(out_dir, "dispatch_log.jsonl"))
+        self.assertEqual(result, 0)
+        self.assertEqual(phases, ["hybridpatch", "fullrewrite"])
+        hp_barrier_index = next(
+            index for index, row in enumerate(rows)
+            if row.get("event") == "method_phase_complete"
+            and row.get("method_phase") == "hybridpatch")
+        fr_start_index = next(
+            index for index, row in enumerate(rows)
+            if row.get("event") == "method_phase_start"
+            and row.get("method_phase") == "fullrewrite")
+        self.assertLess(hp_barrier_index, fr_start_index)
+
+    def test_remaining134_hp_infrastructure_failure_never_launches_fr(self):
+        samples = ["sample-a", "sample-b"]
+        assignments = [
+            {"sample": sample, "key_label": "KEY_01",
+             "methods": ["hybridpatch", "fullrewrite"],
+             "console_log": f"dispatch_logs/{sample}.log"}
+            for sample in samples
+        ]
+        manifest = {
+            "run_git_commit": "1" * 40,
+            "config": {"samples": samples, "method_set": [
+                "fullrewrite", "hybridpatch"], "num_round_trips": 10},
+        }
+        args = mock.Mock(
+            num_round_trips=10, resume=False, resume_reason=None,
+            confirm_workers_stopped=False,
+        )
+        phases = []
+
+        def fake_queue(
+                _args, out_dir, _manifest, _plans, _keys, phase_items,
+                _authorizations, _dispatch_log, _running, _infra, _eval,
+                _completed, _total, _slots):
+            phase = phase_items[0]["method_phase"]
+            phases.append(phase)
+            for item in phase_items:
+                status = (
+                    "infrastructure_incomplete"
+                    if item["sample"] == "sample-a" else "finished")
+                run_meta.record_sample_outcome(
+                    out_dir, item["sample"], status,
+                    methods=[phase], method_phase=phase,
+                    checkpoint_progress={})
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                paired_dispatch, "inspect_campaign",
+                return_value={"errors": [], "api_calls": 0,
+                              "preservation_violations": 0}), mock.patch.object(
+                    paired_dispatch, "_run_worker_queue",
+                    side_effect=fake_queue):
+            result = paired_dispatch._run_remaining134_campaign(
+                args, out_dir, manifest, {}, {}, assignments,
+                os.path.join(out_dir, "dispatch_log.jsonl"), {})
+            barriers = paired_dispatch._method_phase_complete_events(
+                out_dir, "hybridpatch")
+        self.assertEqual(result, 2)
+        self.assertEqual(phases, ["hybridpatch"])
+        self.assertEqual(barriers, [])
+
+    def test_remaining134_hp_evaluator_incomplete_skips_only_its_fr(self):
+        samples = ["sample-a", "sample-b"]
+        assignments = [
+            {"sample": sample, "key_label": "KEY_01",
+             "methods": ["hybridpatch", "fullrewrite"],
+             "console_log": f"dispatch_logs/{sample}.log"}
+            for sample in samples
+        ]
+        manifest = {
+            "run_git_commit": "1" * 40,
+            "config": {"samples": samples, "method_set": [
+                "fullrewrite", "hybridpatch"], "num_round_trips": 10},
+        }
+        args = mock.Mock(
+            num_round_trips=10, resume=False, resume_reason=None,
+            confirm_workers_stopped=False,
+        )
+        phase_samples = []
+
+        def fake_queue(
+                _args, out_dir, _manifest, _plans, _keys, phase_items,
+                _authorizations, _dispatch_log, _running, _infra, _eval,
+                _completed, _total, _slots):
+            phase = phase_items[0]["method_phase"]
+            launched = [item["sample"] for item in phase_items]
+            phase_samples.append((phase, launched))
+            for item in phase_items:
+                status = (
+                    "evaluator_incomplete"
+                    if phase == "hybridpatch"
+                    and item["sample"] == "sample-a" else "finished")
+                run_meta.record_sample_outcome(
+                    out_dir, item["sample"], status,
+                    methods=[phase], method_phase=phase,
+                    checkpoint_progress={})
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                paired_dispatch, "inspect_campaign",
+                return_value={"errors": [], "api_calls": 0,
+                              "preservation_violations": 0}), mock.patch.object(
+                    paired_dispatch, "_run_worker_queue",
+                    side_effect=fake_queue):
+            result = paired_dispatch._run_remaining134_campaign(
+                args, out_dir, manifest, {}, {}, assignments,
+                os.path.join(out_dir, "dispatch_log.jsonl"), {})
+            fr_outcomes = paired_dispatch._latest_sample_outcomes(
+                out_dir, method_phase="fullrewrite")
+        self.assertEqual(result, 2)
+        self.assertEqual(
+            phase_samples,
+            [("hybridpatch", samples), ("fullrewrite", ["sample-b"])])
+        self.assertNotIn("sample-a", fr_outcomes)
+        self.assertEqual(fr_outcomes["sample-b"]["status"], "finished")
+
+    def test_phase_resume_skips_committed_sample_and_keeps_pending_sample(self):
+        sample_done = "sample-done"
+        sample_pending = "sample-pending"
+        assignments = [
+            {"sample": sample_done, "key_label": "KEY_01",
+             "methods": ["fullrewrite"], "method_phase": "fullrewrite"},
+            {"sample": sample_pending, "key_label": "KEY_02",
+             "methods": ["fullrewrite"], "method_phase": "fullrewrite"},
+        ]
+        expected_progress = {
+            "fullrewrite": {
+                "completed_round_trips": 10,
+                "committed_rows": 20,
+            }
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            self._write_completed_method_prefix(
+                out_dir, sample_done, "fullrewrite", 10)
+            run_meta.record_sample_outcome(
+                out_dir, sample_done, "finished",
+                methods=["fullrewrite"], method_phase="fullrewrite",
+                checkpoint_progress=expected_progress)
+            selected, authorizations = (
+                paired_dispatch._select_invocation_assignments(
+                    out_dir, assignments, resume=True,
+                    target_round_trips=10, allow_pristine_pending=True,
+                    method_phase="fullrewrite"))
+            root = (
+                "fullrewrite/sample-pending/rt01/forward/"
+                "fullrewrite_primary")
+            self._write_success_journal(
+                out_dir, root=root, exact_id=f"{root}/g000",
+                request_id="unexpected-fr", fingerprint="fingerprint")
+            with self.assertRaisesRegex(
+                    RuntimeError, "method phase was never started"):
+                paired_dispatch._select_invocation_assignments(
+                    out_dir, assignments, resume=True,
+                    target_round_trips=10, allow_pristine_pending=True,
+                    method_phase="fullrewrite")
+        self.assertEqual(
+            [item["sample"] for item in selected], [sample_pending])
+        self.assertEqual(authorizations, {})
+
+    def test_fullrewrite_worker_launch_requires_hp_phase_barrier(self):
+        sample = "sample-a"
+        manifest = {
+            "run_git_commit": "1" * 40,
+            "config": {"samples": [sample]},
+        }
+        assignment = {
+            "sample": sample, "key_label": "KEY_01",
+            "methods": ["fullrewrite"], "method_phase": "fullrewrite",
+            "console_log": (
+                "dispatch_logs/sample-a__KEY_01__fullrewrite.console.log"),
+        }
+        args = mock.Mock(
+            num_round_trips=10, seed=42, notes="unit", start_timeout=1)
+        with tempfile.TemporaryDirectory() as out_dir:
+            os.makedirs(os.path.join(out_dir, "dispatch_logs"))
+            task_plans = {
+                sample: {"path": "sample-a.task_plan.json",
+                         "sha256": "a" * 64}
+            }
+            with mock.patch.object(
+                    paired_dispatch.subprocess, "Popen") as popen:
+                with self.assertRaisesRegex(RuntimeError, "phase barrier"):
+                    paired_dispatch._launch_worker_batch(
+                        args, out_dir, manifest, task_plans,
+                        {"KEY_01": "redacted"}, [assignment], {},
+                        os.path.join(out_dir, "dispatch_log.jsonl"), {})
+            popen.assert_not_called()
+
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "dispatch_log.jsonl"), {
+                    "schema": paired_dispatch.METHOD_PHASE_COMPLETE_SCHEMA,
+                    "event": "method_phase_complete",
+                    "method_phase": "hybridpatch",
+                    "next_method_phase": "fullrewrite",
+                    "eligible_sample_count": 1,
+                    "eligible_sample_ids_sha256": (
+                        paired_dispatch._sample_ids_sha256([sample])),
+                    "finished_samples": [sample],
+                    "evaluator_incomplete_samples": [],
+                    "preservation_violations": 0,
+                    "run_git_commit": "1" * 40,
+                })
+
+            class FakeProcess:
+                pid = 12345
+
+                @staticmethod
+                def poll():
+                    return None
+
+            running = {}
+            with mock.patch.object(
+                    paired_dispatch.subprocess, "Popen",
+                    return_value=FakeProcess()) as popen, mock.patch.object(
+                        paired_dispatch, "_authorize_workers"):
+                launched = paired_dispatch._launch_worker_batch(
+                    args, out_dir, manifest, task_plans,
+                    {"KEY_01": "redacted"}, [assignment], {},
+                    os.path.join(out_dir, "dispatch_log.jsonl"), running)
+            self.assertEqual(launched, [sample])
+            popen.assert_called_once()
+            self.assertEqual(
+                popen.call_args.kwargs["env"]["ANCHORPATCH_METHOD_PHASE"],
+                "fullrewrite")
+            running[sample]["log"].close()
+
+    def test_phase_outcomes_allow_hp_then_fr_but_reject_duplicate_terminal(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            for phase in ("hybridpatch", "fullrewrite"):
+                run_meta.record_sample_outcome(
+                    out_dir, "sample-a", "finished",
+                    methods=[phase], method_phase=phase,
+                    checkpoint_progress={})
+            self.assertEqual(
+                paired_dispatch._latest_sample_outcomes(
+                    out_dir, ["sample-a"],
+                    method_phase="hybridpatch")["sample-a"]["status"],
+                "finished")
+            self.assertEqual(
+                paired_dispatch._latest_sample_outcomes(
+                    out_dir, ["sample-a"],
+                    method_phase="fullrewrite")["sample-a"]["status"],
+                "finished")
+            run_meta.record_sample_outcome(
+                out_dir, "sample-a", "infrastructure_incomplete",
+                methods=["fullrewrite"], method_phase="fullrewrite",
+                checkpoint_progress={})
+            with self.assertRaisesRegex(
+                    RuntimeError, "after finished state"):
+                paired_dispatch._latest_sample_outcomes(
+                    out_dir, ["sample-a"],
+                    method_phase="fullrewrite")
+
+    def test_strict_inspector_auto_aggregates_declared_method_phases(self):
+        sample = "sample-a"
+        args = mock.Mock(
+            campaign_role="remaining134", num_round_trips=10, seed=42,
+            slots_per_key=4,
+        )
+        args._remaining134_scope_record = {
+            "schema": "anchorpatch.remaining134_scope/1",
+            "sample_count": 1,
+            "sample_ids": [sample],
+        }
+        assignments = [{
+            "sample": sample, "key_label": "KEY_01",
+            "methods": ["hybridpatch", "fullrewrite"],
+            "console_log": "dispatch_logs/sample-a.log",
+        }]
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"unit": "test"}):
+            manifest = paired_dispatch.build_manifest(
+                out_dir, [sample], assignments, {}, args)
+            paired_dispatch._write_active_worker_set(out_dir, manifest, [])
+            inspection = paired_dispatch.inspect_campaign(out_dir, manifest)
+            self.assertEqual(inspection["errors"], [])
+            manifest["config"]["method_phases"] = ["fullrewrite"]
+            with self.assertRaisesRegex(RuntimeError, "phases are invalid"):
+                paired_dispatch.inspect_campaign(out_dir, manifest)
+
     def test_preflight_require_plans_fails_on_missing_frozen_plan(self):
         with tempfile.TemporaryDirectory() as out_dir, \
                 tempfile.TemporaryDirectory() as plans_from, \
@@ -7195,6 +7699,7 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(first["schema"], "anchorpatch.run_metadata/3")
             self.assertEqual(first["run_git_commit"], commit)
             self.assertEqual(first["git_tree_state"], "clean")
+            self.assertNotIn("method_phase", first)
             self.assertEqual(first["started_at"], second["started_at"])
             self.assertIsNotNone(datetime.fromisoformat(first["started_at"]).tzinfo)
 
@@ -7220,6 +7725,59 @@ class IntegrationContractTests(unittest.TestCase):
                     run_meta.append_run_metadata(out_dir, **kwargs)
             with self.assertRaises(RuntimeError):
                 run_meta.append_run_metadata(out_dir, **dict(kwargs, seed=43))
+
+    def test_run_metadata_accepts_hp_then_fr_phases_without_changing_legacy(self):
+        kwargs = {
+            "command": "python phased-test",
+            "samples": ["sample"],
+            "num_round_trips": 10,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": True,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        phase_env = {
+            "ANCHORPATCH_CAMPAIGN_METHOD_SET": "hybridpatch,fullrewrite",
+            "ANCHORPATCH_METHOD_PHASE": "hybridpatch",
+            "ANCHORPATCH_INTERRUPTED_RESUME_EVIDENCE": json.dumps({
+                "schema": "anchorpatch.interrupted_phase_resume/1",
+                "sample": "sample",
+                "method_phase": "hybridpatch",
+                "prior_invocation_id": "prior-invocation",
+                "task_plan_sha256": "a" * 64,
+                "checkpoint_progress": {
+                    "hybridpatch": {
+                        "completed_round_trips": 1,
+                        "committed_rows": 2,
+                    }
+                },
+            }),
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"unit": "test"}), mock.patch.dict(
+                        os.environ, phase_env, clear=False):
+            hp = run_meta.append_run_metadata(
+                out_dir, methods=["hybridpatch"], **kwargs)
+            run_meta.finish_run_metadata(out_dir, hp["invocation_id"])
+            os.environ["ANCHORPATCH_METHOD_PHASE"] = "fullrewrite"
+            os.environ.pop("ANCHORPATCH_INTERRUPTED_RESUME_EVIDENCE", None)
+            fr = run_meta.append_run_metadata(
+                out_dir, methods=["fullrewrite"], **kwargs)
+            run_meta.finish_run_metadata(out_dir, fr["invocation_id"])
+        self.assertEqual(hp["method_phase"], "hybridpatch")
+        self.assertEqual(fr["method_phase"], "fullrewrite")
+        self.assertEqual(
+            hp["interrupted_resume_authorization"]["prior_invocation_id"],
+            "prior-invocation")
+        self.assertNotIn("interrupted_resume_authorization", fr)
+        self.assertEqual(
+            hp["campaign_config"]["method_set"],
+            ["fullrewrite", "hybridpatch"])
+        self.assertEqual(hp["campaign_config"], fr["campaign_config"])
 
     def test_run_metadata_records_exact_authorized_git_recovery_boundary(self):
         kwargs = {
