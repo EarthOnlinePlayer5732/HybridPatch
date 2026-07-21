@@ -31,6 +31,7 @@ import json
 import time
 import hashlib
 import contextlib
+import functools
 import uuid
 import threading
 import subprocess
@@ -59,15 +60,27 @@ SAMPLE_OUTCOME_SCHEMA = "anchorpatch.sample_outcome/1"
 CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA = (
     "anchorpatch.campaign_recovery_authorization/1"
 )
+CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2 = (
+    "anchorpatch.campaign_recovery_authorization/2"
+)
 CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME = (
     "campaign_recovery_authorization.json"
 )
+LEDGER_LOCK_RECOVERY_KIND = "ledger_lock_contention"
 _GIT_IDENTITY_RECOVERY_CHANGED_PATHS = {
     ".gitignore",
     "HP_V8/VERSION.md",
     "HP_V8/src/paired_campaign_dispatch.py",
     "HP_V8/src/run_meta.py",
     "HP_V8/src/test_model_openai.py",
+}
+_LEDGER_LOCK_RECOVERY_ALLOWED_CHANGED_PATHS = {
+    "HP_V8/VERSION.md",
+    "HP_V8/src/authorize_ledger_lock_recovery.py",
+    "HP_V8/src/paired_campaign_dispatch.py",
+    "HP_V8/src/run_meta.py",
+    "HP_V8/src/test_model_openai.py",
+    "docs/active_log.md",
 }
 
 
@@ -95,15 +108,32 @@ def _strip(s):
 
 
 def append_jsonl_locked(path, record):
+    """Append one durable JSONL row, waiting through ordinary contention.
+
+    ``portalocker.lock`` may raise ``AlreadyLocked`` immediately on Windows.
+    A shared campaign ledger is expected to have many short-lived writers, so
+    that condition is contention rather than a failed model/transport call.
+    ``portalocker.Lock`` retains fail-closed behavior after a bounded wait.
+    """
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        portalocker.lock(f, portalocker.LOCK_EX)
-        try:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        finally:
-            portalocker.unlock(f)
+    with portalocker.Lock(
+        path,
+        mode="a",
+        timeout=60,
+        check_interval=0.05,
+        flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+        encoding="utf-8",
+    ) as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def _canonical_record_sha256(record):
+    payload = json.dumps(
+        record, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _read_campaign_stop_unlocked(out_dir):
@@ -323,7 +353,21 @@ def _write_jsonl_atomic(path, records):
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                os.replace(tmp, path)
+                break
+            except OSError as exc:
+                # Windows can briefly deny replace while a just-closed reader,
+                # indexer, or scanner still owns a non-delete-sharing handle.
+                # The metadata lock already serializes project writers; retry
+                # only these transient sharing/access violations and retain the
+                # same atomic replacement semantics.
+                if (getattr(exc, "winerror", None) not in {5, 32, 33}
+                        or time.monotonic() >= deadline):
+                    raise
+                time.sleep(0.05)
     finally:
         try:
             if os.path.exists(tmp):
@@ -1107,6 +1151,11 @@ class ApiCallRecorder:
             os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID")
             or f"worker-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         )
+        self._authorized_attempt_incident_hashes = (
+            campaign_recovery_incident_evidence(out_dir)[
+                "attempt_row_hashes"
+            ]
+        )
 
     def _consume_resume_authorization(self):
         parent = self._pending_resume_semantic_call_id
@@ -1265,26 +1314,8 @@ class ApiCallRecorder:
         append_jsonl_locked(self._ledger_path(), record)
 
     def _ledger_state(self, semantic_call_id):
-        path = self._ledger_path()
-        all_records = (
-            _read_jsonl_records_with_retry(path)
-            if os.path.exists(path) else []
-        )
-        if any(record.get("schema") != API_ATTEMPT_SCHEMA
-               for record in all_records):
-            raise RuntimeError(
-                "API attempt ledger schema differs from transport-v4; "
-                "use a new experiment directory"
-            )
-        if any(not isinstance(record.get("semantic_call_id"), str)
-               or not record.get("semantic_call_id")
-               or not isinstance(record.get("event"), str)
-               or not record.get("event") for record in all_records):
-            raise RuntimeError(
-                "API attempt ledger contains an invalid transport-v4 identity"
-            )
         records = [
-            record for record in all_records
+            record for record in self._all_ledger_records()
             if record.get("semantic_call_id") == semantic_call_id
         ]
         return _validated_transport_ledger_state(
@@ -1297,6 +1328,12 @@ class ApiCallRecorder:
             _read_jsonl_records_with_retry(path)
             if os.path.exists(path) else []
         )
+        if self._authorized_attempt_incident_hashes:
+            records = [
+                record for record in records
+                if _canonical_record_sha256(record)
+                not in self._authorized_attempt_incident_hashes
+            ]
         if any(record.get("schema") != API_ATTEMPT_SCHEMA
                for record in records):
             raise RuntimeError(
@@ -1308,7 +1345,8 @@ class ApiCallRecorder:
                     or not record.get("semantic_call_id")
                     or record.get("event") not in _ATTEMPT_EVENTS):
                 raise RuntimeError(
-                    "API attempt ledger contains an invalid transport-v4 record"
+                    "API attempt ledger contains an unknown event or retired "
+                    "same-ID transport record"
                 )
             lineage = _semantic_lineage_fields(
                 record["semantic_call_id"],
@@ -2488,14 +2526,79 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def read_campaign_recovery_authorization(out_dir):
-    """Validate the one narrow, append-only Git-identity recovery boundary.
+def _load_recovery_authorization_chain(out_dir, path, record):
+    """Load the exact V2 authorization chain pinned by nested SHA-256 links."""
+    history = []
+    seen_paths = set()
+    seen_ids = set()
+    current_path = os.path.realpath(path)
+    current = record
+    prior_commit = record.get("prior_git_commit")
+    prior_fingerprint = record.get("prior_code_fingerprint")
+    manifest_digest = record.get("dispatch_manifest_sha256")
+    while True:
+        authorization_id = current.get("authorization_id")
+        if (current_path in seen_paths
+                or not isinstance(authorization_id, str)
+                or not authorization_id
+                or authorization_id in seen_ids
+                or current.get("schema")
+                != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+                or current.get("recovery_kind")
+                != LEDGER_LOCK_RECOVERY_KIND
+                or current.get("prior_git_commit") != prior_commit
+                or current.get("prior_git_tree_state") != "clean"
+                or current.get("prior_code_fingerprint")
+                != prior_fingerprint
+                or current.get("dispatch_manifest_sha256")
+                != manifest_digest
+                or not re.fullmatch(
+                    r"[0-9a-f]{40}",
+                    str(current.get("recovery_git_commit") or ""),
+                )
+                or current.get("recovery_git_tree_state") != "clean"
+                or not isinstance(
+                    current.get("recovery_code_fingerprint"), dict)):
+            raise RuntimeError(
+                "campaign recovery superseded authorization identity mismatch")
+        seen_paths.add(current_path)
+        seen_ids.add(authorization_id)
+        history.append({
+            "record": current,
+            "path": current_path,
+            "sha256": _sha256_file(current_path),
+        })
+        relative = current.get("superseded_authorization_path")
+        if relative is None:
+            break
+        expected_digest = current.get("superseded_authorization_sha256")
+        if (not isinstance(relative, str) or not relative
+                or not isinstance(expected_digest, str)
+                or not expected_digest):
+            raise RuntimeError(
+                "campaign recovery superseded authorization link is invalid")
+        superseded_path = os.path.realpath(os.path.join(out_dir, relative))
+        if (os.path.commonpath([out_dir, superseded_path]) != out_dir
+                or not os.path.isfile(superseded_path)
+                or _sha256_file(superseded_path) != expected_digest):
+            raise RuntimeError(
+                "campaign recovery superseded authorization digest mismatch")
+        try:
+            with open(superseded_path, encoding="utf-8") as handle:
+                superseded = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "campaign recovery superseded authorization is invalid") from exc
+        if not isinstance(superseded, dict):
+            raise RuntimeError(
+                "campaign recovery superseded authorization is invalid")
+        current_path = superseded_path
+        current = superseded
+    return history
 
-    The authorization never changes the campaign task/configuration identity.
-    It only permits a stopped campaign to continue after the evaluator-temp
-    ignore/diagnostic hotfix, while preserving the original stop byte-for-byte
-    under ``recovery_history`` and recording both Git identities.
-    """
+
+def read_campaign_recovery_authorization(out_dir):
+    """Validate a narrow, append-only campaign recovery boundary."""
     out_dir = os.path.abspath(out_dir)
     path = os.path.join(out_dir, CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME)
     if not os.path.exists(path):
@@ -2506,10 +2609,24 @@ def read_campaign_recovery_authorization(out_dir):
     except (OSError, ValueError) as exc:
         raise RuntimeError("invalid campaign recovery authorization") from exc
     if (not isinstance(record, dict)
-            or record.get("schema") != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA
+            or record.get("schema") not in {
+                CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA,
+                CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2,
+            }
             or not isinstance(record.get("authorization_id"), str)
             or not record.get("authorization_id")):
         raise RuntimeError("invalid campaign recovery authorization")
+    recovery_kind = record.get("recovery_kind")
+    legacy_git_recovery = (
+        record.get("schema") == CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA
+        and recovery_kind is None
+    )
+    ledger_lock_recovery = (
+        record.get("schema") == CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+        and recovery_kind == LEDGER_LOCK_RECOVERY_KIND
+    )
+    if not (legacy_git_recovery or ledger_lock_recovery):
+        raise RuntimeError("unknown campaign recovery kind")
 
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     if (not os.path.isfile(manifest_path)
@@ -2542,16 +2659,54 @@ def read_campaign_recovery_authorization(out_dir):
     except (OSError, ValueError) as exc:
         raise RuntimeError("campaign recovery archived stop is invalid") from exc
     prior_commit = record.get("prior_git_commit")
-    if (archived_stop.get("schema") != STOP_CONDITION_SCHEMA
-            or archived_stop.get("condition") != "git_identity_drift"
-            or archived_stop.get("expected_commit") != prior_commit
-            or archived_stop.get("actual_commit") != prior_commit
-            or archived_stop.get("expected_tree_state") != "clean"
-            or archived_stop.get("actual_tree_state") != "dirty"):
-        raise RuntimeError("campaign recovery stop is not the authorized drift")
+    if legacy_git_recovery:
+        stop_valid = (
+            archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition") == "git_identity_drift"
+            and archived_stop.get("expected_commit") == prior_commit
+            and archived_stop.get("actual_commit") == prior_commit
+            and archived_stop.get("expected_tree_state") == "clean"
+            and archived_stop.get("actual_tree_state") == "dirty"
+        )
+    else:
+        recovery_error = archived_stop.get("error")
+        superseding_lock_recovery = (
+            (
+                recovery_error
+                == "campaign recovery interrupted attempt evidence is incomplete"
+                or str(recovery_error).startswith(
+                    "hybridpatch phase preflight failed before worker launch: "
+                    "attempt ledger has no mapped API call: fullrewrite/"
+                )
+                or re.fullmatch(
+                    r"worker [A-Za-z0-9_.-]+ exited before authorization "
+                    r"with -?[0-9]+",
+                    str(recovery_error),
+                ) is not None
+            )
+            and isinstance(record.get("superseded_authorization_path"), str)
+            and bool(record.get("superseded_authorization_path"))
+        )
+        stop_valid = (
+            archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition")
+            == "dispatcher_integrity_failure"
+            and isinstance(recovery_error, str)
+            and ("API row" in recovery_error or superseding_lock_recovery)
+        )
+    if not stop_valid:
+        raise RuntimeError("campaign recovery stop is not authorized")
     if os.path.exists(os.path.join(out_dir, "campaign_stop.json")):
         raise RuntimeError(
             "campaign recovery requires the stop latch to be archived first")
+    recovery_chain = (
+        _load_recovery_authorization_chain(out_dir, path, record)
+        if ledger_lock_recovery else [{
+            "record": record,
+            "path": path,
+            "sha256": _sha256_file(path),
+        }]
+    )
 
     current_commit, current_tree = _git_identity()
     current_fingerprint = code_fingerprint()
@@ -2568,9 +2723,10 @@ def read_campaign_recovery_authorization(out_dir):
         key for key in set(prior_fingerprint) | set(current_fingerprint)
         if prior_fingerprint.get(key) != current_fingerprint.get(key)
     )
-    if (fingerprint_changes != ["run_meta.py"]
+    expected_fingerprint_changes = ["run_meta.py"]
+    if (fingerprint_changes != expected_fingerprint_changes
             or record.get("changed_code_fingerprint_keys")
-            != fingerprint_changes):
+            != expected_fingerprint_changes):
         raise RuntimeError("campaign recovery runtime fingerprint scope changed")
 
     try:
@@ -2585,11 +2741,251 @@ def read_campaign_recovery_authorization(out_dir):
         raise RuntimeError("cannot audit campaign recovery Git diff") from exc
     changed = sorted(item.replace("\\", "/") for item in changed if item)
     recorded_changes = record.get("changed_tracked_paths")
-    if (changed != recorded_changes
-            or set(changed) != _GIT_IDENTITY_RECOVERY_CHANGED_PATHS):
+    changed_set = set(changed)
+    if legacy_git_recovery:
+        changed_scope_valid = changed_set == _GIT_IDENTITY_RECOVERY_CHANGED_PATHS
+    else:
+        changed_scope_valid = (
+            changed_set <= _LEDGER_LOCK_RECOVERY_ALLOWED_CHANGED_PATHS
+            and {
+                "HP_V8/src/authorize_ledger_lock_recovery.py",
+                "HP_V8/src/paired_campaign_dispatch.py",
+                "HP_V8/src/run_meta.py",
+                "HP_V8/src/test_model_openai.py",
+            } <= changed_set
+        )
+    if changed != recorded_changes or not changed_scope_valid:
         raise RuntimeError("campaign recovery changed-file scope mismatch")
-    return dict(record, authorization_path=path,
-                authorization_sha256=_sha256_file(path))
+    if ledger_lock_recovery:
+        worker_ids = record.get("recovered_worker_launch_ids")
+        preauthorization_worker_ids = record.get(
+            "preauthorization_worker_launch_ids", [])
+        api_incidents = record.get("incident_api_rows")
+        attempt_incidents = record.get("incident_attempt_rows")
+        if (not isinstance(worker_ids, list) or not worker_ids
+                or len(worker_ids) != len(set(worker_ids))
+                or any(not isinstance(item, str) or not item
+                       for item in worker_ids)
+                or not isinstance(preauthorization_worker_ids, list)
+                or len(preauthorization_worker_ids)
+                != len(set(preauthorization_worker_ids))
+                or any(not isinstance(item, str) or not item
+                       for item in preauthorization_worker_ids)
+                or not set(preauthorization_worker_ids) <= set(worker_ids)
+                or not isinstance(api_incidents, list) or not api_incidents
+                or not isinstance(attempt_incidents, list)):
+            raise RuntimeError("campaign ledger-lock recovery evidence is invalid")
+
+        def _validate_rows(filename, entries):
+            rows = _read_jsonl_records_with_retry(
+                os.path.join(out_dir, filename))
+            seen_numbers = set()
+            validated = []
+            for entry in entries:
+                number = entry.get("row_number") if isinstance(entry, dict) else None
+                digest = entry.get("canonical_sha256") if isinstance(entry, dict) else None
+                if (not isinstance(number, int) or isinstance(number, bool)
+                        or not 1 <= number <= len(rows)
+                        or number in seen_numbers
+                        or not isinstance(digest, str)
+                        or digest != _canonical_record_sha256(rows[number - 1])):
+                    raise RuntimeError(
+                        f"campaign recovery {filename} evidence mismatch")
+                seen_numbers.add(number)
+                validated.append((entry, rows[number - 1]))
+            return validated
+
+        validated_api = _validate_rows("api_calls.jsonl", api_incidents)
+        validated_attempts = _validate_rows(
+            "api_attempt_ledger.jsonl", attempt_incidents)
+        if any(
+                row.get("method") != "fullrewrite"
+                or row.get("classification") != "runner_exception"
+                or row.get("error_type") != "AlreadyLocked"
+                or row.get("worker_launch_id") not in worker_ids
+                or row.get("provider_request_id") is not None
+                or row.get("total_tokens") is not None
+                or entry.get("incident_kind") != "ledger_lock"
+                for entry, row in validated_api):
+            raise RuntimeError("campaign recovery API incidents are not lock failures")
+        incident_roots = {
+            row.get("semantic_root_id") for _entry, row in validated_api
+        }
+        if any(
+                row.get("worker_launch_id") not in worker_ids
+                or row.get("event") == "response_committed"
+                or entry.get("incident_kind") not in {
+                    "ledger_lock", "dispatcher_interrupted_open_attempt"
+                }
+                or (entry.get("incident_kind") == "ledger_lock"
+                    and (row.get("semantic_root_id") not in incident_roots
+                         or row.get("event") == "generation_progress"))
+                for entry, row in validated_attempts):
+            raise RuntimeError(
+                "campaign recovery attempt incidents are not pre-commit lock failures")
+        interrupted_ids = {
+            row.get("semantic_call_id")
+            for entry, row in validated_attempts
+            if entry.get("incident_kind")
+            == "dispatcher_interrupted_open_attempt"
+        }
+        for semantic_call_id in interrupted_ids:
+            authorized_group = [
+                row for entry, row in validated_attempts
+                if (entry.get("incident_kind")
+                    == "dispatcher_interrupted_open_attempt"
+                    and row.get("semantic_call_id") == semantic_call_id)
+            ]
+            start_count = sum(
+                row.get("event") == "attempt_start"
+                for row in authorized_group
+            )
+            end_count = sum(
+                row.get("event") == "attempt_end"
+                for row in authorized_group
+            )
+            pre_provider_interruption = (
+                start_count == 0
+                and end_count == 0
+                and sum(row.get("event") == "semantic_request"
+                        for row in authorized_group) == 1
+            )
+            if (not (start_count > end_count or pre_provider_interruption)
+                    or any(row.get("event") == "response_committed"
+                           for row in authorized_group)):
+                raise RuntimeError(
+                    "campaign recovery interrupted attempt evidence is incomplete")
+        dispatch_rows = _read_jsonl_records_with_retry(
+            os.path.join(out_dir, "dispatch_log.jsonl"))
+        launches = {
+            row.get("worker_launch_id"): row for row in dispatch_rows
+            if row.get("event") == "launch"
+            and row.get("method_phase") == "fullrewrite"
+        }
+        if not set(worker_ids) <= set(launches):
+            raise RuntimeError("campaign recovery worker cohort is not dispatched")
+        preauthorization_set = set(preauthorization_worker_ids)
+        metadata_rows = _read_jsonl_records_with_retry(
+            os.path.join(out_dir, "run_metadata.jsonl"))
+        metadata_workers = {
+            row.get("worker_launch_id") for row in metadata_rows
+            if row.get("worker_launch_id") in set(worker_ids)
+        }
+        authorized_workers = {
+            row.get("worker_launch_id") for row in dispatch_rows
+            if row.get("event") == "worker_authorized"
+        }
+        exits = {
+            row.get("worker_launch_id"): row for row in dispatch_rows
+            if row.get("event") == "worker_exit"
+        }
+        api_workers = {
+            row.get("worker_launch_id")
+            for row in _read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_calls.jsonl"))
+        }
+        attempt_workers = {
+            row.get("worker_launch_id")
+            for row in _read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+        }
+        expected_stop_errors = set()
+        for worker_id in preauthorization_set:
+            launch = launches.get(worker_id) or {}
+            exit_row = exits.get(worker_id) or {}
+            if (worker_id in metadata_workers
+                    or worker_id in authorized_workers
+                    or worker_id in api_workers
+                    or worker_id in attempt_workers
+                    or exit_row.get("sample") != launch.get("sample")
+                    or exit_row.get("pid") != launch.get("pid")
+                    or not isinstance(exit_row.get("returncode"), int)
+                    or isinstance(exit_row.get("returncode"), bool)
+                    or exit_row.get("returncode") == 0
+                    or exit_row.get("disposition") != "campaign_fatal"):
+                raise RuntimeError(
+                    "campaign recovery preauthorization worker evidence mismatch")
+            expected_stop_errors.add(
+                f"worker {launch.get('sample')} exited before authorization "
+                f"with {exit_row.get('returncode')}"
+            )
+        preauthorization_stop = archived_stop.get("error") in expected_stop_errors
+        if (metadata_workers != set(worker_ids) - preauthorization_set
+                or bool(preauthorization_set) != preauthorization_stop):
+            raise RuntimeError(
+                "campaign recovery preauthorization stop evidence mismatch")
+
+    identity_history = [{
+        "authorization_id": None,
+        "authorization_sha256": None,
+        "run_git_commit": record.get("prior_git_commit"),
+        "git_tree_state": "clean",
+        "code_fingerprint": record.get("prior_code_fingerprint"),
+    }]
+    for item in reversed(recovery_chain):
+        historical = item["record"]
+        identity_history.append({
+            "authorization_id": historical.get("authorization_id"),
+            "authorization_sha256": item["sha256"],
+            "run_git_commit": historical.get("recovery_git_commit"),
+            "git_tree_state": "clean",
+            "code_fingerprint": historical.get(
+                "recovery_code_fingerprint"),
+        })
+    return dict(
+        record,
+        authorization_path=path,
+        authorization_sha256=_sha256_file(path),
+        recovery_identity_history=identity_history,
+    )
+
+
+@functools.lru_cache(maxsize=16)
+def campaign_recovery_incident_evidence(out_dir):
+    """Return exact row hashes and workers covered by a V2 lock recovery."""
+    authorization = read_campaign_recovery_authorization(out_dir)
+    if (not authorization
+            or authorization.get("recovery_kind")
+            != LEDGER_LOCK_RECOVERY_KIND):
+        return {
+            "api_row_hashes": frozenset(),
+            "attempt_row_hashes": frozenset(),
+            "worker_launch_ids": frozenset(),
+            "preauthorization_worker_launch_ids": frozenset(),
+            "authorization_id": None,
+        }
+    return {
+        "api_row_hashes": frozenset({
+            item["canonical_sha256"]
+            for item in authorization["incident_api_rows"]
+        }),
+        "attempt_row_hashes": frozenset({
+            item["canonical_sha256"]
+            for item in authorization["incident_attempt_rows"]
+        }),
+        "worker_launch_ids": frozenset(
+            authorization["recovered_worker_launch_ids"]),
+        "preauthorization_worker_launch_ids": frozenset(
+            authorization.get("preauthorization_worker_launch_ids", [])),
+        "authorization_id": authorization["authorization_id"],
+    }
+
+
+def filter_authorized_attempt_incidents(out_dir, records):
+    incident_hashes = campaign_recovery_incident_evidence(
+        out_dir)["attempt_row_hashes"]
+    if not incident_hashes:
+        return list(records)
+    return [
+        record for record in records
+        if _canonical_record_sha256(record) not in incident_hashes
+    ]
+
+
+def is_authorized_api_incident(out_dir, record):
+    incident_hashes = campaign_recovery_incident_evidence(
+        out_dir)["api_row_hashes"]
+    return _canonical_record_sha256(record) in incident_hashes
 
 
 def _recovery_identity_transition_matches(
@@ -3010,31 +3406,59 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             "git_tree_state": git_tree_state,
             "code_fingerprint": fp,
         }
+        authorized_identity_history = (
+            recovery_authorization.get("recovery_identity_history")
+            if recovery_authorization else None
+        )
+        if recovery_authorization and not authorized_identity_history:
+            authorized_identity_history = [
+                {
+                    "authorization_id": None,
+                    "authorization_sha256": None,
+                    "run_git_commit": recovery_authorization.get(
+                        "prior_git_commit"),
+                    "git_tree_state": "clean",
+                    "code_fingerprint": recovery_authorization.get(
+                        "prior_code_fingerprint"),
+                },
+                {
+                    "authorization_id": recovery_authorization.get(
+                        "authorization_id"),
+                    "authorization_sha256": recovery_authorization.get(
+                        "authorization_sha256"),
+                    "run_git_commit": recovery_authorization.get(
+                        "recovery_git_commit"),
+                    "git_tree_state": "clean",
+                    "code_fingerprint": recovery_authorization.get(
+                        "recovery_code_fingerprint"),
+                },
+            ]
+
+        def _matches_authorized_identity(record):
+            boundary = record.get("campaign_recovery_authorization")
+            for identity in authorized_identity_history or []:
+                if (record.get("run_git_commit")
+                        != identity.get("run_git_commit")
+                        or record.get("git_tree_state")
+                        != identity.get("git_tree_state")
+                        or record.get("code_fingerprint")
+                        != identity.get("code_fingerprint")):
+                    continue
+                authorization_id = identity.get("authorization_id")
+                if authorization_id is None:
+                    return boundary is None
+                return bool(
+                    isinstance(boundary, dict)
+                    and boundary.get("authorization_id") == authorization_id
+                    and boundary.get("authorization_sha256")
+                    == identity.get("authorization_sha256")
+                )
+            return False
+
         recovery_identity_history_valid = bool(
             recovery_authorization
             and prior
-            and all(
-                (
-                    record.get("run_git_commit")
-                    == recovery_authorization.get("prior_git_commit")
-                    and record.get("git_tree_state") == "clean"
-                    and record.get("code_fingerprint")
-                    == recovery_authorization.get("prior_code_fingerprint")
-                )
-                or (
-                    record.get("run_git_commit")
-                    == recovery_authorization.get("recovery_git_commit")
-                    and record.get("git_tree_state") == "clean"
-                    and record.get("code_fingerprint")
-                    == recovery_authorization.get("recovery_code_fingerprint")
-                    and isinstance(
-                        record.get("campaign_recovery_authorization"), dict)
-                    and record["campaign_recovery_authorization"].get(
-                        "authorization_id")
-                    == recovery_authorization.get("authorization_id")
-                )
-                for record in prior
-            )
+            and all(_matches_authorized_identity(record) for record in prior)
         )
         for key, current in identity_fields.items():
             if recovery_identity_history_valid:

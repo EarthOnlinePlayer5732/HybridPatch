@@ -823,3 +823,40 @@
   byte-exact). Formal POST remains `NO-GO` until this change is committed on a clean tree, unified zero-API
   preflight confirms all 134 runtime evaluators, 14/14 Key probe passes, and the final command is rechecked.
   No provider call was made during implementation or preflight.
+
+## 2026-07-21 - During Experiment: remaining134 ledger-lock recovery boundary
+
+- observed: HybridPatch completed 134/134 samples and 1,340 RT with preservation 0. FullRewrite then
+  committed 17 complete RT across 15 samples before the first 56-worker cohort was stopped.
+- failure: 23 local `AlreadyLocked` records arose while workers appended the shared API-attempt ledger;
+  7 directly corresponding attempt rows contain no generation delta or committed response. Global stop
+  also interrupted 33 open FR semantic calls (102 attempt rows; 32 had observed generation deltas), none
+  with a response journal or committed result. This is a Windows cross-worker persistence race, not a
+  method/protocol/evaluator failure.
+- fix: shared JSONL writers now use bounded 60-second lock acquisition. Transport revision and provider
+  retry budgets are unchanged. Zero-API transport/runner/dispatcher tests pass 126/126.
+- recovery: after a clean hotfix commit, the stop latch will be archived byte-for-byte and an exact
+  `campaign_recovery_authorization/2` will bind incident row hashes and all 56 interrupted workers.
+  Existing HP results, the 17 committed FR RT, raw evidence, ledgers and checkpoints remain unchanged;
+  resume starts at each sample's first uncommitted RT.
+- recovery validation correction: the first authorized resume admitted 56 workers, then stopped because
+  the authorization validator incorrectly treated later valid rows on an authorized semantic ID as
+  evidence drift. Nine API rows were recorded before the stop: eight zero-POST journal replays and one
+  complete provider response; no new RT was committed. The validator now fixes only the historical row
+  hashes and permits later valid lineage. The first authorization and second stop remain byte-preserved
+  and are chained into a superseding authorization before the next resume.
+- pre-provider residue: the next zero-POST startup audit found four FullRewrite `semantic_request` rows
+  with no `attempt_start` or terminal API row. They are now explicitly classified as interrupted,
+  uncommitted pre-provider calls and hash-bound alongside open streams; no result/checkpoint changes.
+- chained recovery identity: a later resume launched 56 workers, but all exited before authorization
+  because run metadata validation accepted only the original and newest commits, not the SHA-pinned
+  superseded recovery commit already present in metadata. This wave added no API, attempt, result, or
+  checkpoint rows. Recovery now validates the complete authorization chain and records those exact
+  zero-request launches as preauthorization failures before resuming only uncommitted FR steps. Zero-API
+  regression passes: executor 72/72, dispatcher/transport/runner 128/128, analysis 5/5, tools 67/67,
+  and splitters byte-exact.
+- metadata replace contention: the following launch registered six workers, then Windows briefly denied
+  an atomic `run_metadata.jsonl` replacement while the remaining workers were still preauthorization;
+  no API, attempt, result, or checkpoint row was added. JSONL atomic replacement now retries only Windows
+  sharing/access errors 5/32/33 for at most 60 seconds and otherwise remains fail-closed. The focused
+  zero-API regression covers one denied replace followed by a successful byte-valid replacement.

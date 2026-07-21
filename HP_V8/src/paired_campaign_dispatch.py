@@ -36,9 +36,11 @@ for _path in (_ROOT, _HERE):
 from experiment_runner import _require_formal_opencode_transport
 from fr_baseline_dispatch import read_keys
 from run_meta import (
+    _canonical_record_sha256,
     _git_identity,
     _validated_transport_ledger_state,
     append_jsonl_locked,
+    campaign_recovery_incident_evidence,
     code_fingerprint,
     interrupt_audited_running_invocations,
     read_campaign_recovery_authorization,
@@ -1987,13 +1989,16 @@ def _verified_interrupted_phase_resume(
             or not isinstance(task_plan, dict)
             or not isinstance(task_plan.get("sha256"), str)):
         return None
+    recovery_incidents = campaign_recovery_incident_evidence(out_dir)
     candidates = [
         record for record in read_run_metadata_snapshot(out_dir)
         if record.get("samples") == [sample]
         and record.get("methods") == [method_phase]
         and record.get("method_phase") == method_phase
         and record.get("status") in {
-            "running", "interrupted_before_audited_resume"}
+            "running", "interrupted_before_audited_resume",
+            "interrupted_by_dispatcher", "failed",
+        }
     ]
     if not candidates:
         return None
@@ -2050,7 +2055,7 @@ def _verified_interrupted_phase_resume(
                 for row in audited):
             raise RuntimeError(
                 f"running phase interruption was not audited: {sample}")
-    else:
+    elif record.get("status") == "interrupted_before_audited_resume":
         reconciled = [
             row for row in dispatch_rows
             if row.get("event") == "stale_worker_reconciled"
@@ -2062,6 +2067,21 @@ def _verified_interrupted_phase_resume(
         if len(reconciled) != 1:
             raise RuntimeError(
                 f"interrupted phase reconciliation is invalid: {sample}")
+    else:
+        if worker_id not in recovery_incidents["worker_launch_ids"]:
+            raise RuntimeError(
+                f"interrupted phase failure lacks recovery authorization: {sample}")
+        exits = [
+            row for row in dispatch_rows
+            if row.get("event") == "worker_exit"
+            and row.get("worker_launch_id") == worker_id
+            and row.get("sample") == sample
+            and row.get("pid") == worker_pid
+            and row.get("disposition") == "campaign_fatal"
+        ]
+        if len(exits) != 1:
+            raise RuntimeError(
+                f"interrupted phase recovered exit is invalid: {sample}")
     progress = _actual_sample_progress(out_dir, sample, [method_phase])
     phase_progress = progress[method_phase]
     completed = phase_progress["completed_round_trips"]
@@ -2069,7 +2089,7 @@ def _verified_interrupted_phase_resume(
             or phase_progress["committed_rows"] != 2 * completed):
         raise RuntimeError(
             f"interrupted phase checkpoint exceeds target: {sample}")
-    return {
+    evidence = {
         "schema": "anchorpatch.interrupted_phase_resume/1",
         "sample": sample,
         "method_phase": method_phase,
@@ -2080,6 +2100,10 @@ def _verified_interrupted_phase_resume(
         "checkpoint_progress": progress,
         "task_plan_sha256": task_plan["sha256"],
     }
+    if recovery_incidents["authorization_id"] is not None:
+        evidence["campaign_recovery_authorization_id"] = (
+            recovery_incidents["authorization_id"])
+    return evidence
 
 
 def _verified_infrastructure_incomplete(out_dir, sample, item):
@@ -3360,6 +3384,16 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             committed_rows[(sample, method)] = _read_jsonl(result_path)
 
     api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    recovery_incidents = campaign_recovery_incident_evidence(out_dir)
+    authorized_api_incident_hashes = recovery_incidents["api_row_hashes"]
+    authorized_attempt_incident_hashes = recovery_incidents[
+        "attempt_row_hashes"
+    ]
+    recovered_worker_ids = recovery_incidents["worker_launch_ids"]
+    recovered_preauthorization_worker_ids = recovery_incidents[
+        "preauthorization_worker_launch_ids"
+    ]
+    local_infrastructure_incident_rows = 0
     api_keys = set()
     semantic_groups = {}
     semantic_root_groups = {}
@@ -3369,6 +3403,16 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         method = row.get("method")
         rt = row.get("rt_index")
         direction = row.get("direction")
+        if _canonical_record_sha256(row) in authorized_api_incident_hashes:
+            local_infrastructure_incident_rows += 1
+            if (sample not in expected_samples
+                    or method != "fullrewrite"
+                    or not _is_exact_int(rt) or not 1 <= rt <= target_rt
+                    or direction not in {"forward", "backward"}
+                    or row.get("worker_launch_id") not in recovered_worker_ids):
+                errors.append(
+                    f"authorized local incident is unmappable at API row {index}")
+            continue
         if (sample not in expected_samples or method not in expected_methods
                 or not _is_exact_int(rt) or not 1 <= rt <= target_rt
                 or direction not in {"forward", "backward"}):
@@ -3564,10 +3608,15 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                     f"recovery authorization was not consumed: {worker_id}"
                 )
 
-    attempt_rows = _read_jsonl(os.path.join(
-        out_dir, "api_attempt_ledger.jsonl"))
+    attempt_rows = [
+        row for row in _read_jsonl(os.path.join(
+            out_dir, "api_attempt_ledger.jsonl"))
+        if _canonical_record_sha256(row)
+        not in authorized_attempt_incident_hashes
+    ]
     attempt_groups = {}
     attempt_root_ids = set()
+    attempt_worker_ids = set()
     allowed_attempt_events = {
         "semantic_request", "attempt_start", "generation_progress",
         "attempt_end", "attempt_budget", "response_committed",
@@ -3578,6 +3627,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         identity = _parse_semantic_call_id(semantic_call_id)
         event = row.get("event")
         worker_id = row.get("worker_launch_id")
+        if isinstance(worker_id, str) and worker_id:
+            attempt_worker_ids.add(worker_id)
         if row.get("schema") != API_ATTEMPT_SCHEMA:
             errors.append(f"attempt schema mismatch at ledger row {index}")
         if (identity is None
@@ -4251,7 +4302,41 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                 )
                 and reconciliation_time_ok
             )
-            if not exit_ok and not reconciliation_ok:
+            recovered_interruption_ok = (
+                worker_id in recovered_worker_ids
+                and isinstance(exit_row, dict)
+                and exit_row.get("sample") == launch.get("sample")
+                and exit_row.get("pid") == launch.get("pid")
+                and isinstance(exit_row.get("returncode"), int)
+                and not isinstance(exit_row.get("returncode"), bool)
+                and exit_row.get("returncode") != 0
+                and exit_row.get("disposition") == "campaign_fatal"
+                and isinstance(terminal_metadata, dict)
+                and terminal_metadata.get("worker_pid") == launch.get("pid")
+                and terminal_metadata.get("samples") == [launch.get("sample")]
+                and terminal_metadata.get("status") in {
+                    "failed", "interrupted_by_dispatcher"
+                }
+                and timestamp_ok
+            )
+            recovered_preauthorization_ok = (
+                worker_id in recovered_preauthorization_worker_ids
+                and isinstance(exit_row, dict)
+                and exit_row.get("sample") == launch.get("sample")
+                and exit_row.get("pid") == launch.get("pid")
+                and isinstance(exit_row.get("returncode"), int)
+                and not isinstance(exit_row.get("returncode"), bool)
+                and exit_row.get("returncode") != 0
+                and exit_row.get("disposition") == "campaign_fatal"
+                and not metadata_by_worker.get(worker_id)
+                and worker_id not in authorizations_by_worker
+                and worker_id not in api_rows_by_worker
+                and worker_id not in attempt_worker_ids
+                and timestamp_ok
+            )
+            if (not exit_ok and not reconciliation_ok
+                    and not recovered_interruption_ok
+                    and not recovered_preauthorization_ok):
                 errors.append(
                     f"worker exit provenance incomplete: {worker_id}"
                 )
@@ -4265,6 +4350,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         "api_calls": len(api_rows),
         "semantic_calls": len(semantic_groups),
         "provider_call_rows": provider_call_rows,
+        "local_infrastructure_incident_rows": (
+            local_infrastructure_incident_rows),
     }
 
 

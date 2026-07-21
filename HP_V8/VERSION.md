@@ -601,3 +601,51 @@ HP infrastructure-incomplete 不启动 FR、phase resume 跳过已提交样本�
 [`docs/experiment_plans/exp_20260721_hybridv8_transportv4_remaining134_hp_then_fr.md`](../docs/experiment_plans/exp_20260721_hybridv8_transportv4_remaining134_hp_then_fr.md)。
 全局方法顺序没有平衡，必须作为时间/provider-state 混杂披露，不能替代方法顺序平衡的
 canonical comparison。
+
+## 2026-07-21 remaining134 共享账本锁恢复
+
+remaining134 的 HybridPatch 阶段已完成 134/134 samples、1,340 RT，phase barrier 已持久化，
+preservation violations 为 0。FullRewrite 首批 56 workers 启动后，共享
+`api_attempt_ledger.jsonl` 的 Windows `portalocker.lock(..., LOCK_EX)` 在短时并发写入时立即抛出
+`AlreadyLocked`；dispatcher 按既有共享完整性策略停止全体 worker。停止前已有 15 个 FR
+sample 提交 17 个完整 RT；未完成步骤没有写 0 分或半提交结果。
+
+本修复只改变实验基础设施：所有共享 JSONL append 改为最多 60 秒的有界锁等待，超时仍
+fail closed。新增 `campaign_recovery_authorization/2`，只接受本次精确哈希绑定的 23 条本地
+锁异常 API 行、7 条直接锁失败 attempt 行、33 个开放 semantic call 的 102 条中断 attempt
+行和 56-worker 中断 cohort；旧行原样保留，inspector 和
+runner 只在授权边界内把这些未提交事件排除出 active semantic lineage。恢复从每个 sample
+首个未提交 RT 继续，已提交的 1340 个 HP RT 与 17 个 FR RT 不再 POST。
+
+该变更不修改 HybridPatch 方法、prompt、协议、executor、validation gate、FullRewrite、
+provider 请求参数、R2/I3 transport budget、transport revision、evaluator 或 scoring。
+零 API transport/runner/dispatcher 回归更新为 126/126 PASS，并新增真实文件锁竞争等待和
+精确 incident-row 过滤测试。
+
+首次恢复启动暴露了授权校验自身的不可变性错误：它正确固定旧 incident 行哈希，却错误要求
+同一 semantic call 后续不得追加合法 replay/response 行。cohort 因此再次全局停止；停止前新增
+9 条 API 行，其中 8 条是既有 journal 的零 POST replay、1 条是完整 provider response，均未
+形成新的完整 RT。修复后授权只验证历史 incident 行本身，并允许其后追加正常 lineage；第二次
+stop 与旧授权均字节保存在 `recovery_history/`，由 superseding authorization 继续绑定。已提交
+结果、checkpoint、R2/I3 budget 和 transport-v4 语义不变。
+
+第二次启动前检查还识别出 4 条仅写入 `semantic_request`、尚未出现 `attempt_start` 的 FR
+调用；它们同样没有 provider POST、API terminal row 或结果提交。恢复工具现将这种
+pre-provider 中断与开放 stream 一并做精确行哈希授权，避免它们在已完成 HP phase 的复核中
+被误判为无映射调用。
+
+第三次启动暴露了恢复身份校验只接受“原始提交 + 最新恢复提交”的缺陷：56 个 worker 均在
+写入 run metadata 前因历史恢复提交冲突退出，未新增 API、attempt 或结果行。恢复授权现递归
+校验完整的 SHA-256 supersession 链，并按每个历史 authorization ID/文件摘要接受对应 metadata；
+这 56 个零请求 worker 作为 `preauthorization_worker_launch_ids` 单独绑定，要求存在唯一非零
+`campaign_fatal` exit，且不存在 worker authorization、run metadata、API 或 attempt 行。该调整
+仍只涉及 campaign provenance/recovery，不改变模型请求、方法、transport、evaluator 或 scoring。
+零 API 回归为 executor 72/72、dispatcher/transport/runner 128/128、分析 5/5、tools 67/67，
+splitters byte-exact PASS。
+
+下一次启动中，6 个 worker 已在当前授权下完成 metadata 注册，其余 worker 在授权前遇到
+Windows `os.replace(run_metadata.jsonl)` 的瞬时 `WinError 5`；dispatcher 按共享 provenance
+完整性规则停止全体。该波仍未新增 API、attempt 或结果行。`_write_jsonl_atomic` 现在只对
+Windows 5/32/33 sharing/access violation 做最多 60 秒的短间隔重试，其他错误与超时继续
+fail closed，原子替换和 metadata 锁语义不变。最新零 API dispatcher/transport/runner 回归为
+129/129 PASS。

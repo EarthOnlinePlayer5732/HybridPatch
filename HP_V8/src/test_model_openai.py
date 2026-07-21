@@ -5660,6 +5660,100 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(errors, [])
             self.assertTrue(entered.is_set())
 
+    def test_shared_jsonl_writer_waits_for_existing_writer(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = os.path.join(out_dir, "api_attempt_ledger.jsonl")
+            appended = threading.Event()
+            errors = []
+            with open(path, "a+", encoding="utf-8") as first_writer:
+                portalocker.lock(
+                    first_writer,
+                    portalocker.LOCK_EX | portalocker.LOCK_NB)
+
+                def append_after_contention():
+                    try:
+                        run_meta.append_jsonl_locked(path, {"value": 1})
+                        appended.set()
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                contender = threading.Thread(
+                    target=append_after_contention, daemon=True)
+                contender.start()
+                self.assertFalse(appended.wait(0.15))
+                portalocker.unlock(first_writer)
+                contender.join(3)
+            self.assertFalse(contender.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(appended.is_set())
+            self.assertEqual(
+                run_meta._read_jsonl_records_with_retry(path),
+                [{"value": 1}],
+            )
+
+    def test_run_metadata_atomic_replace_retries_windows_sharing_violation(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = os.path.join(out_dir, "run_metadata.jsonl")
+            real_replace = run_meta.os.replace
+            attempts = []
+
+            def flaky_replace(source, target):
+                attempts.append((source, target))
+                if len(attempts) == 1:
+                    error = PermissionError(13, "transient sharing violation")
+                    error.winerror = 5
+                    raise error
+                return real_replace(source, target)
+
+            with mock.patch.object(
+                    run_meta.os, "replace",
+                    side_effect=flaky_replace), mock.patch.object(
+                    run_meta.time, "sleep") as sleep:
+                run_meta._write_jsonl_atomic(path, [{"value": 1}])
+
+            self.assertEqual(len(attempts), 2)
+            sleep.assert_called_once_with(0.05)
+            self.assertEqual(
+                run_meta._read_jsonl_records_with_retry(path),
+                [{"value": 1}],
+            )
+
+    def test_api_recorder_filters_only_authorized_lock_incident_rows(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            semantic = (
+                "fullrewrite/sample/rt01/forward/fullrewrite_primary/g000"
+            )
+            context = run_meta._semantic_lineage_fields(semantic)
+            incident = {
+                "schema": run_meta.API_ATTEMPT_SCHEMA,
+                "created_local": "2026-07-21T18:00:00",
+                "step_id": context["step_id"],
+                "semantic_root_id": context["semantic_root_id"],
+                "semantic_call_id": semantic,
+                "generation_index": 0,
+                "parent_semantic_call_id": None,
+                "worker_launch_id": "old-worker",
+                "event": "semantic_request",
+                "call_id": "old-call",
+                "call_kind": "fullrewrite_primary",
+                "request_fingerprint": "old-fingerprint",
+            }
+            path = os.path.join(out_dir, "api_attempt_ledger.jsonl")
+            run_meta.append_jsonl_locked(path, incident)
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "fullrewrite", "sample", None,
+                "minimax-m3", mock.Mock())
+            self.assertEqual(
+                recorder._ledger_state(semantic)["request_fingerprints"],
+                ["old-fingerprint"],
+            )
+            recorder._authorized_attempt_incident_hashes = {
+                run_meta._canonical_record_sha256(incident)
+            }
+            state = recorder._ledger_state(semantic)
+            self.assertEqual(state["request_fingerprints"], [])
+            self.assertEqual(state["http_attempts_used"], 0)
+
     def test_paired_dispatch_resume_allows_only_audited_key_rotation(self):
         prior = {
             "schema": paired_dispatch.SCHEMA,
@@ -7833,6 +7927,130 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(recovered["run_git_commit"], recovery_commit)
             self.assertEqual(
                 second_recovered["run_git_commit"], recovery_commit)
+
+    def test_run_metadata_accepts_sha_pinned_chained_recovery_identities(self):
+        kwargs = {
+            "command": "python chained-recovery-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        commits = [character * 40 for character in "123"]
+        fingerprints = [
+            {"run_meta.py": f"revision-{index}"}
+            for index in range(3)
+        ]
+
+        def authorization(index, history):
+            return {
+                "authorization_id": f"recovery-{index}",
+                "authorization_sha256": str(index) * 64,
+                "prior_git_commit": commits[0],
+                "recovery_git_commit": commits[index],
+                "prior_code_fingerprint": fingerprints[0],
+                "recovery_code_fingerprint": fingerprints[index],
+                "archived_stop_path": f"recovery-{index}/stop.json",
+                "archived_stop_sha256": "f" * 64,
+                "recovery_identity_history": history,
+            }
+
+        base_identity = {
+            "authorization_id": None,
+            "authorization_sha256": None,
+            "run_git_commit": commits[0],
+            "git_tree_state": "clean",
+            "code_fingerprint": fingerprints[0],
+        }
+        first_recovery_identity = {
+            "authorization_id": "recovery-1",
+            "authorization_sha256": "1" * 64,
+            "run_git_commit": commits[1],
+            "git_tree_state": "clean",
+            "code_fingerprint": fingerprints[1],
+        }
+        current_recovery_identity = {
+            "authorization_id": "recovery-2",
+            "authorization_sha256": "2" * 64,
+            "run_git_commit": commits[2],
+            "git_tree_state": "clean",
+            "code_fingerprint": fingerprints[2],
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            with mock.patch.object(
+                    run_meta, "_git_identity",
+                    return_value=(commits[0], "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value=fingerprints[0]), mock.patch.object(
+                    run_meta, "read_campaign_recovery_authorization",
+                    return_value=None):
+                original = run_meta.append_run_metadata(out_dir, **kwargs)
+                run_meta.finish_run_metadata(
+                    out_dir, original["invocation_id"])
+
+            first_authorization = authorization(
+                1, [base_identity, first_recovery_identity])
+            with mock.patch.object(
+                    run_meta, "_git_identity",
+                    return_value=(commits[1], "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value=fingerprints[1]), mock.patch.object(
+                    run_meta, "read_campaign_recovery_authorization",
+                    return_value=first_authorization):
+                first_recovery = run_meta.append_run_metadata(
+                    out_dir, **kwargs)
+                run_meta.finish_run_metadata(
+                    out_dir, first_recovery["invocation_id"])
+
+            current_authorization = authorization(
+                2, [
+                    base_identity,
+                    first_recovery_identity,
+                    current_recovery_identity,
+                ])
+            with mock.patch.object(
+                    run_meta, "_git_identity",
+                    return_value=(commits[2], "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value=fingerprints[2]), mock.patch.object(
+                    run_meta, "read_campaign_recovery_authorization",
+                    return_value=current_authorization):
+                latest = run_meta.append_run_metadata(out_dir, **kwargs)
+
+        self.assertEqual(latest["run_git_commit"], commits[2])
+        self.assertEqual(
+            latest["campaign_recovery_authorization"]["authorization_id"],
+            "recovery-2",
+        )
+
+    def test_recovery_incident_evidence_marks_preauthorization_workers(self):
+        authorization = {
+            "recovery_kind": run_meta.LEDGER_LOCK_RECOVERY_KIND,
+            "authorization_id": "recovery-test",
+            "incident_api_rows": [],
+            "incident_attempt_rows": [],
+            "recovered_worker_launch_ids": ["worker-old", "worker-preauth"],
+            "preauthorization_worker_launch_ids": ["worker-preauth"],
+        }
+        run_meta.campaign_recovery_incident_evidence.cache_clear()
+        with mock.patch.object(
+                run_meta, "read_campaign_recovery_authorization",
+                return_value=authorization):
+            evidence = run_meta.campaign_recovery_incident_evidence(
+                "unit-test-out-dir")
+        run_meta.campaign_recovery_incident_evidence.cache_clear()
+        self.assertEqual(
+            evidence["worker_launch_ids"],
+            frozenset({"worker-old", "worker-preauth"}),
+        )
+        self.assertEqual(
+            evidence["preauthorization_worker_launch_ids"],
+            frozenset({"worker-preauth"}),
+        )
 
     def test_git_identity_ignores_evaluator_tmp_but_not_other_untracked_files(self):
         root_ignore = pathlib.Path(ROOT).parent / ".gitignore"
