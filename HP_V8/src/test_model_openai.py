@@ -5424,6 +5424,75 @@ class IntegrationContractTests(unittest.TestCase):
             and row.get("method_phase") == "fullrewrite")
         self.assertLess(hp_barrier_index, fr_start_index)
 
+    def test_remaining134_resume_reuses_hp_barrier_and_runs_only_fr(self):
+        samples = ["sample-a", "sample-b"]
+        assignments = [
+            {"sample": sample, "key_label": f"KEY_0{index}",
+             "methods": ["hybridpatch", "fullrewrite"],
+             "console_log": f"dispatch_logs/{sample}.log"}
+            for index, sample in enumerate(samples, 1)
+        ]
+        manifest = {
+            "run_git_commit": "1" * 40,
+            "config": {"samples": samples, "method_set": [
+                "fullrewrite", "hybridpatch"], "num_round_trips": 10},
+        }
+        args = mock.Mock(
+            num_round_trips=10, resume=True,
+            resume_reason="continue unfinished FR only",
+            confirm_workers_stopped=True,
+        )
+        phases = []
+
+        def fake_phase(
+                _args, _out_dir, _manifest, _plans, _keys,
+                _assignments, method_phase, **_kwargs):
+            phases.append(method_phase)
+            self.assertEqual(method_phase, "fullrewrite")
+            return ({
+                "finished": set(samples),
+                "evaluator_incomplete": set(),
+                "infrastructure_incomplete": set(),
+                "missing": set(),
+            }, True)
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            run_meta.append_jsonl_locked(dispatch_log, {
+                "schema": paired_dispatch.METHOD_PHASE_COMPLETE_SCHEMA,
+                "event": "method_phase_complete",
+                "method_phase": "hybridpatch",
+                "next_method_phase": "fullrewrite",
+                "eligible_sample_count": len(samples),
+                "eligible_sample_ids_sha256": (
+                    paired_dispatch._sample_ids_sha256(samples)),
+                "finished_samples": samples,
+                "evaluator_incomplete_samples": [],
+                "phase_api_calls": 20,
+                "preservation_violations": 0,
+                "run_git_commit": "1" * 40,
+            })
+            with mock.patch.object(
+                    paired_dispatch, "inspect_campaign",
+                    return_value={"errors": [], "api_calls": 0,
+                                  "preservation_violations": 0}), \
+                    mock.patch.object(
+                        paired_dispatch, "_run_remaining134_phase",
+                        side_effect=fake_phase):
+                result = paired_dispatch._run_remaining134_campaign(
+                    args, out_dir, manifest, {}, {}, assignments,
+                    dispatch_log, {})
+            rows = paired_dispatch._read_jsonl(dispatch_log)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(phases, ["fullrewrite"])
+        reused = [
+            row for row in rows
+            if row.get("event") == "method_phase_resume_reused"
+        ]
+        self.assertEqual(len(reused), 1)
+        self.assertEqual(reused[0]["method_phase"], "hybridpatch")
+
     def test_remaining134_hp_infrastructure_failure_never_launches_fr(self):
         samples = ["sample-a", "sample-b"]
         assignments = [

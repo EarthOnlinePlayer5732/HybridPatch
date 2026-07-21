@@ -5201,18 +5201,46 @@ def _run_remaining134_campaign(
     """Run all HP samples, publish a barrier, then run eligible FR samples."""
     fr_assignments = _assignments_for_method_phase(
         assignments, "fullrewrite")
-    hp_states, hp_terminal = _run_remaining134_phase(
-        args, out_dir, manifest, task_plans, keys, assignments,
-        "hybridpatch", resume=args.resume,
-        dispatch_log=dispatch_log, running=running,
-        next_phase="fullrewrite",
-        next_phase_assignments=fr_assignments,
-        audited_stale=audited_stale, closed_stale=closed_stale,
+    hp_barriers = (
+        _method_phase_complete_events(out_dir, "hybridpatch")
+        if args.resume else []
     )
-    if not hp_terminal:
-        return 2
+    if hp_barriers:
+        hp_barrier = _require_hybridpatch_phase_barrier(out_dir, manifest)
+        hp_states = {
+            "finished": set(hp_barrier["finished_samples"]),
+            "evaluator_incomplete": set(
+                hp_barrier["evaluator_incomplete_samples"]),
+            "infrastructure_incomplete": set(),
+            "missing": set(),
+        }
+        append_jsonl_locked(
+            dispatch_log,
+            {
+                "event": "method_phase_resume_reused",
+                "method_phase": "hybridpatch",
+                "next_method_phase": "fullrewrite",
+                "reason": args.resume_reason,
+                "eligible_sample_count": hp_barrier[
+                    "eligible_sample_count"],
+                "eligible_sample_ids_sha256": hp_barrier[
+                    "eligible_sample_ids_sha256"],
+                "preservation_violations": 0,
+            },
+        )
+    else:
+        hp_states, hp_terminal = _run_remaining134_phase(
+            args, out_dir, manifest, task_plans, keys, assignments,
+            "hybridpatch", resume=args.resume,
+            dispatch_log=dispatch_log, running=running,
+            next_phase="fullrewrite",
+            next_phase_assignments=fr_assignments,
+            audited_stale=audited_stale, closed_stale=closed_stale,
+        )
+        if not hp_terminal:
+            return 2
+        _require_hybridpatch_phase_barrier(out_dir, manifest)
 
-    _require_hybridpatch_phase_barrier(out_dir, manifest)
     hp_evaluator_incomplete = set(hp_states["evaluator_incomplete"])
     fr_base_assignments = [
         item for item in assignments

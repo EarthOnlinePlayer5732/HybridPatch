@@ -873,3 +873,8 @@
   It does not edit result, checkpoint, API, attempt or raw-response evidence.
   The superseding validator keeps the old preauthorization cohort bound to its original archived stop;
   the newer operator-pause stop is not required to duplicate that historical error string.
+- FR-only resume: the HybridPatch phase is already durably complete at 134/134 samples and 1,340 RT with
+  preservation 0. A resume with that unique valid phase barrier now reuses its terminal scope directly and
+  enters only the unfinished FullRewrite queue; it no longer repeats the completed HP phase preflight.
+  Worker-level FR checkpoints remain authoritative, so committed RTs are not reposted. This is a dispatcher
+  recovery optimization only and does not change either method, transport-v4, evaluator, or scoring.

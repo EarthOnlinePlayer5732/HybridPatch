@@ -662,3 +662,10 @@ worker-exit provenance，并把完整 `git status --porcelain`、旧授权 SHA �
 dispatcher/transport/runner 131/131、analysis 5/5、tools 67/67、splitters byte-exact PASS。旧
 preauthorization worker 证据在 operator-pause supersession 中继续按原归档验证，不再错误要求
 最新 operator stop 重复旧 stop 的 error 文本。
+
+remaining134 的 HP phase 已有唯一、身份完整的 134-sample completion barrier 后，resume 不再重复
+进入 HP phase 的 outcome/ledger preflight。dispatcher 直接从该不可变屏障恢复 finished 与
+evaluator-incomplete 集合，并只构建 FullRewrite 的未完成队列；FR worker 启动前仍执行同一屏障
+身份、scope、commit 和 preservation=0 校验。该调整只缩短恢复路径，不改变 HP、FullRewrite、
+transport、evaluator、scoring 或任何已提交 RT。零 API 回归新增断言：已有合法 HP 屏障时，
+remaining134 resume 只调用 FullRewrite phase。
