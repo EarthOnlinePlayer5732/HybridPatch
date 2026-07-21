@@ -17,6 +17,7 @@ import uuid
 from paired_campaign_dispatch import (
     _actual_sample_progress,
     _assert_worker_leases_free,
+    _audit_running_invocation_provenance,
     _verified_evaluator_incomplete,
     _verified_infrastructure_incomplete,
     _write_active_worker_set,
@@ -32,6 +33,7 @@ from run_meta import (
     append_jsonl_locked,
     campaign_recovery_incident_evidence,
     code_fingerprint,
+    interrupt_audited_running_invocations,
     read_run_metadata_snapshot,
     read_sample_outcomes,
     record_campaign_stop_condition,
@@ -101,8 +103,16 @@ def _latest_outcomes_by_worker(out_dir):
     return latest
 
 
-def _reconcile_terminal_active_workers(out_dir, manifest):
-    """Close stale dispatcher registrations whose workers already ended."""
+def _reconcile_terminal_active_workers(
+        out_dir, manifest, *, operator_interrupted_samples=None,
+        operator_pause_reason=None):
+    """Close terminal registrations and explicitly named stopped workers."""
+    interrupted_samples = list(operator_interrupted_samples or [])
+    if (any(not isinstance(sample, str) or not sample
+            for sample in interrupted_samples)
+            or len(interrupted_samples) != len(set(interrupted_samples))):
+        raise RuntimeError("operator-interrupted sample list is invalid")
+    interrupted_samples = set(interrupted_samples)
     active_path = os.path.join(out_dir, "active_worker_set.json")
     active = _read_json(active_path)
     active_workers = active.get("workers")
@@ -119,7 +129,25 @@ def _reconcile_terminal_active_workers(out_dir, manifest):
                    for sample in samples)
             or len(samples) != len(set(samples))):
         raise RuntimeError("active worker identities are invalid")
+    if not interrupted_samples <= set(samples):
+        raise RuntimeError(
+            "operator-interrupted sample is not actively registered")
     _assert_worker_leases_free(out_dir, samples)
+
+    interrupted_audits = []
+    if interrupted_samples:
+        interrupted_audits = _audit_running_invocation_provenance(out_dir)
+        audited_samples = {
+            item.get("sample") for item in interrupted_audits
+        }
+        if audited_samples != interrupted_samples:
+            raise RuntimeError(
+                "operator-interrupted running invocation scope is invalid")
+        interrupted_audits_by_sample = {
+            item["sample"]: item for item in interrupted_audits
+        }
+    else:
+        interrupted_audits_by_sample = {}
 
     dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
     dispatch_rows = _read_jsonl(dispatch_path)
@@ -167,16 +195,38 @@ def _reconcile_terminal_active_workers(out_dir, manifest):
                 or launch.get("pid") <= 0
                 or not isinstance(meta, dict)
                 or meta.get("samples") != [sample]
-                or meta.get("worker_pid") != launch.get("pid")
-                or not isinstance(outcome, dict)
-                or outcome.get("sample") != sample
-                or outcome.get("worker_pid") != launch.get("pid")
-                or outcome.get("status") != meta.get("status")):
+                or meta.get("worker_pid") != launch.get("pid")):
             raise RuntimeError(
                 f"terminal active worker provenance is invalid: {sample}")
         status = meta.get("status")
         methods = meta.get("methods")
         phase = meta.get("method_phase")
+        if sample in interrupted_samples:
+            audit = interrupted_audits_by_sample.get(sample)
+            if (status != "running"
+                    or outcome is not None
+                    or methods != [phase]
+                    or phase not in {"hybridpatch", "fullrewrite"}
+                    or not isinstance(audit, dict)
+                    or audit.get("worker_launch_id") != worker_id
+                    or audit.get("worker_pid") != launch.get("pid")
+                    or exits.get(worker_id) is not None):
+                raise RuntimeError(
+                    "operator-interrupted worker provenance is invalid: "
+                    f"{sample}")
+            reconciled.append({
+                "sample": sample,
+                "worker_launch_id": worker_id,
+                "worker_pid": launch["pid"],
+                "status": "interrupted_before_audited_resume",
+            })
+            continue
+        if (not isinstance(outcome, dict)
+                or outcome.get("sample") != sample
+                or outcome.get("worker_pid") != launch.get("pid")
+                or outcome.get("status") != status):
+            raise RuntimeError(
+                f"terminal active worker provenance is invalid: {sample}")
         if (status not in {
                 "finished", "infrastructure_incomplete",
                 "evaluator_incomplete"}
@@ -252,6 +302,32 @@ def _reconcile_terminal_active_workers(out_dir, manifest):
             "worker_pid": launch["pid"],
             "status": status,
         })
+    if interrupted_audits:
+        closed = interrupt_audited_running_invocations(
+            out_dir,
+            status="interrupted_before_audited_resume",
+            audited=interrupted_audits,
+        )
+        if {
+                item.get("worker_launch_id") for item in closed
+        } != {
+                item.get("worker_launch_id")
+                for item in interrupted_audits
+        }:
+            raise RuntimeError(
+                "operator-interrupted worker closure is incomplete")
+        for item in interrupted_audits:
+            append_jsonl_locked(dispatch_path, {
+                "event": "stale_worker_reconciled",
+                "created_at": datetime.now().astimezone().isoformat(
+                    timespec="seconds"),
+                "worker_launch_id": item["worker_launch_id"],
+                "pid": item["worker_pid"],
+                "sample": item["sample"],
+                "invocation_id": item["invocation_id"],
+                "exit_code_observed": False,
+                "reason": operator_pause_reason,
+            })
     for row in pending_exit_rows:
         append_jsonl_locked(dispatch_path, row)
     _write_active_worker_set(out_dir, manifest, [])
@@ -364,7 +440,9 @@ def _authorize_operator_pause(
     }
 
 
-def authorize(out_dir, *, operator_pause=False, operator_pause_reason=None):
+def authorize(
+        out_dir, *, operator_pause=False, operator_pause_reason=None,
+        operator_interrupted_samples=None):
     out_dir = os.path.abspath(out_dir)
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     stop_path = os.path.join(out_dir, "campaign_stop.json")
@@ -383,7 +461,10 @@ def authorize(out_dir, *, operator_pause=False, operator_pause_reason=None):
             raise RuntimeError(
                 "operator pause recovery requires no pre-existing stop latch")
         reconciled_workers = _reconcile_terminal_active_workers(
-            out_dir, manifest)
+            out_dir, manifest,
+            operator_interrupted_samples=operator_interrupted_samples,
+            operator_pause_reason=operator_pause_reason,
+        )
         current_commit, current_tree, current_status = _git_identity_details()
         if current_tree != "clean":
             raise RuntimeError(
@@ -751,16 +832,23 @@ def main():
     parser.add_argument("--confirm_workers_stopped", action="store_true")
     parser.add_argument("--operator_dispatcher_pause", action="store_true")
     parser.add_argument("--operator_pause_reason")
+    parser.add_argument(
+        "--operator_interrupted_sample", action="append", default=[])
     args = parser.parse_args()
     if not args.confirm_workers_stopped:
         parser.error("--confirm_workers_stopped is required")
     if args.operator_dispatcher_pause and not args.operator_pause_reason:
         parser.error(
             "--operator_dispatcher_pause requires --operator_pause_reason")
+    if args.operator_interrupted_sample and not args.operator_dispatcher_pause:
+        parser.error(
+            "--operator_interrupted_sample requires "
+            "--operator_dispatcher_pause")
     print(json.dumps(authorize(
         args.out_dir,
         operator_pause=args.operator_dispatcher_pause,
         operator_pause_reason=args.operator_pause_reason,
+        operator_interrupted_samples=args.operator_interrupted_sample,
     ), sort_keys=True))
 
 

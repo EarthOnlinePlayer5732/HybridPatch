@@ -669,3 +669,9 @@ evaluator-incomplete 集合，并只构建 FullRewrite 的未完成队列；FR w
 身份、scope、commit 和 preservation=0 校验。该调整只缩短恢复路径，不改变 HP、FullRewrite、
 transport、evaluator、scoring 或任何已提交 RT。零 API 回归新增断言：已有合法 HP 屏障时，
 remaining134 resume 只调用 FullRewrite phase。
+
+operator pause 恢复现在可通过显式 `--operator_interrupted_sample` 点名一个已确认停止、lease 已释放
+且仍为 running metadata 的 worker。工具要求点名集合与全部 running invocation 精确相等，核对
+launch/PID/method phase，原子标记为 `interrupted_before_audited_resume`，并记录
+`stale_worker_reconciled`；不产生 terminal outcome、0 分或虚构 exit code。未点名或身份不一致仍
+fail closed。该路径用于保留已提交 RT，并只重试首个未提交 FR 步骤。

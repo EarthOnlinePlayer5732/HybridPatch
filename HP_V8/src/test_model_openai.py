@@ -1875,6 +1875,89 @@ class IntegrationContractTests(unittest.TestCase):
             ["sample-finished", "sample-incomplete"])
         write_active.assert_called_once_with(out_dir, manifest, [])
 
+    def test_operator_pause_reconciles_only_explicit_interrupted_worker(self):
+        worker_id = "worker-interrupted"
+        sample = "sample-interrupted"
+        launch = {
+            "event": "launch", "sample": sample,
+            "key_label": "KEY_01", "worker_launch_id": worker_id,
+            "pid": 303,
+        }
+        metadata = [{
+            "invocation_id": "invocation-interrupted",
+            "worker_launch_id": worker_id, "worker_pid": 303,
+            "samples": [sample], "methods": ["fullrewrite"],
+            "method_phase": "fullrewrite", "status": "running",
+        }]
+        audit = [{
+            "invocation_id": "invocation-interrupted",
+            "worker_launch_id": worker_id, "worker_pid": 303,
+            "sample": sample, "method_phase": "fullrewrite",
+            "launch_recorded": True,
+        }]
+        manifest = {
+            "run_git_commit": "1" * 40,
+            "config": {"num_round_trips": 10},
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            pathlib.Path(out_dir, "active_worker_set.json").write_text(
+                json.dumps({"workers": {
+                    worker_id: {"sample": sample}
+                }}), encoding="utf-8")
+            dispatch_path = pathlib.Path(out_dir, "dispatch_log.jsonl")
+            dispatch_path.write_text(
+                json.dumps(launch) + "\n", encoding="utf-8")
+            with mock.patch.object(
+                    ledger_recovery, "_assert_worker_leases_free"), \
+                    mock.patch.object(
+                        ledger_recovery,
+                        "_audit_running_invocation_provenance",
+                        return_value=audit), \
+                    mock.patch.object(
+                        ledger_recovery, "read_run_metadata_snapshot",
+                        return_value=metadata), \
+                    mock.patch.object(
+                        ledger_recovery, "read_sample_outcomes",
+                        return_value=[]), \
+                    mock.patch.object(
+                        ledger_recovery,
+                        "interrupt_audited_running_invocations",
+                        return_value=[{
+                            "invocation_id": "invocation-interrupted",
+                            "worker_launch_id": worker_id,
+                            "worker_pid": 303, "samples": [sample],
+                        }]) as interrupt, \
+                    mock.patch.object(
+                        ledger_recovery,
+                        "_write_active_worker_set") as write_active:
+                reconciled = (
+                    ledger_recovery._reconcile_terminal_active_workers(
+                        out_dir, manifest,
+                        operator_interrupted_samples=[sample],
+                        operator_pause_reason="stalled stream",
+                    )
+                )
+            rows = ledger_recovery._read_jsonl(str(dispatch_path))
+
+        interrupt.assert_called_once_with(
+            out_dir, status="interrupted_before_audited_resume",
+            audited=audit)
+        self.assertEqual(reconciled, [{
+            "sample": sample, "worker_launch_id": worker_id,
+            "worker_pid": 303,
+            "status": "interrupted_before_audited_resume",
+        }])
+        stale = [
+            row for row in rows
+            if row.get("event") == "stale_worker_reconciled"
+        ]
+        self.assertEqual(len(stale), 1)
+        self.assertEqual(stale[0]["sample"], sample)
+        self.assertEqual(stale[0]["reason"], "stalled stream")
+        self.assertFalse(any(
+            row.get("event") == "worker_exit" for row in rows))
+        write_active.assert_called_once_with(out_dir, manifest, [])
+
     def test_confirmation_duplicate_key_value_fails_before_provider(self):
         samples = [f"sample-{index:03d}" for index in range(68)]
         labels = [f"KEY_{index:02d}" for index in range(1, 14)]

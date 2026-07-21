@@ -878,3 +878,7 @@
   enters only the unfinished FullRewrite queue; it no longer repeats the completed HP phase preflight.
   Worker-level FR checkpoints remain authoritative, so committed RTs are not reposted. This is a dispatcher
   recovery optimization only and does not change either method, transport-v4, evaluator, or scoring.
+- One orphaned FullRewrite worker (`protein4`) was explicitly stopped after its RT9 backward stream had
+  produced a delta and then remained silent while all sibling workers had ended. Recovery records it as
+  `interrupted_before_audited_resume` only after exact launch/PID/lease/running-metadata checks. Its RT1-RT8
+  commits remain intact; no score is imputed and resume starts at the first uncommitted RT9 step.
