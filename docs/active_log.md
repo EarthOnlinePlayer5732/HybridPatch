@@ -882,3 +882,5 @@
   produced a delta and then remained silent while all sibling workers had ended. Recovery records it as
   `interrupted_before_audited_resume` only after exact launch/PID/lease/running-metadata checks. Its RT1-RT8
   commits remain intact; no score is imputed and resume starts at the first uncommitted RT9 step.
+  Its open RT9 backward attempt is retained byte-for-byte and hash-bound as a
+  `dispatcher_interrupted_open_attempt`; no synthetic API terminal row is added.

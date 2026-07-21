@@ -1958,6 +1958,65 @@ class IntegrationContractTests(unittest.TestCase):
             row.get("event") == "worker_exit" for row in rows))
         write_active.assert_called_once_with(out_dir, manifest, [])
 
+    def test_operator_pause_hash_binds_interrupted_open_attempt(self):
+        worker_id = "worker-interrupted"
+        semantic_call_id = (
+            "fullrewrite/sample-interrupted/rt09/backward/"
+            "fullrewrite_primary")
+        rows = [
+            {
+                "event": "semantic_request",
+                "worker_launch_id": worker_id,
+                "semantic_call_id": semantic_call_id,
+            },
+            {
+                "event": "attempt_start", "attempt_index": 1,
+                "worker_launch_id": worker_id,
+                "semantic_call_id": semantic_call_id,
+            },
+            {
+                "event": "generation_progress",
+                "delta_type": "thinking_delta", "attempt_index": 1,
+                "worker_launch_id": worker_id,
+                "semantic_call_id": semantic_call_id,
+            },
+        ]
+        prior = {
+            "recovered_worker_launch_ids": ["worker-prior"],
+            "incident_attempt_rows": [],
+            "operator_pause_reconciled_workers": [{
+                "sample": "sample-interrupted",
+                "worker_launch_id": worker_id,
+                "worker_pid": 303,
+                "status": "interrupted_before_audited_resume",
+            }],
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            attempt_path = pathlib.Path(
+                out_dir, "api_attempt_ledger.jsonl")
+            attempt_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            result = (
+                ledger_recovery
+                ._extend_operator_interrupted_attempt_evidence(
+                    out_dir, prior, []))
+
+        self.assertEqual(
+            result["recovered_worker_launch_ids"],
+            ["worker-prior", worker_id])
+        self.assertEqual(
+            result["operator_interrupted_attempt_row_count"], 3)
+        self.assertEqual(
+            [entry["row_number"]
+             for entry in result["incident_attempt_rows"]],
+            [1, 2, 3])
+        self.assertTrue(all(
+            entry["incident_kind"]
+            == "dispatcher_interrupted_open_attempt"
+            for entry in result["incident_attempt_rows"]))
+
     def test_confirmation_duplicate_key_value_fails_before_provider(self):
         samples = [f"sample-{index:03d}" for index in range(68)]
         labels = [f"KEY_{index:02d}" for index in range(1, 14)]

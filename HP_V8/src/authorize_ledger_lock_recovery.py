@@ -334,6 +334,114 @@ def _reconcile_terminal_active_workers(
     return sorted(reconciled, key=lambda item: item["sample"])
 
 
+def _extend_operator_interrupted_attempt_evidence(
+        out_dir, prior_authorization, reconciled_workers):
+    """Hash-bind open attempts for explicitly interrupted operator workers."""
+    interrupted = {}
+    for item in list(
+            (prior_authorization or {}).get(
+                "operator_pause_reconciled_workers") or []) + list(
+                    reconciled_workers or []):
+        if (isinstance(item, dict)
+                and item.get("status")
+                == "interrupted_before_audited_resume"):
+            worker_id = item.get("worker_launch_id")
+            sample = item.get("sample")
+            if (not isinstance(worker_id, str) or not worker_id
+                    or not isinstance(sample, str) or not sample
+                    or (worker_id in interrupted
+                        and interrupted[worker_id] != sample)):
+                raise RuntimeError(
+                    "operator-interrupted worker identity is invalid")
+            interrupted[worker_id] = sample
+    if not interrupted:
+        return {
+            "recovered_worker_launch_ids": list(
+                (prior_authorization or {}).get(
+                    "recovered_worker_launch_ids") or []),
+            "incident_attempt_rows": list(
+                (prior_authorization or {}).get(
+                    "incident_attempt_rows") or []),
+            "operator_interrupted_attempt_row_count": 0,
+        }
+
+    attempt_rows = _read_jsonl(
+        os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+    incident_by_number = {}
+    for entry in ((prior_authorization or {}).get(
+            "incident_attempt_rows") or []):
+        number = entry.get("row_number") if isinstance(entry, dict) else None
+        if (not isinstance(number, int) or isinstance(number, bool)
+                or not 1 <= number <= len(attempt_rows)
+                or entry.get("canonical_sha256")
+                != _canonical_record_sha256(attempt_rows[number - 1])):
+            raise RuntimeError(
+                "prior recovery attempt evidence has drifted")
+        incident_by_number[number] = entry
+
+    added_numbers = set()
+    for worker_id, sample in interrupted.items():
+        groups = {}
+        for number, row in enumerate(attempt_rows, 1):
+            semantic_call_id = row.get("semantic_call_id")
+            if (row.get("worker_launch_id") == worker_id
+                    and isinstance(semantic_call_id, str)
+                    and semantic_call_id.startswith("fullrewrite/")):
+                groups.setdefault(semantic_call_id, []).append((number, row))
+        open_groups = []
+        for semantic_call_id, group in groups.items():
+            starts = sum(
+                row.get("event") == "attempt_start"
+                for _number, row in group)
+            ends = sum(
+                row.get("event") == "attempt_end"
+                for _number, row in group)
+            pre_provider = (
+                starts == 0 and ends == 0
+                and sum(row.get("event") == "semantic_request"
+                        for _number, row in group) == 1
+            )
+            if ((starts > ends or pre_provider)
+                    and not any(row.get("event") == "response_committed"
+                                for _number, row in group)):
+                open_groups.append((semantic_call_id, group))
+        if not open_groups:
+            raise RuntimeError(
+                "operator-interrupted worker has no open attempt: "
+                f"{sample}")
+        for semantic_call_id, group in open_groups:
+            digest = hashlib.sha256(
+                semantic_call_id.encode("utf-8")).hexdigest()[:24]
+            if os.path.exists(os.path.join(
+                    out_dir, "api_journal", f"{digest}.response.json")):
+                raise RuntimeError(
+                    "operator-interrupted attempt has a response journal")
+            for number, row in group:
+                expected = _incident_entry(
+                    number, row,
+                    "dispatcher_interrupted_open_attempt")
+                prior = incident_by_number.get(number)
+                if prior is not None and prior != expected:
+                    raise RuntimeError(
+                        "operator-interrupted attempt evidence conflicts")
+                incident_by_number[number] = expected
+                added_numbers.add(number)
+
+    recovered = list((prior_authorization or {}).get(
+        "recovered_worker_launch_ids") or [])
+    for worker_id in interrupted:
+        if worker_id not in recovered:
+            recovered.append(worker_id)
+    return {
+        "recovered_worker_launch_ids": recovered,
+        "incident_attempt_rows": [
+            incident_by_number[number]
+            for number in sorted(incident_by_number)
+        ],
+        "operator_interrupted_attempt_row_count": len(added_numbers),
+    }
+
+
 def _authorize_operator_pause(
         out_dir, manifest, stop, stop_path, auth_path, prior_authorization,
         reconciled_workers):
@@ -380,6 +488,23 @@ def _authorize_operator_pause(
             or not set(changed_paths) <= allowed_paths):
         raise RuntimeError("operator pause recovery commit scope is invalid")
 
+    interrupted_evidence = _extend_operator_interrupted_attempt_evidence(
+        out_dir, prior_authorization, reconciled_workers)
+    combined_reconciled = []
+    seen_reconciled_workers = set()
+    for item in list(prior_authorization.get(
+            "operator_pause_reconciled_workers") or []) + list(
+                reconciled_workers or []):
+        worker_id = item.get("worker_launch_id") if isinstance(item, dict) else None
+        if (not isinstance(worker_id, str) or not worker_id
+                or worker_id in seen_reconciled_workers):
+            if worker_id in seen_reconciled_workers:
+                continue
+            raise RuntimeError(
+                "operator pause reconciled worker history is invalid")
+        seen_reconciled_workers.add(worker_id)
+        combined_reconciled.append(item)
+
     authorization_id = (
         "dispatcher-pause-" + datetime.now().astimezone().strftime(
             "%Y%m%dT%H%M%S%z") + "-" + uuid.uuid4().hex[:8]
@@ -413,7 +538,14 @@ def _authorize_operator_pause(
             archived_authorization, out_dir).replace("\\", "/"),
         "superseded_authorization_sha256": _sha256_file(
             archived_authorization),
-        "operator_pause_reconciled_workers": reconciled_workers,
+        "operator_pause_reconciled_workers": combined_reconciled,
+        "recovered_worker_launch_ids": interrupted_evidence[
+            "recovered_worker_launch_ids"],
+        "incident_attempt_rows": interrupted_evidence[
+            "incident_attempt_rows"],
+        "operator_interrupted_attempt_row_count": (
+            interrupted_evidence[
+                "operator_interrupted_attempt_row_count"]),
         "committed_results_modified": False,
         "checkpoint_rows_modified": False,
         "provider_post_replay_scope": "uncommitted_steps_only",
@@ -437,6 +569,8 @@ def _authorize_operator_pause(
         "incident_api_rows": len(record.get("incident_api_rows") or []),
         "incident_attempt_rows": len(
             record.get("incident_attempt_rows") or []),
+        "operator_interrupted_attempt_rows": record.get(
+            "operator_interrupted_attempt_row_count", 0),
     }
 
 

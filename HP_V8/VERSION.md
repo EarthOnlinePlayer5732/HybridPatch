@@ -675,3 +675,9 @@ operator pause 恢复现在可通过显式 `--operator_interrupted_sample` 点�
 launch/PID/method phase，原子标记为 `interrupted_before_audited_resume`，并记录
 `stale_worker_reconciled`；不产生 terminal outcome、0 分或虚构 exit code。未点名或身份不一致仍
 fail closed。该路径用于保留已提交 RT，并只重试首个未提交 FR 步骤。
+
+显式 operator interruption 同时把该 worker 的开放 semantic-call attempt 组按现有
+`dispatcher_interrupted_open_attempt` 类型加入 recovery authorization：要求 attempt_start 多于
+attempt_end（或唯一 pre-provider semantic_request）、不存在 `response_committed` 和 response
+journal，并冻结每一行 canonical SHA-256。对应 worker ID 扩展进 recovered scope，使 strict
+inspector 能忽略未提交的旧开放流，同时新语义调用仍使用独立 transport budget。
