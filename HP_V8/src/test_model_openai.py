@@ -27,6 +27,7 @@ for path in (ROOT, HERE):
         sys.path.insert(0, path)
 
 import experiment_runner
+import authorize_ledger_lock_recovery as ledger_recovery
 import fr_baseline_dispatch
 import model_openai
 import paired_campaign_dispatch as paired_dispatch
@@ -1776,6 +1777,103 @@ class IntegrationContractTests(unittest.TestCase):
             [set(), {"sample-b", "sample-c"}, {"sample-x"}],
         )
         self.assertEqual(write_active.call_count, 4)
+
+    def test_operator_pause_reconciles_terminal_active_workers_by_truth(self):
+        expected_progress = {
+            "fullrewrite": {
+                "completed_round_trips": 10,
+                "committed_rows": 20,
+            }
+        }
+        workers = {
+            "worker-finished": {"sample": "sample-finished"},
+            "worker-incomplete": {"sample": "sample-incomplete"},
+        }
+        launches = [
+            {
+                "event": "launch", "sample": "sample-finished",
+                "key_label": "KEY_01", "worker_launch_id": "worker-finished",
+                "pid": 101,
+            },
+            {
+                "event": "launch", "sample": "sample-incomplete",
+                "key_label": "KEY_02", "worker_launch_id": "worker-incomplete",
+                "pid": 202,
+            },
+        ]
+        metadata = [
+            {
+                "worker_launch_id": "worker-finished", "worker_pid": 101,
+                "samples": ["sample-finished"], "methods": ["fullrewrite"],
+                "method_phase": "fullrewrite", "status": "finished",
+            },
+            {
+                "worker_launch_id": "worker-incomplete", "worker_pid": 202,
+                "samples": ["sample-incomplete"], "methods": ["fullrewrite"],
+                "method_phase": "fullrewrite",
+                "status": "infrastructure_incomplete",
+            },
+        ]
+        outcomes = [
+            {
+                "worker_launch_id": "worker-finished", "worker_pid": 101,
+                "sample": "sample-finished", "status": "finished",
+                "checkpoint_progress": expected_progress,
+            },
+            {
+                "worker_launch_id": "worker-incomplete", "worker_pid": 202,
+                "sample": "sample-incomplete",
+                "status": "infrastructure_incomplete",
+            },
+        ]
+        manifest = {
+            "run_git_commit": "1" * 40,
+            "config": {"num_round_trips": 10},
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            pathlib.Path(out_dir, "active_worker_set.json").write_text(
+                json.dumps({"workers": workers}), encoding="utf-8")
+            dispatch_path = pathlib.Path(out_dir, "dispatch_log.jsonl")
+            dispatch_path.write_text(
+                "".join(json.dumps(row) + "\n" for row in launches),
+                encoding="utf-8",
+            )
+            with mock.patch.object(
+                    ledger_recovery, "_assert_worker_leases_free"), \
+                    mock.patch.object(
+                        ledger_recovery, "read_run_metadata_snapshot",
+                        return_value=metadata), \
+                    mock.patch.object(
+                        ledger_recovery, "read_sample_outcomes",
+                        return_value=outcomes), \
+                    mock.patch.object(
+                        ledger_recovery, "_actual_sample_progress",
+                        return_value=expected_progress), \
+                    mock.patch.object(
+                        ledger_recovery, "_verified_infrastructure_incomplete",
+                        return_value={"semantic_call_id": "call"}), \
+                    mock.patch.object(
+                        ledger_recovery, "_write_active_worker_set") as write_active:
+                reconciled = ledger_recovery._reconcile_terminal_active_workers(
+                    out_dir, manifest)
+            rows = ledger_recovery._read_jsonl(str(dispatch_path))
+
+        exits = [row for row in rows if row.get("event") == "worker_exit"]
+        self.assertEqual(len(exits), 2)
+        by_sample = {row["sample"]: row for row in exits}
+        self.assertEqual(by_sample["sample-finished"]["returncode"], 0)
+        self.assertEqual(
+            by_sample["sample-finished"]["disposition"], "finished")
+        self.assertEqual(by_sample["sample-incomplete"]["returncode"], 1)
+        self.assertEqual(
+            by_sample["sample-incomplete"]["disposition"],
+            "infrastructure_incomplete")
+        self.assertTrue(all(
+            row["exit_code_observed"] is False for row in exits))
+        self.assertEqual(
+            [item["sample"] for item in reconciled],
+            ["sample-finished", "sample-incomplete"])
+        write_active.assert_called_once_with(out_dir, manifest, [])
 
     def test_confirmation_duplicate_key_value_fails_before_provider(self):
         samples = [f"sample-{index:03d}" for index in range(68)]

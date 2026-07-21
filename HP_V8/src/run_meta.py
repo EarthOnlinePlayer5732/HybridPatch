@@ -2687,12 +2687,29 @@ def read_campaign_recovery_authorization(out_dir):
             and isinstance(record.get("superseded_authorization_path"), str)
             and bool(record.get("superseded_authorization_path"))
         )
-        stop_valid = (
+        operator_pause_recovery = (
             archived_stop.get("schema") == STOP_CONDITION_SCHEMA
             and archived_stop.get("condition")
-            == "dispatcher_integrity_failure"
-            and isinstance(recovery_error, str)
-            and ("API row" in recovery_error or superseding_lock_recovery)
+            == "operator_directed_dispatcher_pause"
+            and archived_stop.get("stopped_git_commit")
+            == record.get("recovery_git_commit")
+            and archived_stop.get("stopped_git_tree_state") == "clean"
+            and archived_stop.get("git_status_porcelain") == ""
+            and isinstance(record.get("superseded_authorization_path"), str)
+            and bool(record.get("superseded_authorization_path"))
+            and isinstance(
+                record.get("operator_pause_reconciled_workers"), list)
+        )
+        stop_valid = (
+            (
+                archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+                and archived_stop.get("condition")
+                == "dispatcher_integrity_failure"
+                and isinstance(recovery_error, str)
+                and ("API row" in recovery_error
+                     or superseding_lock_recovery)
+            )
+            or operator_pause_recovery
         )
     if not stop_valid:
         raise RuntimeError("campaign recovery stop is not authorized")

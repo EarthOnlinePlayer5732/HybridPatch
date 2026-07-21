@@ -867,4 +867,7 @@
   PIDs had already exited, so no in-flight provider worker was terminated. The queue now batches every exit
   observed in one poll into one integrity inspection and one active-set write, then refills every free
   per-Key slot. Existing committed RTs and raw ledger rows remain unchanged; recovery continues this same
-  experiment from each first uncommitted FR step.
+  experiment from each first uncommitted FR step. A dedicated operator-pause recovery path reconciles the
+  terminal metadata/outcome/checkpoint and released lease for every stale active registration, records the
+  full `git status --porcelain`, and SHA-links the existing authorization chain to the new clean commit.
+  It does not edit result, checkpoint, API, attempt or raw-response evidence.

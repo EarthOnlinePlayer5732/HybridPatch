@@ -14,17 +14,27 @@ import os
 import subprocess
 import uuid
 
-from paired_campaign_dispatch import _assert_worker_leases_free
+from paired_campaign_dispatch import (
+    _actual_sample_progress,
+    _assert_worker_leases_free,
+    _verified_evaluator_incomplete,
+    _verified_infrastructure_incomplete,
+    _write_active_worker_set,
+)
 from run_meta import (
     CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME,
     CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2,
     LEDGER_LOCK_RECOVERY_KIND,
     _canonical_record_sha256,
     _git_identity,
+    _git_identity_details,
     _sha256_file,
     append_jsonl_locked,
     campaign_recovery_incident_evidence,
     code_fingerprint,
+    read_run_metadata_snapshot,
+    read_sample_outcomes,
+    record_campaign_stop_condition,
     read_campaign_recovery_authorization,
     write_json_atomic,
 )
@@ -82,7 +92,279 @@ def _incident_entry(number, row, incident_kind):
     }
 
 
-def authorize(out_dir):
+def _latest_outcomes_by_worker(out_dir):
+    latest = {}
+    for row in read_sample_outcomes(out_dir):
+        worker_id = row.get("worker_launch_id")
+        if isinstance(worker_id, str) and worker_id:
+            latest[worker_id] = row
+    return latest
+
+
+def _reconcile_terminal_active_workers(out_dir, manifest):
+    """Close stale dispatcher registrations whose workers already ended."""
+    active_path = os.path.join(out_dir, "active_worker_set.json")
+    active = _read_json(active_path)
+    active_workers = active.get("workers")
+    if not isinstance(active_workers, dict):
+        raise RuntimeError("active worker set is invalid")
+    if not active_workers:
+        return []
+    samples = [
+        item.get("sample") for item in active_workers.values()
+        if isinstance(item, dict)
+    ]
+    if (len(samples) != len(active_workers)
+            or any(not isinstance(sample, str) or not sample
+                   for sample in samples)
+            or len(samples) != len(set(samples))):
+        raise RuntimeError("active worker identities are invalid")
+    _assert_worker_leases_free(out_dir, samples)
+
+    dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+    dispatch_rows = _read_jsonl(dispatch_path)
+    launches = {}
+    exits = {}
+    for row in dispatch_rows:
+        worker_id = row.get("worker_launch_id")
+        if worker_id not in active_workers:
+            continue
+        if row.get("event") == "launch":
+            if worker_id in launches:
+                raise RuntimeError(
+                    f"duplicate launch for active worker: {worker_id}")
+            launches[worker_id] = row
+        elif row.get("event") == "worker_exit":
+            if worker_id in exits:
+                raise RuntimeError(
+                    f"duplicate exit for active worker: {worker_id}")
+            exits[worker_id] = row
+    metadata = {}
+    for row in read_run_metadata_snapshot(out_dir):
+        worker_id = row.get("worker_launch_id")
+        if worker_id in active_workers:
+            if worker_id in metadata:
+                raise RuntimeError(
+                    f"duplicate metadata for active worker: {worker_id}")
+            metadata[worker_id] = row
+    outcomes = _latest_outcomes_by_worker(out_dir)
+    target_round_trips = (manifest.get("config") or {}).get(
+        "num_round_trips")
+    if not isinstance(target_round_trips, int) or target_round_trips < 1:
+        raise RuntimeError("campaign round-trip target is invalid")
+
+    reconciled = []
+    pending_exit_rows = []
+    for worker_id, active_item in active_workers.items():
+        sample = active_item.get("sample")
+        launch = launches.get(worker_id)
+        meta = metadata.get(worker_id)
+        outcome = outcomes.get(worker_id)
+        if (not isinstance(launch, dict)
+                or launch.get("sample") != sample
+                or not isinstance(launch.get("pid"), int)
+                or isinstance(launch.get("pid"), bool)
+                or launch.get("pid") <= 0
+                or not isinstance(meta, dict)
+                or meta.get("samples") != [sample]
+                or meta.get("worker_pid") != launch.get("pid")
+                or not isinstance(outcome, dict)
+                or outcome.get("sample") != sample
+                or outcome.get("worker_pid") != launch.get("pid")
+                or outcome.get("status") != meta.get("status")):
+            raise RuntimeError(
+                f"terminal active worker provenance is invalid: {sample}")
+        status = meta.get("status")
+        methods = meta.get("methods")
+        phase = meta.get("method_phase")
+        if (status not in {
+                "finished", "infrastructure_incomplete",
+                "evaluator_incomplete"}
+                or methods != [phase]
+                or phase not in {"hybridpatch", "fullrewrite"}):
+            raise RuntimeError(
+                f"active worker is not terminal: {sample}")
+        item = {
+            "worker_launch_id": worker_id,
+            "worker_pid": launch["pid"],
+            "methods": methods,
+            "method_phase": phase,
+            "target_round_trips": target_round_trips,
+        }
+        if status == "finished":
+            expected = {
+                phase: {
+                    "completed_round_trips": target_round_trips,
+                    "committed_rows": 2 * target_round_trips,
+                }
+            }
+            if (_actual_sample_progress(out_dir, sample, methods) != expected
+                    or outcome.get("checkpoint_progress") != expected):
+                raise RuntimeError(
+                    f"finished active worker evidence is incomplete: {sample}")
+            returncode = 0
+            evidence = {
+                "terminal_metadata_status": status,
+                "worker_lease_free": True,
+                "exit_code_source": "deterministic_runner_terminal_status",
+            }
+        elif status == "infrastructure_incomplete":
+            returncode = 1
+            evidence = _verified_infrastructure_incomplete(
+                out_dir, sample, item)
+            evidence["exit_code_source"] = (
+                "deterministic_runner_terminal_status")
+        else:
+            returncode = 1
+            evidence = _verified_evaluator_incomplete(
+                out_dir, sample, item)
+            evidence["exit_code_source"] = (
+                "deterministic_runner_terminal_status")
+        expected_exit = {
+            "sample": sample,
+            "pid": launch["pid"],
+            "returncode": returncode,
+            "disposition": status,
+        }
+        existing_exit = exits.get(worker_id)
+        if existing_exit is not None:
+            if any(existing_exit.get(key) != value
+                   for key, value in expected_exit.items()):
+                raise RuntimeError(
+                    f"terminal active worker exit drift: {sample}")
+        else:
+            pending_exit_rows.append({
+                "event": "worker_exit",
+                "sample": sample,
+                "key_label": launch.get("key_label"),
+                "worker_launch_id": worker_id,
+                "pid": launch["pid"],
+                "returncode": returncode,
+                "disposition": status,
+                "created_at": datetime.now().astimezone().isoformat(
+                    timespec="seconds"),
+                "evidence": evidence,
+                "exit_code_observed": False,
+            })
+        reconciled.append({
+            "sample": sample,
+            "worker_launch_id": worker_id,
+            "worker_pid": launch["pid"],
+            "status": status,
+        })
+    for row in pending_exit_rows:
+        append_jsonl_locked(dispatch_path, row)
+    _write_active_worker_set(out_dir, manifest, [])
+    return sorted(reconciled, key=lambda item: item["sample"])
+
+
+def _authorize_operator_pause(
+        out_dir, manifest, stop, stop_path, auth_path, prior_authorization,
+        reconciled_workers):
+    if (prior_authorization is None
+            or prior_authorization.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or prior_authorization.get("recovery_kind")
+            != LEDGER_LOCK_RECOVERY_KIND
+            or stop.get("condition")
+            != "operator_directed_dispatcher_pause"):
+        raise RuntimeError("operator pause recovery boundary is invalid")
+    current_commit, current_tree = _git_identity()
+    if current_tree != "clean":
+        raise RuntimeError("operator pause recovery requires a clean Git tree")
+    if current_commit == prior_authorization.get("recovery_git_commit"):
+        raise RuntimeError("operator pause recovery code commit has not changed")
+    if (_sha256_file(os.path.join(out_dir, "dispatch_manifest.json"))
+            != prior_authorization.get("dispatch_manifest_sha256")
+            or manifest.get("run_git_commit")
+            != prior_authorization.get("prior_git_commit")
+            or manifest.get("code_fingerprint")
+            != prior_authorization.get("prior_code_fingerprint")):
+        raise RuntimeError("prior recovery authorization identity has drifted")
+
+    prior_commit = manifest["run_git_commit"]
+    prior_fingerprint = manifest["code_fingerprint"]
+    recovery_fingerprint = code_fingerprint()
+    fingerprint_changes = sorted(
+        key for key in set(prior_fingerprint) | set(recovery_fingerprint)
+        if prior_fingerprint.get(key) != recovery_fingerprint.get(key)
+    )
+    changed_paths = _git_changed_paths(prior_commit, current_commit)
+    required_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/paired_campaign_dispatch.py",
+        "HP_V8/src/run_meta.py",
+        "HP_V8/src/test_model_openai.py",
+    }
+    allowed_paths = required_paths | {
+        "HP_V8/VERSION.md", "docs/active_log.md",
+    }
+    if (fingerprint_changes != ["run_meta.py"]
+            or not required_paths <= set(changed_paths)
+            or not set(changed_paths) <= allowed_paths):
+        raise RuntimeError("operator pause recovery commit scope is invalid")
+
+    authorization_id = (
+        "dispatcher-pause-" + datetime.now().astimezone().strftime(
+            "%Y%m%dT%H%M%S%z") + "-" + uuid.uuid4().hex[:8]
+    )
+    history_dir = os.path.join(
+        out_dir, "recovery_history", authorization_id)
+    os.makedirs(history_dir, exist_ok=False)
+    archived_stop = os.path.join(history_dir, "campaign_stop.json")
+    archived_authorization = os.path.join(
+        history_dir, "superseded_campaign_recovery_authorization.json")
+    os.replace(auth_path, archived_authorization)
+    os.replace(stop_path, archived_stop)
+
+    record = json.loads(json.dumps(prior_authorization))
+    record.update({
+        "authorization_id": authorization_id,
+        "created_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+        "authorization_basis": (
+            "explicit_user_resume_after_operator_directed_queue_optimization"
+        ),
+        "recovery_git_commit": current_commit,
+        "recovery_git_tree_state": "clean",
+        "recovery_code_fingerprint": recovery_fingerprint,
+        "changed_code_fingerprint_keys": fingerprint_changes,
+        "changed_tracked_paths": changed_paths,
+        "archived_stop_path": os.path.relpath(
+            archived_stop, out_dir).replace("\\", "/"),
+        "archived_stop_sha256": _sha256_file(archived_stop),
+        "superseded_authorization_path": os.path.relpath(
+            archived_authorization, out_dir).replace("\\", "/"),
+        "superseded_authorization_sha256": _sha256_file(
+            archived_authorization),
+        "operator_pause_reconciled_workers": reconciled_workers,
+        "committed_results_modified": False,
+        "checkpoint_rows_modified": False,
+        "provider_post_replay_scope": "uncommitted_steps_only",
+    })
+    write_json_atomic(auth_path, record)
+    campaign_recovery_incident_evidence.cache_clear()
+    verified = read_campaign_recovery_authorization(out_dir)
+    append_jsonl_locked(os.path.join(out_dir, "dispatch_log.jsonl"), {
+        "event": "user_authorized_dispatcher_pause_recovery",
+        "created_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+        "campaign_recovery_authorization_id": authorization_id,
+        "campaign_recovery_authorization_sha256": verified[
+            "authorization_sha256"],
+        "reconciled_worker_count": len(reconciled_workers),
+    })
+    return {
+        "authorization_id": authorization_id,
+        "authorization_sha256": verified["authorization_sha256"],
+        "reconciled_workers": len(reconciled_workers),
+        "incident_api_rows": len(record.get("incident_api_rows") or []),
+        "incident_attempt_rows": len(
+            record.get("incident_attempt_rows") or []),
+    }
+
+
+def authorize(out_dir, *, operator_pause=False, operator_pause_reason=None):
     out_dir = os.path.abspath(out_dir)
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     stop_path = os.path.join(out_dir, "campaign_stop.json")
@@ -96,6 +378,32 @@ def authorize(out_dir):
             != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2):
         raise RuntimeError("cannot supersede a non-V2 recovery authorization")
     manifest = _read_json(manifest_path)
+    if operator_pause:
+        if os.path.exists(stop_path):
+            raise RuntimeError(
+                "operator pause recovery requires no pre-existing stop latch")
+        reconciled_workers = _reconcile_terminal_active_workers(
+            out_dir, manifest)
+        current_commit, current_tree, current_status = _git_identity_details()
+        if current_tree != "clean":
+            raise RuntimeError(
+                "operator pause recovery requires a clean Git tree")
+        stop = record_campaign_stop_condition(
+            out_dir, "operator_directed_dispatcher_pause",
+            reason=operator_pause_reason,
+            stopped_git_commit=current_commit,
+            stopped_git_tree_state=current_tree,
+            git_status_porcelain=current_status,
+            reconciled_worker_count=len(reconciled_workers),
+            reconciled_worker_launch_ids=[
+                item["worker_launch_id"] for item in reconciled_workers
+            ],
+            prior_recovery_authorization_id=(
+                prior_authorization or {}).get("authorization_id"),
+        )
+        return _authorize_operator_pause(
+            out_dir, manifest, stop, stop_path, auth_path,
+            prior_authorization, reconciled_workers)
     stop = _read_json(stop_path)
     if ((manifest.get("config") or {}).get("method_phases")
             != ["hybridpatch", "fullrewrite"]
@@ -441,10 +749,19 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out_dir", required=True)
     parser.add_argument("--confirm_workers_stopped", action="store_true")
+    parser.add_argument("--operator_dispatcher_pause", action="store_true")
+    parser.add_argument("--operator_pause_reason")
     args = parser.parse_args()
     if not args.confirm_workers_stopped:
         parser.error("--confirm_workers_stopped is required")
-    print(json.dumps(authorize(args.out_dir), sort_keys=True))
+    if args.operator_dispatcher_pause and not args.operator_pause_reason:
+        parser.error(
+            "--operator_dispatcher_pause requires --operator_pause_reason")
+    print(json.dumps(authorize(
+        args.out_dir,
+        operator_pause=args.operator_dispatcher_pause,
+        operator_pause_reason=args.operator_pause_reason,
+    ), sort_keys=True))
 
 
 if __name__ == "__main__":

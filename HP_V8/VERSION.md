@@ -655,5 +655,8 @@ fail closed，原子替换和 metadata 锁语义不变。最新零 API dispatche
 同 Key 的空闲槽长期不能补位。调度器现先收集该 poll 的全部退出 worker，只写一次 active set，
 再用一个 `required_complete_samples` 集合做一次完整性审计；审计通过后下一轮立即按 Key 的空槽
 补位。全局完整性检查、样本完成条件、preservation 停止条件和每 Key 并发上限均不变。新增测试
-固定一次 poll 内多个完成样本只触发一次合并审计；完整零 API 回归为 executor 72/72、
-dispatcher/transport/runner 129/129、analysis 5/5、splitters byte-exact PASS。
+固定一次 poll 内多个完成样本只触发一次合并审计。若 dispatcher 在 worker 已终态后被用户暂停，
+恢复工具按 terminal metadata、sample outcome、checkpoint 与空闲 worker lease 共同复核，补写真实
+worker-exit provenance，并把完整 `git status --porcelain`、旧授权 SHA 和新 clean commit 固定到
+同一恢复链；不重写结果、checkpoint、API 或 attempt ledger。完整零 API 回归为 executor 72/72、
+dispatcher/transport/runner 130/130、analysis 5/5、tools 67/67、splitters byte-exact PASS。
