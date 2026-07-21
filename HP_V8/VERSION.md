@@ -659,4 +659,6 @@ fail closed，原子替换和 metadata 锁语义不变。最新零 API dispatche
 恢复工具按 terminal metadata、sample outcome、checkpoint 与空闲 worker lease 共同复核，补写真实
 worker-exit provenance，并把完整 `git status --porcelain`、旧授权 SHA 和新 clean commit 固定到
 同一恢复链；不重写结果、checkpoint、API 或 attempt ledger。完整零 API 回归为 executor 72/72、
-dispatcher/transport/runner 130/130、analysis 5/5、tools 67/67、splitters byte-exact PASS。
+dispatcher/transport/runner 131/131、analysis 5/5、tools 67/67、splitters byte-exact PASS。旧
+preauthorization worker 证据在 operator-pause supersession 中继续按原归档验证，不再错误要求
+最新 operator stop 重复旧 stop 的 error 文本。

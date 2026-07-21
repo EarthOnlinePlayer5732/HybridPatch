@@ -2597,6 +2597,16 @@ def _load_recovery_authorization_chain(out_dir, path, record):
     return history
 
 
+def _preauthorization_stop_evidence_matches(
+        archived_stop, preauthorization_worker_ids, expected_stop_errors):
+    """Keep old worker evidence valid across an operator pause supersession."""
+    if (archived_stop.get("condition")
+            == "operator_directed_dispatcher_pause"):
+        return True
+    return bool(preauthorization_worker_ids) == (
+        archived_stop.get("error") in expected_stop_errors)
+
+
 def read_campaign_recovery_authorization(out_dir):
     """Validate a narrow, append-only campaign recovery boundary."""
     out_dir = os.path.abspath(out_dir)
@@ -2926,9 +2936,10 @@ def read_campaign_recovery_authorization(out_dir):
                 f"worker {launch.get('sample')} exited before authorization "
                 f"with {exit_row.get('returncode')}"
             )
-        preauthorization_stop = archived_stop.get("error") in expected_stop_errors
         if (metadata_workers != set(worker_ids) - preauthorization_set
-                or bool(preauthorization_set) != preauthorization_stop):
+                or not _preauthorization_stop_evidence_matches(
+                    archived_stop, preauthorization_set,
+                    expected_stop_errors)):
             raise RuntimeError(
                 "campaign recovery preauthorization stop evidence mismatch")
 

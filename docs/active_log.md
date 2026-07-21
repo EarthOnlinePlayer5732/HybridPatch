@@ -871,3 +871,5 @@
   terminal metadata/outcome/checkpoint and released lease for every stale active registration, records the
   full `git status --porcelain`, and SHA-links the existing authorization chain to the new clean commit.
   It does not edit result, checkpoint, API, attempt or raw-response evidence.
+  The superseding validator keeps the old preauthorization cohort bound to its original archived stop;
+  the newer operator-pause stop is not required to duplicate that historical error string.

@@ -8168,6 +8168,26 @@ class IntegrationContractTests(unittest.TestCase):
             frozenset({"worker-preauth"}),
         )
 
+    def test_operator_pause_preserves_prior_preauthorization_evidence(self):
+        workers = {"worker-preauth"}
+        expected_errors = {
+            "worker sample exited before authorization with 1"}
+        self.assertTrue(run_meta._preauthorization_stop_evidence_matches(
+            {"condition": "operator_directed_dispatcher_pause"},
+            workers, expected_errors))
+        self.assertTrue(run_meta._preauthorization_stop_evidence_matches(
+            {
+                "condition": "dispatcher_integrity_failure",
+                "error": "worker sample exited before authorization with 1",
+            },
+            workers, expected_errors))
+        self.assertFalse(run_meta._preauthorization_stop_evidence_matches(
+            {
+                "condition": "dispatcher_integrity_failure",
+                "error": "unrelated",
+            },
+            workers, expected_errors))
+
     def test_git_identity_ignores_evaluator_tmp_but_not_other_untracked_files(self):
         root_ignore = pathlib.Path(ROOT).parent / ".gitignore"
         ignore_text = root_ignore.read_text(encoding="utf-8")
