@@ -337,6 +337,16 @@ def _reconcile_terminal_active_workers(
 def _extend_operator_interrupted_attempt_evidence(
         out_dir, prior_authorization, reconciled_workers):
     """Hash-bind open attempts for explicitly interrupted operator workers."""
+    if not reconciled_workers:
+        return {
+            "recovered_worker_launch_ids": list(
+                (prior_authorization or {}).get(
+                    "recovered_worker_launch_ids") or []),
+            "incident_attempt_rows": list(
+                (prior_authorization or {}).get(
+                    "incident_attempt_rows") or []),
+            "operator_interrupted_attempt_row_count": 0,
+        }
     interrupted = {}
     for item in list(
             (prior_authorization or {}).get(
@@ -574,9 +584,355 @@ def _authorize_operator_pause(
     }
 
 
+def _authorize_provider_access_retry(
+        out_dir, manifest, stop, stop_path, auth_path, prior_authorization):
+    """Bind one stopped FR wave and authorize one exact 401 resend each."""
+    if (prior_authorization is None
+            or prior_authorization.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or prior_authorization.get("recovery_kind")
+            != LEDGER_LOCK_RECOVERY_KIND
+            or stop.get("condition") != "dispatcher_integrity_failure"
+            or not str(stop.get("error") or "").endswith((
+                "infrastructure outcome provenance mismatch",
+                "infrastructure attempt lineage mismatch",
+                "API attempt ledger contains an unclosed HTTP attempt",
+            ))):
+        raise RuntimeError("provider-access recovery boundary is invalid")
+    active = _read_json(os.path.join(out_dir, "active_worker_set.json"))
+    if active.get("workers") != {}:
+        raise RuntimeError("workers are still active")
+
+    current_commit, current_tree = _git_identity()
+    if current_tree != "clean":
+        raise RuntimeError("provider-access recovery requires a clean Git tree")
+    if current_commit == prior_authorization.get("recovery_git_commit"):
+        raise RuntimeError("provider-access recovery code commit has not changed")
+    manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+    if (_sha256_file(manifest_path)
+            != prior_authorization.get("dispatch_manifest_sha256")
+            or manifest.get("run_git_commit")
+            != prior_authorization.get("prior_git_commit")
+            or manifest.get("code_fingerprint")
+            != prior_authorization.get("prior_code_fingerprint")):
+        raise RuntimeError("prior recovery authorization identity has drifted")
+
+    prior_commit = manifest["run_git_commit"]
+    prior_fingerprint = manifest["code_fingerprint"]
+    recovery_fingerprint = code_fingerprint()
+    fingerprint_changes = sorted(
+        key for key in set(prior_fingerprint) | set(recovery_fingerprint)
+        if prior_fingerprint.get(key) != recovery_fingerprint.get(key)
+    )
+    changed_paths = _git_changed_paths(prior_commit, current_commit)
+    required_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/paired_campaign_dispatch.py",
+        "HP_V8/src/run_meta.py",
+        "HP_V8/src/test_model_openai.py",
+    }
+    allowed_paths = required_paths | {
+        "HP_V8/VERSION.md", "docs/active_log.md",
+    }
+    if (fingerprint_changes != ["run_meta.py"]
+            or not required_paths <= set(changed_paths)
+            or not set(changed_paths) <= allowed_paths):
+        raise RuntimeError("provider-access recovery commit scope is invalid")
+
+    dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+    dispatch_rows = _read_jsonl(dispatch_path)
+    phase_starts = [
+        index for index, row in enumerate(dispatch_rows)
+        if row.get("event") == "method_phase_start"
+        and row.get("method_phase") == "fullrewrite"
+    ]
+    if not phase_starts:
+        raise RuntimeError("provider-access recovery lacks an FR phase start")
+    cohort = dispatch_rows[phase_starts[-1] + 1:]
+    launches = {
+        row.get("worker_launch_id"): row for row in cohort
+        if row.get("event") == "launch"
+        and row.get("method_phase") == "fullrewrite"
+    }
+    exits = {
+        row.get("worker_launch_id"): row for row in cohort
+        if row.get("event") == "worker_exit"
+    }
+    if (not launches or len(launches) != sum(
+            row.get("event") == "launch"
+            and row.get("method_phase") == "fullrewrite"
+            for row in cohort)):
+        raise RuntimeError("provider-access launch cohort is invalid")
+    if set(exits) != set(launches):
+        raise RuntimeError("provider-access exit cohort is incomplete")
+    incomplete_workers = {
+        worker_id: launch for worker_id, launch in launches.items()
+        if exits[worker_id].get("disposition") != "finished"
+    }
+    if not incomplete_workers:
+        raise RuntimeError("provider-access recovery has no incomplete workers")
+    samples = [row.get("sample") for row in incomplete_workers.values()]
+    if (any(not isinstance(sample, str) or not sample for sample in samples)
+            or len(samples) != len(set(samples))):
+        raise RuntimeError("provider-access sample cohort is invalid")
+    _assert_worker_leases_free(out_dir, samples)
+
+    metadata_by_worker = {}
+    for row in read_run_metadata_snapshot(out_dir):
+        worker_id = row.get("worker_launch_id")
+        if worker_id in incomplete_workers:
+            if worker_id in metadata_by_worker:
+                raise RuntimeError(
+                    "provider-access worker metadata is duplicated")
+            metadata_by_worker[worker_id] = row
+    if set(metadata_by_worker) != set(incomplete_workers):
+        raise RuntimeError("provider-access worker metadata is incomplete")
+    for worker_id, launch in incomplete_workers.items():
+        metadata = metadata_by_worker[worker_id]
+        exit_row = exits[worker_id]
+        if (metadata.get("samples") != [launch.get("sample")]
+                or metadata.get("methods") != ["fullrewrite"]
+                or metadata.get("method_phase") != "fullrewrite"
+                or metadata.get("status") not in {
+                    "failed", "interrupted_by_dispatcher"
+                }
+                or exit_row.get("sample") != launch.get("sample")
+                or exit_row.get("pid") != launch.get("pid")
+                or exit_row.get("returncode") == 0
+                or exit_row.get("disposition") != "campaign_fatal"):
+            raise RuntimeError(
+                "provider-access worker terminal evidence is invalid")
+
+    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    attempt_rows = _read_jsonl(os.path.join(
+        out_dir, "api_attempt_ledger.jsonl"))
+    provider_retries = []
+    interrupted_attempt_entries = []
+    existing_attempt_numbers = {
+        entry.get("row_number") for entry in
+        prior_authorization.get("incident_attempt_rows") or []
+    }
+    for worker_id, launch in incomplete_workers.items():
+        sample = launch["sample"]
+        metadata = metadata_by_worker[worker_id]
+        access_rows = [
+            (number, row) for number, row in enumerate(api_rows, 1)
+            if row.get("worker_launch_id") == worker_id
+            and row.get("sample") == sample
+            and row.get("method") == "fullrewrite"
+            and row.get("classification") == "provider/API failure"
+            and row.get("error_type") == "provider_access_denied"
+            and row.get("http_status") in {401, 403}
+            and row.get("provider_called") is True
+        ]
+        if access_rows:
+            if len(access_rows) != 1 or metadata.get("status") != "failed":
+                raise RuntimeError(
+                    "provider-access API failure is not unique")
+            api_number, api_row = access_rows[0]
+            parent_id = api_row.get("semantic_call_id")
+            semantic_root_id = api_row.get("semantic_root_id")
+            generation_index = api_row.get("generation_index")
+            request_fingerprint = api_row.get("request_fingerprint")
+            if (not isinstance(parent_id, str) or not parent_id
+                    or not isinstance(semantic_root_id, str)
+                    or not semantic_root_id
+                    or not isinstance(generation_index, int)
+                    or isinstance(generation_index, bool)
+                    or generation_index < 0
+                    or parent_id
+                    != f"{semantic_root_id}/g{generation_index:03d}"
+                    or not isinstance(request_fingerprint, str)
+                    or not request_fingerprint
+                    or not isinstance(
+                        api_row.get("response_slots_used"), int)
+                    or not 0 <= api_row.get("response_slots_used") < 2
+                    or api_row.get("transient_failure_count") != 0):
+                raise RuntimeError(
+                    "provider-access API lineage is invalid")
+            group = [
+                (number, row) for number, row in enumerate(attempt_rows, 1)
+                if row.get("worker_launch_id") == worker_id
+                and row.get("semantic_call_id") == parent_id
+            ]
+            events = [row.get("event") for _number, row in group]
+            attempt_end = [
+                row for _number, row in group
+                if row.get("event") == "attempt_end"
+            ]
+            call_failed = [
+                row for _number, row in group
+                if row.get("event") == "call_failed"
+            ]
+            if (events.count("semantic_request") != 1
+                    or events.count("attempt_start") < 1
+                    or len(attempt_end) < 1
+                    or events.count("attempt_end")
+                    != events.count("attempt_start")
+                    or len(call_failed) != 1
+                    or "response_committed" in events
+                    or attempt_end[-1].get("status") != "fatal_error"
+                    or attempt_end[-1].get("error_type")
+                    != "provider_access_denied"
+                    or attempt_end[-1].get(
+                        "generation_delta_seen") is not False
+                    or call_failed[0].get("status") != "provider_failure"
+                    or call_failed[0].get("error_type")
+                    != "provider_access_denied"):
+                raise RuntimeError(
+                    "provider-access attempt evidence is invalid")
+            root_attempt_indexes = [
+                row.get("attempt_index") for row in attempt_rows
+                if row.get("semantic_root_id") == semantic_root_id
+                and isinstance(row.get("attempt_index"), int)
+                and not isinstance(row.get("attempt_index"), bool)
+            ]
+            next_generation = generation_index + 1
+            provider_retries.append({
+                "sample": sample,
+                "prior_worker_launch_id": worker_id,
+                "prior_invocation_id": metadata.get("invocation_id"),
+                "parent_semantic_call_id": parent_id,
+                "semantic_root_id": semantic_root_id,
+                "semantic_call_id": (
+                    f"{semantic_root_id}/g{next_generation:03d}"
+                ),
+                "generation_index": next_generation,
+                "request_fingerprint": request_fingerprint,
+                "next_attempt_index": max(
+                    root_attempt_indexes, default=0) + 1,
+                "api_row": _incident_entry(
+                    api_number, api_row, "provider_access_denied"),
+                "attempt_rows": [
+                    _incident_entry(
+                        number, row, "provider_access_denied_retry")
+                    for number, row in group
+                ],
+            })
+            continue
+
+        if metadata.get("status") != "interrupted_by_dispatcher":
+            raise RuntimeError(
+                "non-401 worker is not a dispatcher interruption")
+        groups = {}
+        for number, row in enumerate(attempt_rows, 1):
+            semantic_call_id = row.get("semantic_call_id")
+            if (row.get("worker_launch_id") == worker_id
+                    and isinstance(semantic_call_id, str)
+                    and semantic_call_id.startswith("fullrewrite/")):
+                groups.setdefault(semantic_call_id, []).append((number, row))
+        open_groups = []
+        for semantic_call_id, group in groups.items():
+            starts = sum(
+                row.get("event") == "attempt_start"
+                for _number, row in group)
+            ends = sum(
+                row.get("event") == "attempt_end"
+                for _number, row in group)
+            pre_provider = (
+                starts == 0 and ends == 0
+                and sum(row.get("event") == "semantic_request"
+                        for _number, row in group) == 1
+            )
+            if ((starts > ends or pre_provider)
+                    and not any(row.get("event") == "response_committed"
+                                for _number, row in group)):
+                open_groups.append((semantic_call_id, group))
+        if not open_groups:
+            raise RuntimeError(
+                "dispatcher-interrupted worker has no open attempt")
+        for semantic_call_id, group in open_groups:
+            digest = hashlib.sha256(
+                semantic_call_id.encode("utf-8")).hexdigest()[:24]
+            if os.path.exists(os.path.join(
+                    out_dir, "api_journal", f"{digest}.response.json")):
+                raise RuntimeError(
+                    "dispatcher-interrupted attempt has a response journal")
+            for number, row in group:
+                if number in existing_attempt_numbers:
+                    continue
+                interrupted_attempt_entries.append(_incident_entry(
+                    number, row, "dispatcher_interrupted_open_attempt"))
+                existing_attempt_numbers.add(number)
+
+    if not provider_retries:
+        raise RuntimeError("provider-access recovery has no 401 failures")
+    recovered_workers = list(
+        prior_authorization.get("recovered_worker_launch_ids") or [])
+    for worker_id in incomplete_workers:
+        if worker_id not in recovered_workers:
+            recovered_workers.append(worker_id)
+
+    authorization_id = (
+        "provider-access-" + datetime.now().astimezone().strftime(
+            "%Y%m%dT%H%M%S%z") + "-" + uuid.uuid4().hex[:8]
+    )
+    history_dir = os.path.join(
+        out_dir, "recovery_history", authorization_id)
+    os.makedirs(history_dir, exist_ok=False)
+    archived_stop = os.path.join(history_dir, "campaign_stop.json")
+    archived_authorization = os.path.join(
+        history_dir, "superseded_campaign_recovery_authorization.json")
+    os.replace(auth_path, archived_authorization)
+    os.replace(stop_path, archived_stop)
+
+    record = json.loads(json.dumps(prior_authorization))
+    record.update({
+        "authorization_id": authorization_id,
+        "created_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+        "authorization_basis": (
+            "explicit_user_retry_after_upstream_provider_access_denied"
+        ),
+        "recovery_git_commit": current_commit,
+        "recovery_git_tree_state": "clean",
+        "recovery_code_fingerprint": recovery_fingerprint,
+        "changed_code_fingerprint_keys": fingerprint_changes,
+        "changed_tracked_paths": changed_paths,
+        "archived_stop_path": os.path.relpath(
+            archived_stop, out_dir).replace("\\", "/"),
+        "archived_stop_sha256": _sha256_file(archived_stop),
+        "superseded_authorization_path": os.path.relpath(
+            archived_authorization, out_dir).replace("\\", "/"),
+        "superseded_authorization_sha256": _sha256_file(
+            archived_authorization),
+        "recovered_worker_launch_ids": sorted(recovered_workers),
+        "incident_attempt_rows": list(
+            prior_authorization.get("incident_attempt_rows") or [])
+            + interrupted_attempt_entries,
+        "provider_access_retry_authorizations": sorted(
+            provider_retries, key=lambda item: item["sample"]),
+        "provider_access_resume_samples": sorted(samples),
+        "committed_results_modified": False,
+        "checkpoint_rows_modified": False,
+        "provider_post_replay_scope": "uncommitted_steps_only",
+    })
+    write_json_atomic(auth_path, record)
+    campaign_recovery_incident_evidence.cache_clear()
+    verified = read_campaign_recovery_authorization(out_dir)
+    append_jsonl_locked(dispatch_path, {
+        "event": "user_authorized_provider_access_retry",
+        "created_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+        "campaign_recovery_authorization_id": authorization_id,
+        "campaign_recovery_authorization_sha256": verified[
+            "authorization_sha256"],
+        "provider_access_retry_count": len(provider_retries),
+        "dispatcher_interrupted_worker_count": (
+            len(incomplete_workers) - len(provider_retries)),
+    })
+    return {
+        "authorization_id": authorization_id,
+        "authorization_sha256": verified["authorization_sha256"],
+        "provider_access_retries": len(provider_retries),
+        "dispatcher_interrupted_workers": (
+            len(incomplete_workers) - len(provider_retries)),
+    }
+
+
 def authorize(
         out_dir, *, operator_pause=False, operator_pause_reason=None,
-        operator_interrupted_samples=None):
+        operator_interrupted_samples=None, provider_access_retry=False):
     out_dir = os.path.abspath(out_dir)
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     stop_path = os.path.join(out_dir, "campaign_stop.json")
@@ -590,6 +946,14 @@ def authorize(
             != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2):
         raise RuntimeError("cannot supersede a non-V2 recovery authorization")
     manifest = _read_json(manifest_path)
+    if provider_access_retry:
+        if operator_pause or operator_interrupted_samples:
+            raise RuntimeError(
+                "provider-access retry cannot be combined with operator pause")
+        stop = _read_json(stop_path)
+        return _authorize_provider_access_retry(
+            out_dir, manifest, stop, stop_path, auth_path,
+            prior_authorization)
     if operator_pause:
         if os.path.exists(stop_path):
             raise RuntimeError(
@@ -968,6 +1332,7 @@ def main():
     parser.add_argument("--operator_pause_reason")
     parser.add_argument(
         "--operator_interrupted_sample", action="append", default=[])
+    parser.add_argument("--provider_access_retry", action="store_true")
     args = parser.parse_args()
     if not args.confirm_workers_stopped:
         parser.error("--confirm_workers_stopped is required")
@@ -983,6 +1348,7 @@ def main():
         operator_pause=args.operator_dispatcher_pause,
         operator_pause_reason=args.operator_pause_reason,
         operator_interrupted_samples=args.operator_interrupted_sample,
+        provider_access_retry=args.provider_access_retry,
     ), sort_keys=True))
 
 

@@ -317,7 +317,8 @@ def _validate_resume_authorization(authorization):
 
 
 def _validated_attempt_lineage(
-        attempt_rows, semantic_root_id, *, allow_open_attempt=False):
+        attempt_rows, semantic_root_id, *, allow_open_attempt=False,
+        authorized_provider_access_parents=frozenset()):
     """Validate one root's exact generations and global HTTP attempt order."""
     groups = {}
     prior_generation = None
@@ -399,11 +400,23 @@ def _validated_attempt_lineage(
             committed_seen = True
         elif generation_index < generations[-1]:
             terminal = state.get("terminal_failure") or {}
-            if (terminal.get("status") != "provider_failure"
-                    or not state.get("call_failed")
-                    or state.get("last_attempt_status")
-                    != "retryable_error"
-                    or not state.get("retry_budget_exhausted")):
+            ordinary_exhaustion = (
+                terminal.get("status") == "provider_failure"
+                and state.get("call_failed")
+                and state.get("last_attempt_status") == "retryable_error"
+                and state.get("retry_budget_exhausted")
+            )
+            authorized_access_denial = (
+                exact_id in authorized_provider_access_parents
+                and terminal.get("status") == "provider_failure"
+                and terminal.get("error_type") == "provider_access_denied"
+                and state.get("call_failed")
+                and state.get("last_attempt_status") == "fatal_error"
+                and isinstance(state.get("response_slots_used"), int)
+                and 0 <= state.get("response_slots_used") < 2
+                and state.get("transient_failure_count") == 0
+            )
+            if not (ordinary_exhaustion or authorized_access_denial):
                 raise RuntimeError(
                     "semantic lineage advances from a non-exhausted parent"
                 )
@@ -2290,9 +2303,27 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
             or http_attempts_used + 1 != next_attempt_index):
         raise RuntimeError(
             f"worker {sample} infrastructure outcome budget mismatch")
+    recovery_incidents = campaign_recovery_incident_evidence(out_dir)
+    provider_access_authorizations = recovery_incidents[
+        "provider_access_retry_authorizations"
+    ]
+    provider_access_retry = next((
+        authorization for authorization
+        in provider_access_authorizations.values()
+        if authorization.get("semantic_call_id") == semantic_call_id
+        and authorization.get("sample") == sample
+    ), None)
     exhausted = (
         response_slots == api_row.get("max_response_slots") == 2
         or transient_failures == api_row.get("max_transient_failures") == 3
+        or (
+            provider_access_retry is not None
+            and outcome.get("error_type") == "provider_access_denied"
+            and api_row.get("error_type") == "provider_access_denied"
+            and isinstance(response_slots, int)
+            and 0 <= response_slots < 2
+            and transient_failures == 0
+        )
     )
     if not exhausted:
         raise RuntimeError(
@@ -2300,7 +2331,13 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
 
     ledger = _read_jsonl(os.path.join(
         out_dir, "api_attempt_ledger.jsonl"))
-    lineage = _validated_attempt_lineage(ledger, semantic_root_id)
+    lineage = _validated_attempt_lineage(
+        ledger, semantic_root_id,
+        authorized_provider_access_parents=frozenset(
+            authorization["parent_semantic_call_id"]
+            for authorization in provider_access_authorizations.values()
+        ),
+    )
     if (lineage["request_fingerprint"] != request_fingerprint
             or lineage["next_attempt_index"] != next_attempt_index
             or generation_index != max(lineage["generations"])
@@ -2524,9 +2561,17 @@ def _select_invocation_assignments(
             raise RuntimeError(
                 "new campaign directory already contains sample outcomes")
         return list(assignments), {}
+    recovery_incidents = campaign_recovery_incident_evidence(out_dir)
+    provider_access_retries = recovery_incidents[
+        "provider_access_retry_authorizations"
+    ]
     latest = _latest_sample_outcomes(
         out_dir, [item["sample"] for item in assignments],
         method_phase=method_phase)
+    # The authorization is bound to a newer failed worker than any stale
+    # retry-exhaustion outcome retained for the same sample.
+    for sample in recovery_incidents["provider_access_resume_samples"]:
+        latest.pop(sample, None)
     missing_assignments = [
         item for item in assignments if item["sample"] not in latest
     ]
@@ -2565,6 +2610,9 @@ def _select_invocation_assignments(
                 selected_item["interrupted_resume_evidence"] = (
                     interrupted_evidence[sample])
             selected.append(selected_item)
+            if sample in provider_access_retries:
+                authorizations[sample] = dict(
+                    provider_access_retries[sample])
             continue
         outcome = latest[sample]
         if outcome["status"] == "finished":
@@ -3713,8 +3761,14 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             )
             validated_attempt_lineages[semantic_root_id] = (
                 _validated_attempt_lineage(
-                    attempt_rows, semantic_root_id,
+                    root_rows, semantic_root_id,
                     allow_open_attempt=allow_open_attempt,
+                    authorized_provider_access_parents=frozenset(
+                        authorization["parent_semantic_call_id"]
+                        for authorization in recovery_incidents[
+                            "provider_access_retry_authorizations"
+                        ].values()
+                    ),
                 )
             )
         except RuntimeError as exc:
@@ -4704,6 +4758,12 @@ def _record_worker_exit(out_dir, running, sample, item, returncode,
         outcome = _latest_sample_outcomes(
             out_dir, method_phase=item.get("method_phase")
         ).get(sample) or {}
+        process = item.get("process")
+        worker_pid = process.pid if process is not None else item.get(
+            "worker_pid")
+        if (outcome.get("worker_launch_id") != item.get("worker_launch_id")
+                or outcome.get("worker_pid") != worker_pid):
+            outcome = {}
         status = outcome.get("status")
         if status == "infrastructure_incomplete":
             evidence = _verified_infrastructure_incomplete(

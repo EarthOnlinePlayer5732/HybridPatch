@@ -1156,6 +1156,11 @@ class ApiCallRecorder:
                 "attempt_row_hashes"
             ]
         )
+        self._provider_access_retry_authorizations = (
+            campaign_recovery_incident_evidence(out_dir)[
+                "provider_access_retry_authorizations"
+            ]
+        )
 
     def _consume_resume_authorization(self):
         parent = self._pending_resume_semantic_call_id
@@ -1470,11 +1475,32 @@ class ApiCallRecorder:
             elif generation < ordered_indexes[-1]:
                 state = item["state"]
                 terminal = state.get("terminal_failure") or {}
-                if (terminal.get("status") != "provider_failure"
-                        or not state.get("call_failed")
-                        or state.get("last_attempt_status")
-                        != "retryable_error"
-                        or not state.get("retry_budget_exhausted")):
+                semantic_call_id = item["context"]["semantic_call_id"]
+                provider_access_authorized = any(
+                    authorization.get("parent_semantic_call_id")
+                    == semantic_call_id
+                    for authorization in
+                    self._provider_access_retry_authorizations.values()
+                )
+                ordinary_exhaustion = (
+                    terminal.get("status") == "provider_failure"
+                    and state.get("call_failed")
+                    and state.get("last_attempt_status")
+                    == "retryable_error"
+                    and state.get("retry_budget_exhausted")
+                )
+                authorized_access_denial = (
+                    provider_access_authorized
+                    and terminal.get("status") == "provider_failure"
+                    and terminal.get("error_type")
+                    == "provider_access_denied"
+                    and state.get("call_failed")
+                    and state.get("last_attempt_status") == "fatal_error"
+                    and isinstance(state.get("response_slots_used"), int)
+                    and 0 <= state.get("response_slots_used") < 2
+                    and state.get("transient_failure_count") == 0
+                )
+                if not (ordinary_exhaustion or authorized_access_denial):
                     raise RuntimeError(
                         "semantic lineage advances from a non-exhausted parent"
                     )
@@ -1984,7 +2010,40 @@ class ApiCallRecorder:
                             parent_fingerprints = (
                                 parent_state.get("request_fingerprints") or []
                             )
-                            parent_failure = parent_state.get("terminal_failure")
+                            parent_failure = parent_state.get(
+                                "terminal_failure")
+                            provider_access_authorization = next((
+                                item for item in
+                                self._provider_access_retry_authorizations.values()
+                                if item.get("parent_semantic_call_id")
+                                == resume_semantic_id
+                            ), None)
+                            provider_access_resume = bool(
+                                provider_access_authorization
+                                and provider_access_authorization.get(
+                                    "semantic_call_id")
+                                == f"{semantic_root_id}/g{authorized_generation:03d}"
+                                and provider_access_authorization.get(
+                                    "request_fingerprint")
+                                == request_fingerprint
+                                and provider_access_authorization.get(
+                                    "next_attempt_index")
+                                == authorized_next_attempt
+                                and parent_failure
+                                and parent_failure.get("status")
+                                == "provider_failure"
+                                and parent_failure.get("error_type")
+                                == "provider_access_denied"
+                                and parent_state.get("call_failed")
+                                and parent_state.get("last_attempt_status")
+                                == "fatal_error"
+                                and isinstance(parent_state.get(
+                                    "response_slots_used"), int)
+                                and 0 <= parent_state.get(
+                                    "response_slots_used") < 2
+                                and parent_state.get(
+                                    "transient_failure_count") == 0
+                            )
                             if parent_fingerprints != [request_fingerprint]:
                                 transport_preflight_error = transport_preflight_error or RuntimeError(
                                     "infrastructure resume parent prompt or "
@@ -1999,11 +2058,13 @@ class ApiCallRecorder:
                                     "only a provider/API infrastructure failure "
                                     "is resumable"
                                 )
-                            elif (not parent_state.get("call_failed")
-                                  or parent_state.get("last_attempt_status")
-                                  != "retryable_error"
-                                  or not parent_state.get(
-                                      "retry_budget_exhausted")):
+                            elif (not provider_access_resume
+                                  and (not parent_state.get("call_failed")
+                                       or parent_state.get(
+                                           "last_attempt_status")
+                                       != "retryable_error"
+                                       or not parent_state.get(
+                                           "retry_budget_exhausted"))):
                                 transport_preflight_error = transport_preflight_error or RuntimeError(
                                     "infrastructure resume requires an exhausted "
                                     "transport budget"
@@ -2241,7 +2302,18 @@ class ApiCallRecorder:
             self._write_record(record)
             infrastructure_incomplete = (
                 classification == "provider/API failure"
-                and _is_transport_retry_exhaustion(record, exc)
+                and (
+                    _is_transport_retry_exhaustion(record, exc)
+                    or (
+                        record.get("error_type")
+                        == "provider_access_denied"
+                        and semantic_context.get("parent_semantic_call_id")
+                        in {
+                            item.get("parent_semantic_call_id")
+                            for item in self._provider_access_retry_authorizations.values()
+                        }
+                    )
+                )
             )
             try:
                 setattr(exc, "_anchorpatch_api_recorded", True)
@@ -2601,7 +2673,12 @@ def _preauthorization_stop_evidence_matches(
         archived_stop, preauthorization_worker_ids, expected_stop_errors):
     """Keep old worker evidence valid across an operator pause supersession."""
     if (archived_stop.get("condition")
-            == "operator_directed_dispatcher_pause"):
+            == "operator_directed_dispatcher_pause"
+            or str(archived_stop.get("error") or "").endswith((
+                "infrastructure outcome provenance mismatch",
+                "infrastructure attempt lineage mismatch",
+                "API attempt ledger contains an unclosed HTTP attempt",
+            ))):
         return True
     return bool(preauthorization_worker_ids) == (
         archived_stop.get("error") in expected_stop_errors)
@@ -2710,6 +2787,21 @@ def read_campaign_recovery_authorization(out_dir):
             and isinstance(
                 record.get("operator_pause_reconciled_workers"), list)
         )
+        provider_access_retry_recovery = (
+            archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition")
+            == "dispatcher_integrity_failure"
+            and str(archived_stop.get("error") or "").endswith((
+                "infrastructure outcome provenance mismatch",
+                "infrastructure attempt lineage mismatch",
+                "API attempt ledger contains an unclosed HTTP attempt",
+            ))
+            and isinstance(record.get("superseded_authorization_path"), str)
+            and bool(record.get("superseded_authorization_path"))
+            and isinstance(
+                record.get("provider_access_retry_authorizations"), list)
+            and bool(record.get("provider_access_retry_authorizations"))
+        )
         stop_valid = (
             (
                 archived_stop.get("schema") == STOP_CONDITION_SCHEMA
@@ -2720,6 +2812,7 @@ def read_campaign_recovery_authorization(out_dir):
                      or superseding_lock_recovery)
             )
             or operator_pause_recovery
+            or provider_access_retry_recovery
         )
     if not stop_valid:
         raise RuntimeError("campaign recovery stop is not authorized")
@@ -2882,6 +2975,152 @@ def read_campaign_recovery_authorization(out_dir):
                            for row in authorized_group)):
                 raise RuntimeError(
                     "campaign recovery interrupted attempt evidence is incomplete")
+        provider_access_retries = record.get(
+            "provider_access_retry_authorizations", [])
+        provider_access_resume_samples = record.get(
+            "provider_access_resume_samples")
+        if (not isinstance(provider_access_resume_samples, list)
+                or not provider_access_resume_samples
+                or len(provider_access_resume_samples)
+                != len(set(provider_access_resume_samples))
+                or any(not isinstance(item, str) or not item
+                       for item in provider_access_resume_samples)):
+            raise RuntimeError(
+                "campaign provider-access resume sample scope is invalid")
+        retry_samples = set()
+        retry_workers = set()
+        retry_parents = set()
+        api_rows_all = _read_jsonl_records_with_retry(
+            os.path.join(out_dir, "api_calls.jsonl"))
+        attempt_rows_all = _read_jsonl_records_with_retry(
+            os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+        for retry in provider_access_retries:
+            if not isinstance(retry, dict):
+                raise RuntimeError(
+                    "campaign provider-access retry authorization is invalid")
+            sample = retry.get("sample")
+            worker_id = retry.get("prior_worker_launch_id")
+            parent_id = retry.get("parent_semantic_call_id")
+            semantic_root_id = retry.get("semantic_root_id")
+            generation_index = retry.get("generation_index")
+            api_entry = retry.get("api_row")
+            attempt_entries = retry.get("attempt_rows")
+            if (not isinstance(sample, str) or not sample
+                    or sample in retry_samples
+                    or not isinstance(worker_id, str) or not worker_id
+                    or worker_id in retry_workers
+                    or worker_id not in worker_ids
+                    or not isinstance(parent_id, str) or not parent_id
+                    or parent_id in retry_parents
+                    or not isinstance(semantic_root_id, str)
+                    or not semantic_root_id
+                    or not isinstance(generation_index, int)
+                    or isinstance(generation_index, bool)
+                    or generation_index < 1
+                    or retry.get("semantic_call_id") != (
+                        f"{semantic_root_id}/g{generation_index:03d}")
+                    or not isinstance(retry.get("request_fingerprint"), str)
+                    or not retry.get("request_fingerprint")
+                    or not isinstance(retry.get("next_attempt_index"), int)
+                    or isinstance(retry.get("next_attempt_index"), bool)
+                    or retry.get("next_attempt_index") < 2
+                    or not isinstance(api_entry, dict)
+                    or not isinstance(attempt_entries, list)
+                    or not attempt_entries):
+                raise RuntimeError(
+                    "campaign provider-access retry authorization is invalid")
+            parent_match = re.fullmatch(r"(.+)/g([0-9]{3,})", parent_id)
+            if (parent_match is None
+                    or parent_match.group(1) != semantic_root_id
+                    or int(parent_match.group(2)) + 1 != generation_index):
+                raise RuntimeError(
+                    "campaign provider-access retry lineage is invalid")
+
+            def _bound_row(rows, entry, label):
+                number = entry.get("row_number")
+                digest = entry.get("canonical_sha256")
+                if (not isinstance(number, int)
+                        or isinstance(number, bool)
+                        or not 1 <= number <= len(rows)
+                        or not isinstance(digest, str)
+                        or digest != _canonical_record_sha256(
+                            rows[number - 1])):
+                    raise RuntimeError(
+                        f"campaign provider-access {label} evidence mismatch")
+                return rows[number - 1]
+
+            api_row = _bound_row(api_rows_all, api_entry, "API")
+            bound_attempts = [
+                _bound_row(attempt_rows_all, entry, "attempt")
+                for entry in attempt_entries
+            ]
+            if (api_row.get("sample") != sample
+                    or api_row.get("worker_launch_id") != worker_id
+                    or api_row.get("method") != "fullrewrite"
+                    or api_row.get("semantic_call_id") != parent_id
+                    or api_row.get("semantic_root_id") != semantic_root_id
+                    or api_row.get("generation_index")
+                    != generation_index - 1
+                    or api_row.get("request_fingerprint")
+                    != retry.get("request_fingerprint")
+                    or api_row.get("classification")
+                    != "provider/API failure"
+                    or api_row.get("error_type")
+                    != "provider_access_denied"
+                    or api_row.get("http_status") not in {401, 403}
+                    or api_row.get("provider_called") is not True
+                    or not isinstance(
+                        api_row.get("response_slots_used"), int)
+                    or not 0 <= api_row.get("response_slots_used") < 2
+                    or api_row.get("transient_failure_count") != 0):
+                raise RuntimeError(
+                    "campaign provider-access API evidence is invalid")
+            if any(
+                    row.get("worker_launch_id") != worker_id
+                    or row.get("semantic_call_id") != parent_id
+                    or row.get("semantic_root_id") != semantic_root_id
+                    for row in bound_attempts):
+                raise RuntimeError(
+                    "campaign provider-access attempt scope is invalid")
+            events = [row.get("event") for row in bound_attempts]
+            attempt_end = [
+                row for row in bound_attempts
+                if row.get("event") == "attempt_end"
+            ]
+            call_failed = [
+                row for row in bound_attempts
+                if row.get("event") == "call_failed"
+            ]
+            if (events.count("semantic_request") != 1
+                    or events.count("attempt_start") < 1
+                    or len(attempt_end) < 1
+                    or events.count("attempt_end")
+                    != events.count("attempt_start")
+                    or len(call_failed) != 1
+                    or "response_committed" in events
+                    or attempt_end[-1].get("status") != "fatal_error"
+                    or attempt_end[-1].get("error_type")
+                    != "provider_access_denied"
+                    or attempt_end[-1].get(
+                        "generation_delta_seen") is not False
+                    or call_failed[0].get("status") != "provider_failure"
+                    or call_failed[0].get("error_type")
+                    != "provider_access_denied"):
+                raise RuntimeError(
+                    "campaign provider-access terminal evidence is invalid")
+            root_attempt_indexes = [
+                row.get("attempt_index") for row in attempt_rows_all
+                if row.get("semantic_root_id") == semantic_root_id
+                and isinstance(row.get("attempt_index"), int)
+                and not isinstance(row.get("attempt_index"), bool)
+            ]
+            if retry.get("next_attempt_index") != (
+                    max(root_attempt_indexes, default=0) + 1):
+                raise RuntimeError(
+                    "campaign provider-access next attempt is invalid")
+            retry_samples.add(sample)
+            retry_workers.add(worker_id)
+            retry_parents.add(parent_id)
         dispatch_rows = _read_jsonl_records_with_retry(
             os.path.join(out_dir, "dispatch_log.jsonl"))
         launches = {
@@ -2980,8 +3219,15 @@ def campaign_recovery_incident_evidence(out_dir):
             "attempt_row_hashes": frozenset(),
             "worker_launch_ids": frozenset(),
             "preauthorization_worker_launch_ids": frozenset(),
+            "provider_access_retry_authorizations": {},
+            "provider_access_resume_samples": frozenset(),
             "authorization_id": None,
         }
+    provider_access_retries = {
+        item["sample"]: dict(item)
+        for item in authorization.get(
+            "provider_access_retry_authorizations", [])
+    }
     return {
         "api_row_hashes": frozenset({
             item["canonical_sha256"]
@@ -2995,6 +3241,9 @@ def campaign_recovery_incident_evidence(out_dir):
             authorization["recovered_worker_launch_ids"]),
         "preauthorization_worker_launch_ids": frozenset(
             authorization.get("preauthorization_worker_launch_ids", [])),
+        "provider_access_retry_authorizations": provider_access_retries,
+        "provider_access_resume_samples": frozenset(
+            authorization.get("provider_access_resume_samples") or []),
         "authorization_id": authorization["authorization_id"],
     }
 
