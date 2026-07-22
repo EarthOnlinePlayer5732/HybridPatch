@@ -5,6 +5,10 @@
 __pycache__/
 *.pyc
 *.pyo
+.cache/hybridpatch/
+
+# Domain evaluators create short-lived worktrees beside HP version roots.
+HP_V**/tmp_eval_**/
 
 *.pid
 *.stdout.log

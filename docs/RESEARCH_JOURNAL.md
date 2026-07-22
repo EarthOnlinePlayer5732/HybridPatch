@@ -283,6 +283,122 @@ think5 归因中剩余的失败：声明了 `@body:X` 却完全不写 [FILE BODI
 因此必须同步披露混合来源边界；同 transport-v3 方法效应仍由 Δ+0.008 回答。
 定义、来源清单和逐样本表见 `Baseline/FR+Official/`，结论详见 FINDINGS §232。
 
+### 5.11 HP_V8 soft-budget smoke 与 paired10 stop（2026-07-17）——链路可审计，方法结论未形成
+
+`hybridpatch/8` 在提交 `e6abad4449f7c2536c914725586fb44094546d76`
+上使用 MiniMax-M3、transport-v3、seed42、distractor-on 做了先 smoke 后 paired10 的
+预注册诊断。smoke 为 2 个已曝光样本 × 2RT × 双臂；paired10 为用户固定的 10 个
+已曝光样本 × 10RT × 双臂。两个阶段使用同一 task-plan/config 身份。
+
+**smoke 完整性**：16/16 行提交，17 calls（含一次 HP repair），verifier PASS 8/8，
+preservation 0。exact RT2 为 HP 0.500 vs FR 0.998，delta -0.498（n=2）；HP/FR
+tokens 426,989/316,543，费用 USD 0.388963/0.276923。HP 8/8 均选择 bounded，
+repair 1/8，soft burden 0/8。因此它证明链路、repair 个例、记录和重放，不证明
+local/bulk/DSL、软超限或效果优势。独立完整性审阅与正式 prepare/finalize 均 PASS；
+record/catalog/index 快照仅收入私有 ZIP，避免提交时重写冻结版本 overlay。
+
+`obj3d2` HP RT2 的 0 分不是单一归因：全局声明 OBJ 数组触发 evaluator 的局部
+group-layout 敏感性，夸大几何损伤；同时生成文件确有 texcoord 数量和 face-corner UV
+错配。treebank4 的唯一 repair 则是缺 JSON closing fence，body 保持相同但需要完整
+二次响应，额外 15,874 tokens / 约 USD 0.01519。两例详见 smoke 私有归档中的
+`analysis/failure_analysis.md` 与 HP_V8 版本卡。
+
+**paired10 停止**：在 192/400 行后，musicsheet2 HP RT2 backward 遇到 provider
+`Streaming response failed`，冻结 ledger 将调用写为 terminal `call_failed`，
+dispatcher fail-fast 回收全体。verifier 仍 PASS 96/96，preservation 0，行/checkpoint/
+API locator 完整。KEY_11 不能解除 terminal；无进展 resume 未执行。formal analyzer
+拒绝 n=1/10 endpoint，因此没有 10 样本 RS@10/20-edit-step 结果。部分 usage 和失败
+统计仅作为 `failed_informative` 诊断，见版本卡与 failure summary，不进入方法结论。
+
+这轮的结论边界是：性能优先的软 burden 实现没有因阈值阻断已观察输出，且完整路径
+在 prompt/schema 层存在；但真实 smoke 未覆盖三条非 bounded 路径，主 campaign 又不
+完整，故唯一可靠 live 声明仍是 chain integrity、可重放 provenance 与 preservation=0。
+
+### 5.12 HP_V8 transport-v4 snapshotfix paired10（2026-07-18）——断电续未提交后缀，完整诊断 endpoint
+
+提交 `bc4a39f7dd1476848927d45bcf1840a74677e6be` 上的 snapshotfix smoke 通过后，
+同提交 paired10 使用 MiniMax-M3、transport-v4、seed42、distractor-on 和固定 task plans。
+主机在 362/400 行时断电；7 个完整样本保持不动，只从 filesystem3、musicsheet2、
+satellite4 的 checkpoint 后续跑。三条 host-loss attempt 已开始生成，按 response-slot
+语义显式闭合；旧 raw 和 committed prefix 不改写。satellite4 g000 二次不完整后先按样本
+隔离，再用唯一 g001 完成。最终 400/400、20 个 RT10 checkpoint、10 个 latest finished；
+verifier PASS 200/200，strict inspector 无错误，preservation 0/199 applicable + 1 N/A。
+
+**配对统计**：exact backward RT10 HP **0.745178** vs FR **0.695854**，delta
+**+0.049324**（n=10，sample SD 0.344047，4 正/4 负/2 平）；CF@0.10 为 4/90 vs
+8/90。HP routes bounded/local/bulk/DSL=124/54/14/7，另 1 个空响应无 route；repair
+32 次、成功采用 21 次；protocol kept-context 11/200；soft burden 12/200；所有超限
+均继续执行。
+
+已知 final usage 为 HP 8.448M tokens / USD 7.036488、FR 6.661M / USD 5.571257；
+10 个已生成但中断的 attempt 无 final usage，精确账单未知。样本全已曝光且差值异质；
+该结果只作 diagnostic，不证明 HP 普遍优于 FR，也不把随机 provider 得分变化归因于
+snapshot fix。恢复机制、raw/ledger hash 和私有归档见 HP_V8 脱敏诊断报告与版本卡。
+
+### 5.13 HP_V8 transport-v4 supplement40（2026-07-19）——固定 val40 完整补充诊断
+
+首次 40-worker 启动在零结果提交前暴露 Windows metadata writer lock contention，旧目录以
+`failed_informative` 原样保留。唯一 lockfix 将原子 stop-latch 读取改为无锁，并让真正 writer
+使用有界重试锁；方法协议、prompt、executor、gate、FullRewrite、evaluator、scoring、
+transport-v4 和 task plans 均未改变。新 clean commit `effad426...` 完成 13-Key×4 probe 后，
+40 个配对 worker 同时运行 HP/FR，HP-first/FR-first 各 20。
+
+最终 1,600/1,600 唯一结果行、80 个 RT10 checkpoint、40 个 latest finished；raw 独立复算
+PASS 800/800 backward，strict inspector `errors=[]`，preservation 0/797 applicable + 3 N/A。
+12 个 generation-started incomplete streams 全在同一 semantic call 的第二 response slot 恢复，
+无 terminal infrastructure-incomplete sample。
+
+固定 n=40 的 HP−FR 差从 RT1 `+0.051086` 扩至 RT10 `+0.263959`；RT10 HP/FR 为
+`0.837339/0.573381`，sample SD `0.402060`，W/L/T `26/10/4`，CF@0.10 为
+`20/360` vs `27/360`。与 prior10 放在同一补充组时，50 条完整 campaign chain 的 RT10
+为 `0.818907/0.597876`（delta `+0.221032`）；六个重叠 ID 内先平均后，44-ID 视图为
+`0.819838/0.585641`（delta `+0.234197`）。四套固定 n 的 RT1–RT10 全表见 HP_V8
+脱敏报告；50-chain 不是 50 个独立身份。
+
+HP routes bounded/local/bulk/DSL=`579/148/54/16`，repair attempted/used/success=`104/88/78`，
+final protocol failure `20/800`，soft burden `49/800` 且全部继续执行。已知 usage：HP
+33.062M tokens / USD 26.581893，FR 25.796M / USD 21.104516；12 个未知 final usage
+attempt 的保守附加上界为 USD 2.261795，故本轮 archive-based 上界 USD 49.948204。
+
+所有 44 个 ID 都已曝光，差值异质且两个 campaign 的 commit、日期、并发和生成随机性不同；
+该结果只支持完整诊断观察，不支持 holdout 泛化、统计显著性、普遍优越或 lockfix 因果得分
+主张。生成态 finalize/validator PASS 后，全球 catalog/旧 records 恢复原字节；新 HP_V8
+record 与完整 raw 分别私有归档。
+
+### 5.14 HP_V8 mixed confirmation100（2026-07-19—20）——98/100 完整配对，单样本故障不再拖停兄弟 worker
+
+本轮冻结 60 个 method/developer-unseen 与 40 个 historical-exposed 样本，MiniMax-M3、
+transport-v4、seed42、distractor-on、10RT。电源中断和恢复期间不重发已提交 RT；最终
+`calendar5` 在 HP RT5 backward 暴露 iCalendar evaluator 对 malformed `DTEND` 的异常，
+`satellite6` 在 FR RT3 forward 耗尽两个 incomplete-stream response slots。按用户明确授权，
+两者分别标记 `evaluator_incomplete` 与 `infrastructure_incomplete`，未完成 cell 保持 null，
+其余 98 个样本继续到 RT10。
+
+原始网格为 3,932/4,000 cells，其中完整配对 98 样本 3,920 cells；无重复、半提交或补 0。
+API/ledger/journal/replay lineage 独立核对通过，1,966 个 backward rows 重放 PASS，全部 1,968
+个已提交 HP rows 的 preservation violations 为 0。严格 post-run 检查保留 calendar5 的失败
+metadata 原文，并以 evaluator-incomplete sidecar、source SHA、未提交与未插补证据接受这一条
+样本级终态；未接受的完整性错误为 0。
+
+complete98 的 delta 从 RT1 `+4.873pp` 增至 RT10 `+18.268pp`（HP `79.245%`、FR
+`60.978%`），W/L/T `65/25/8`，CriticalFailure@0.10 `47/882` vs `69/882`。60 个 unseen
+样本全部完成，RT10 delta `+21.563pp`；historical 只有 38/40，delta `+13.064pp`。
+由于 calendar5 缺失可能与 HP 输出相关，不能假设 MCAR；固定 n=100 仍是未观察 endpoint。
+把两个缺失差值仅限制在数学边界 `[-1,+1]` 的事后敏感性为 `+15.902` 至 `+19.902pp`，
+不得解释成插补结果。
+
+complete98 HP routes bounded/local/bulk/DSL/kept=`1445/358/98/47/12`，repair
+attempted/used/success=`308/276/259`，protocol failure `37/1960`。已知 HP/FR usage 为
+85.073M/65.862M tokens、USD 71.046620/55.396233；55 个 generation-started attempt 无 final
+usage，使费用只能作为下界。三个独立只读审阅均只允许 incomplete complete-pair supporting
+claim，不允许宣称预注册 n=100 完成。
+
+官方 finalize 在 generated state 构建 98-sample source-only record，完整 validator 与
+`--records-only` 均 PASS。由于 catalog digest 会机械改写全部旧 record，为遵守冻结边界，本轮
+生成 record 以 SHA-256
+`babaefce5c5a231d79103cdf0008ff2924bc89fbb8489b883e6cd96894dbfa76` 私有归档，随后
+恢复原 catalog 和 HP_V3–HP_V7/Baseline/transport generated records 原字节。
+
 ---
 
 ## 6. 追加约定（怎么继续写这份文档）

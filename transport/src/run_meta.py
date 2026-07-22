@@ -45,7 +45,10 @@ _FINGERPRINT_FILES = [
     "../requirements.txt",
 ]
 
-METADATA_SCHEMA = "anchorpatch.run_metadata/2"
+METADATA_SCHEMA = "anchorpatch.run_metadata/3"
+API_CALL_SCHEMA = "anchorpatch.api_call/4"
+API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
+API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
 
 
 def code_fingerprint():
@@ -71,6 +74,8 @@ def append_jsonl_locked(path, record):
         portalocker.lock(f, portalocker.LOCK_EX)
         try:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         finally:
             portalocker.unlock(f)
 
@@ -152,24 +157,36 @@ def append_relay_rows_and_checkpoint(jsonl_path, ckpt_path, rows, ckpt):
 
 
 def _read_jsonl_records_with_retry(path, attempts=30, sleep_s=0.1):
-    records = []
     for attempt in range(attempts):
         try:
             with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        records.append(json.loads(line))
-                    except Exception:
-                        pass
-            return records
+                portalocker.lock(f, portalocker.LOCK_SH)
+                try:
+                    records = []
+                    for line_number, line in enumerate(
+                            f.read().splitlines(), 1):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except ValueError as exc:
+                            raise RuntimeError(
+                                f"invalid JSONL record at {path}:{line_number}"
+                            ) from exc
+                        if not isinstance(record, dict):
+                            raise RuntimeError(
+                                f"non-object JSONL record at {path}:{line_number}"
+                            )
+                        records.append(record)
+                    return records
+                finally:
+                    portalocker.unlock(f)
         except PermissionError:
             if attempt == attempts - 1:
-                return []
+                raise RuntimeError(f"cannot read locked JSONL ledger: {path}")
             time.sleep(sleep_s)
-    return records
+    raise RuntimeError(f"cannot read JSONL ledger: {path}")
 
 
 def _sha256_text(text):
@@ -178,6 +195,509 @@ def _sha256_text(text):
     if not isinstance(text, str):
         text = str(text)
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+_GENERATE_POSITIONAL_PARAMETERS = (
+    "messages", "model", "timeout", "max_retries", "temperature", "is_json",
+    "return_metadata", "max_tokens", "variables", "instance",
+    "thinking_mode", "call_kind", "_raw_event_sink",
+    "max_response_retries", "max_transient_failures", "_retry_state",
+    "_response_commit_sink",
+)
+
+_GENERATE_PARAMETER_DEFAULTS = {
+    "model": "gpt-4o-mini",
+    "timeout": 30,
+    "max_retries": 3,
+    "temperature": 1.0,
+    "is_json": False,
+    "return_metadata": False,
+    "max_tokens": None,
+    "variables": {},
+    "instance": None,
+    "thinking_mode": "adaptive",
+    "call_kind": "primary",
+    "max_response_retries": 1,
+    "max_transient_failures": 3,
+}
+
+
+def _normalized_generate_arguments(args, kwargs):
+    """Bind positional/keyword generate arguments without logging callbacks."""
+    values = dict(_GENERATE_PARAMETER_DEFAULTS)
+    for name, value in zip(_GENERATE_POSITIONAL_PARAMETERS, args):
+        values[name] = value
+    for name in _GENERATE_POSITIONAL_PARAMETERS:
+        if name in kwargs:
+            values[name] = kwargs[name]
+    return values
+
+
+def _semantic_request_fingerprint(args, kwargs, requested_model, call_kind):
+    """Hash every request-affecting argument, excluding credentials/log sinks."""
+    bound = _normalized_generate_arguments(args, kwargs)
+    payload = {
+        "messages": bound.get("messages"),
+        "model": requested_model,
+        "call_kind": call_kind,
+        "timeout": bound["timeout"],
+        "max_retries": bound["max_retries"],
+        "temperature": bound["temperature"],
+        "is_json": bool(bound["is_json"]),
+        "return_metadata": bool(bound["return_metadata"]),
+        "max_tokens": bound["max_tokens"],
+        "variables": bound["variables"] or {},
+        "instance": bound["instance"],
+        "thinking_mode": bound["thinking_mode"],
+        "max_response_retries": bound["max_response_retries"],
+        "max_transient_failures": bound["max_transient_failures"],
+    }
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        default=str,
+    )
+    return _sha256_text(canonical)
+
+
+def _generation_delta_type(delta_type):
+    value = str(delta_type or "")
+    if value in {"thinking_delta", "text_delta", "input_json_delta"}:
+        return True
+    return value.endswith("_delta") and value != "signature_delta"
+
+
+_ATTEMPT_EVENTS = {
+    "semantic_request", "attempt_start", "generation_progress",
+    "attempt_end", "attempt_budget", "call_failed", "response_committed",
+}
+_FINGERPRINT_EVENTS = {
+    "semantic_request", "attempt_start", "call_failed",
+    "response_committed",
+}
+_GENERATION_SEGMENT = re.compile(r"^g([0-9]{3,})$")
+_TRANSPORT_MAX_RESPONSE_SLOTS = 2
+_TRANSPORT_MAX_TRANSIENT_FAILURES = 3
+_ATTEMPT_END_STATUSES = {"success", "retryable_error", "fatal_error"}
+
+
+def _exact_nonnegative_int(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _generation_segment(generation_index):
+    if not _exact_nonnegative_int(generation_index):
+        raise RuntimeError("semantic generation index is invalid")
+    return f"g{generation_index:03d}"
+
+
+def _parse_semantic_exact_id(semantic_call_id):
+    if not isinstance(semantic_call_id, str) or not semantic_call_id:
+        raise RuntimeError("semantic call ID is missing")
+    parts = semantic_call_id.split("/")
+    if len(parts) != 6:
+        raise RuntimeError("semantic call ID is not a transport-v4 exact ID")
+    if (not parts[0] or not parts[1]
+            or not re.fullmatch(r"rt[0-9]+", parts[2])
+            or parts[3] not in {"forward", "backward"}
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", parts[4])):
+        raise RuntimeError("semantic call ID cannot map to a formal relay step")
+    rt_index = int(parts[2][2:])
+    if parts[2] != f"rt{rt_index:02d}":
+        raise RuntimeError("semantic call ID round-trip suffix is not canonical")
+    match = _GENERATION_SEGMENT.match(parts[-1])
+    if not match:
+        raise RuntimeError("semantic call ID lacks a generation suffix")
+    generation_index = int(match.group(1))
+    if parts[-1] != _generation_segment(generation_index):
+        raise RuntimeError("semantic call ID generation suffix is not canonical")
+    semantic_root_id = "/".join(parts[:-1])
+    step_id = "/".join(parts[:-2])
+    return {
+        "step_id": step_id,
+        "rt_index": rt_index,
+        "semantic_root_id": semantic_root_id,
+        "semantic_call_id": semantic_call_id,
+        "generation_index": generation_index,
+        "call_kind": parts[-2],
+    }
+
+
+def _semantic_lineage_fields(semantic_call_id, parent_semantic_call_id=None):
+    fields = _parse_semantic_exact_id(semantic_call_id)
+    if (parent_semantic_call_id is not None
+            and (not isinstance(parent_semantic_call_id, str)
+                 or not parent_semantic_call_id)):
+        raise RuntimeError("parent semantic call ID is invalid")
+    fields["parent_semantic_call_id"] = parent_semantic_call_id
+    return fields
+
+
+def _validate_record_lineage(record, lineage, *, require_parent=False):
+    for key in ("semantic_root_id", "generation_index"):
+        if record.get(key) != lineage.get(key):
+            raise RuntimeError("API attempt ledger semantic lineage is invalid")
+    parent = record.get("parent_semantic_call_id")
+    if parent != lineage.get("parent_semantic_call_id"):
+        raise RuntimeError("API attempt ledger parent lineage is invalid")
+    if require_parent and lineage.get("generation_index") > 0 and not parent:
+        raise RuntimeError("API attempt ledger recovered generation lacks parent")
+
+
+def _validated_transport_ledger_state(
+        records, semantic_call_id=None, *, allow_open_attempt=False):
+    """Validate one semantic-call event chain and derive R2/I3 from events."""
+    empty_lineage = (
+        _semantic_lineage_fields(semantic_call_id)
+        if semantic_call_id else {
+            "semantic_root_id": None,
+            "semantic_call_id": semantic_call_id,
+            "generation_index": 0,
+            "parent_semantic_call_id": None,
+        }
+    )
+    if not records:
+        return {
+            "response_slots_used": 0,
+            "transient_failure_count": 0,
+            "http_attempts_used": 0,
+            "terminal_failure": None,
+            "response_committed": False,
+            "call_failed": False,
+            "retry_budget_exhausted": False,
+            "last_attempt_status": None,
+            "last_call_id": None,
+            "first_attempt_index": None,
+            "open_attempt_index": None,
+            "request_fingerprints": [],
+            "generation_index": empty_lineage["generation_index"],
+            "semantic_root_id": empty_lineage["semantic_root_id"],
+            "parent_semantic_call_id": empty_lineage["parent_semantic_call_id"],
+        }
+    if any(record.get("event") not in _ATTEMPT_EVENTS for record in records):
+        raise RuntimeError("API attempt ledger contains an unknown event")
+    if any(record.get("event") == "transport_resume" for record in records):
+        raise RuntimeError(
+            "API attempt ledger uses retired same-ID transport_resume semantics"
+        )
+    semantic_requests = [
+        record for record in records
+        if record.get("event") == "semantic_request"
+    ]
+    if len(semantic_requests) != 1 or records[0] is not semantic_requests[0]:
+        raise RuntimeError(
+            "API attempt ledger requires one leading semantic_request"
+        )
+    fingerprint = semantic_requests[0].get("request_fingerprint")
+    if not isinstance(fingerprint, str) or not fingerprint:
+        raise RuntimeError("API attempt ledger request fingerprint is missing")
+    lineage = _semantic_lineage_fields(
+        semantic_requests[0].get("semantic_call_id"),
+        semantic_requests[0].get("parent_semantic_call_id"),
+    )
+    if semantic_call_id is not None and lineage["semantic_call_id"] != semantic_call_id:
+        raise RuntimeError("API attempt ledger semantic identity mismatch")
+    if semantic_requests[0].get("call_kind") != lineage["call_kind"]:
+        raise RuntimeError("API attempt ledger semantic call kind is invalid")
+    for record in records:
+        if record.get("semantic_call_id") != lineage["semantic_call_id"]:
+            raise RuntimeError("API attempt ledger mixes semantic generations")
+        _validate_record_lineage(
+            record, lineage,
+            require_parent=(record.get("event") == "semantic_request"),
+        )
+        if (record.get("event") in _FINGERPRINT_EVENTS
+                and record.get("request_fingerprint") != fingerprint):
+            raise RuntimeError(
+                "API attempt ledger request fingerprint is inconsistent"
+            )
+
+    starts = {}
+    ends = {}
+    budgets = {}
+    progress = set()
+    active_terminal = None
+    response_committed = False
+    last_start_index = 0
+    last_call_id = None
+    for position, record in enumerate(records):
+        event = record["event"]
+        if event == "semantic_request":
+            continue
+        if response_committed:
+            raise RuntimeError(
+                "API attempt ledger contains events after response_committed"
+            )
+        if active_terminal is not None:
+            raise RuntimeError(
+                "API attempt ledger contains events after call_failed"
+            )
+        if event == "attempt_start":
+            attempt_index = record.get("attempt_index")
+            if (not _exact_nonnegative_int(attempt_index)
+                    or attempt_index <= 0
+                    or attempt_index <= last_start_index
+                    or attempt_index in starts
+                    or not isinstance(record.get("call_id"), str)
+                    or not record.get("call_id")):
+                raise RuntimeError(
+                    "API attempt ledger attempt_start identity is invalid"
+                )
+            if last_start_index:
+                prior_end = (ends.get(last_start_index) or (None, {}))[1]
+                if (prior_end.get("status") != "retryable_error"
+                        or last_start_index not in budgets):
+                    raise RuntimeError(
+                        "API attempt ledger starts a new HTTP attempt before "
+                        "the prior retryable attempt is fully closed"
+                    )
+            expected_attempt_kind = (
+                ("transport_recovery_initial" if not starts
+                 else "transport_recovery_retry")
+                if lineage["generation_index"] > 0 else
+                ("transport_initial" if not starts else "transport_retry")
+            )
+            if (record.get("call_kind") != lineage["call_kind"]
+                    or record.get("attempt_kind") != expected_attempt_kind):
+                raise RuntimeError(
+                    "API attempt ledger transport attempt kind is invalid"
+                )
+            starts[attempt_index] = (position, record)
+            last_start_index = attempt_index
+            if last_call_id is None:
+                last_call_id = record["call_id"]
+            elif last_call_id != record["call_id"]:
+                raise RuntimeError(
+                    "API attempt ledger mixes call IDs within a recovery epoch"
+                )
+            continue
+        if event in {"generation_progress", "attempt_end", "attempt_budget"}:
+            attempt_index = record.get("attempt_index")
+            if (not _exact_nonnegative_int(attempt_index)
+                    or attempt_index <= 0 or attempt_index not in starts
+                    or record.get("call_id")
+                    != starts[attempt_index][1].get("call_id")):
+                raise RuntimeError(
+                    f"API attempt ledger {event} identity is invalid"
+                )
+            start_position = starts[attempt_index][0]
+            if position <= start_position:
+                raise RuntimeError(
+                    f"API attempt ledger {event} precedes attempt_start"
+                )
+            if event == "generation_progress":
+                if attempt_index in progress or attempt_index in ends:
+                    raise RuntimeError(
+                        "API attempt ledger generation_progress is duplicated/out of order"
+                    )
+                progress.add(attempt_index)
+            elif event == "attempt_end":
+                if attempt_index in ends:
+                    raise RuntimeError(
+                        "API attempt ledger attempt_end is duplicated"
+                    )
+                status = record.get("status")
+                if status not in _ATTEMPT_END_STATUSES:
+                    raise RuntimeError(
+                        "API attempt ledger attempt_end status is invalid"
+                    )
+                progress_seen = attempt_index in progress
+                if (not isinstance(record.get("generation_delta_seen"), bool)
+                        or record.get("generation_delta_seen") != progress_seen):
+                    raise RuntimeError(
+                        "API attempt ledger generation progress disagrees with "
+                        "attempt_end"
+                    )
+                if not isinstance(record.get("stream_complete"), bool):
+                    raise RuntimeError(
+                        "API attempt ledger stream completion state is invalid"
+                    )
+                if not isinstance(
+                        record.get("terminal_sequence_valid"), bool):
+                    raise RuntimeError(
+                        "API attempt ledger terminal stream sequence is invalid"
+                    )
+                if status == "success":
+                    if (record.get("stream_complete") is not True
+                            or record.get("terminal_sequence_valid") is not True
+                            or record.get("message_stop_seen") is not True
+                            or record.get("final_usage_seen") is not True
+                            or record.get("content_blocks_balanced") is not True
+                            or not isinstance(record.get("stop_reason"), str)
+                            or not record.get("stop_reason").strip()):
+                        raise RuntimeError(
+                            "API attempt ledger commits an incomplete successful "
+                            "stream"
+                        )
+                elif record.get("stream_complete") is not False:
+                    raise RuntimeError(
+                        "API attempt ledger failed attempt is marked complete"
+                    )
+                ends[attempt_index] = (position, record)
+            else:
+                if (attempt_index in budgets or attempt_index not in ends
+                        or position <= ends[attempt_index][0]):
+                    raise RuntimeError(
+                        "API attempt ledger attempt_budget is duplicated/out of order"
+                    )
+                if ends[attempt_index][1].get("status") != "retryable_error":
+                    raise RuntimeError(
+                        "API attempt ledger budgets a non-retryable attempt"
+                    )
+                budgets[attempt_index] = (position, record)
+            continue
+        if event in {"call_failed", "response_committed"}:
+            attempt_index = record.get("attempt_index")
+            if (not _exact_nonnegative_int(attempt_index)
+                    or attempt_index <= 0 or attempt_index not in starts
+                    or attempt_index != last_start_index
+                    or attempt_index not in ends
+                    or record.get("call_id") != last_call_id):
+                raise RuntimeError(
+                    f"API attempt ledger {event} identity is invalid"
+                )
+            if event == "call_failed":
+                if record.get("status") != "provider_failure":
+                    raise RuntimeError(
+                        "API attempt ledger call_failed status is invalid"
+                    )
+                if (ends[attempt_index][1].get("status") == "retryable_error"
+                        and attempt_index not in budgets):
+                    raise RuntimeError(
+                        "API attempt ledger retry exhaustion lacks a budget event"
+                    )
+                active_terminal = record
+            else:
+                if ((ends.get(attempt_index) or (None, {}))[1].get("status")
+                        != "success"):
+                    raise RuntimeError(
+                        "API attempt ledger commits a non-successful response"
+                    )
+                response_committed = True
+
+    open_attempts = set(starts) - set(ends)
+    if open_attempts:
+        if (not allow_open_attempt or len(open_attempts) != 1
+                or open_attempts != {last_start_index}
+                or records[-1].get("event") not in {
+                    "attempt_start", "generation_progress"}):
+            raise RuntimeError(
+                "API attempt ledger contains an unclosed HTTP attempt"
+            )
+    for attempt_index, (_position, end) in ends.items():
+        has_budget = attempt_index in budgets
+        active_budget_window = bool(
+            allow_open_attempt
+            and attempt_index == last_start_index
+            and records[-1].get("event") == "attempt_end"
+            and end.get("status") == "retryable_error"
+            and not has_budget
+        )
+        if ((end.get("status") == "retryable_error") != has_budget
+                and not active_budget_window):
+            raise RuntimeError(
+                "API attempt ledger retryable attempt budget event is missing "
+                "or misplaced"
+            )
+
+    response_slots = 0
+    transient_failures = 0
+    cumulative = {}
+    synthetic_terminal = None
+    for attempt_index in sorted(ends):
+        end = (ends.get(attempt_index) or (None, {}))[1]
+        status = end.get("status")
+        if status == "success" or attempt_index in progress:
+            response_slots += 1
+        elif status == "fatal_error":
+            synthetic_terminal = synthetic_terminal or end
+        else:
+            transient_failures += 1
+        cumulative[attempt_index] = (response_slots, transient_failures)
+        budget = (budgets.get(attempt_index) or (None, None))[1]
+        if budget is not None:
+            expected_class = (
+                "response_slot"
+                if status == "success" or attempt_index in progress
+                else "transient_failure"
+            )
+            if (budget.get("budget_class") != expected_class
+                    or budget.get("response_slots_used") != response_slots
+                    or budget.get("transient_failure_count")
+                    != transient_failures):
+                raise RuntimeError(
+                    "API attempt ledger budget counters disagree with events"
+                )
+    if (response_slots > _TRANSPORT_MAX_RESPONSE_SLOTS
+            or transient_failures > _TRANSPORT_MAX_TRANSIENT_FAILURES):
+        raise RuntimeError("API attempt ledger exceeds the frozen R2/I3 budget")
+    for attempt_index, (used_response, used_transient) in cumulative.items():
+        if (attempt_index != last_start_index
+                and (used_response >= _TRANSPORT_MAX_RESPONSE_SLOTS
+                     or used_transient >= _TRANSPORT_MAX_TRANSIENT_FAILURES)):
+            raise RuntimeError(
+                "API attempt ledger continues after the frozen R2/I3 budget "
+                "was exhausted"
+            )
+
+    terminal_records = [
+        record for record in records
+        if record.get("event") in {"call_failed", "response_committed"}
+    ]
+    for record in terminal_records:
+        attempt_index = record["attempt_index"]
+        expected_response, expected_transient = cumulative[attempt_index]
+        if (record.get("response_slots_used") != expected_response
+                or record.get("transient_failure_count")
+                != expected_transient
+                or record.get("http_attempts_used") != attempt_index):
+            raise RuntimeError(
+                "API attempt ledger terminal counters disagree with events"
+            )
+    last_closed_index = max(ends, default=0)
+    last_end = (ends.get(last_closed_index) or (None, {}))[1]
+    retry_budget_exhausted = bool(
+        last_end.get("status") == "retryable_error"
+        and (
+            response_slots == _TRANSPORT_MAX_RESPONSE_SLOTS
+            or transient_failures == _TRANSPORT_MAX_TRANSIENT_FAILURES
+        )
+    )
+    if (active_terminal is not None
+            and last_end.get("status") == "retryable_error"
+            and not retry_budget_exhausted):
+        raise RuntimeError(
+            "API attempt ledger marks provider exhaustion before R2/I3 is spent"
+        )
+    for attempt_index, (_position, end) in ends.items():
+        if end.get("status") == "success" and not any(
+                record.get("event") == "response_committed"
+                and record.get("attempt_index") == attempt_index
+                for record in records):
+            synthetic_terminal = synthetic_terminal or dict(
+                end, error_type="complete_response_not_journaled"
+            )
+    terminal_failure = active_terminal or synthetic_terminal
+    return {
+        "response_slots_used": response_slots,
+        "transient_failure_count": transient_failures,
+        "http_attempts_used": max(starts, default=0),
+        "terminal_failure": terminal_failure,
+        "response_committed": response_committed,
+        "call_failed": active_terminal is not None,
+        "retry_budget_exhausted": retry_budget_exhausted,
+        "last_attempt_status": (
+            "in_progress" if open_attempts else last_end.get("status")
+        ),
+        "last_call_id": last_call_id,
+        "first_attempt_index": min(starts, default=None),
+        "open_attempt_index": (
+            next(iter(open_attempts)) if open_attempts else None
+        ),
+        "request_fingerprints": [fingerprint],
+        "generation_index": lineage["generation_index"],
+        "semantic_root_id": lineage["semantic_root_id"],
+        "parent_semantic_call_id": lineage["parent_semantic_call_id"],
+    }
 
 
 def _content_len(text):
@@ -197,6 +717,15 @@ def _exception_http_status(exc):
 
 
 def _is_provider_exception(exc):
+    last_error = getattr(exc, "last_error", None)
+    if (getattr(exc, "_anchorpatch_transport_observability_failure", False)
+            or getattr(
+                last_error, "_anchorpatch_transport_observability_failure",
+                False)):
+        return False
+    attempts = list(getattr(exc, "transport_attempts", None) or [])
+    if attempts and attempts[-1].get("status") == "retryable_error":
+        return True
     msg = str(exc)
     code = _exception_http_status(exc)
     provider_terms = (
@@ -207,6 +736,25 @@ def _is_provider_exception(exc):
         "peer closed connection", "incomplete chunked read",
     )
     return bool(code or any(t.lower() in msg.lower() for t in provider_terms))
+
+
+def _is_transport_retry_exhaustion(record, exc):
+    """Whether a provider error exhausted an R2/I3 automatic retry budget."""
+    last_error = getattr(exc, "last_error", None)
+    if (getattr(exc, "_anchorpatch_transport_observability_failure", False)
+            or getattr(
+                last_error, "_anchorpatch_transport_observability_failure",
+                False)):
+        return False
+    attempts = list(getattr(exc, "transport_attempts", None) or [])
+    if not attempts or attempts[-1].get("status") != "retryable_error":
+        return False
+    return bool(
+        record.get("response_slots_used")
+        == record.get("max_response_slots") == 2
+        or record.get("transient_failure_count")
+        == record.get("max_transient_failures") == 3
+    )
 
 
 def _provider_error_type(exc):
@@ -292,10 +840,48 @@ class ApiCallRecorder:
         self.target_state_id = None
         self.call_index = 0
         self.records_by_id = {}
+        self._semantic_parent_by_id = {}
+        self._pending_resume_semantic_call_id = os.environ.get(
+            "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID"
+        )
+        self._pending_resume_generation = os.environ.get(
+            "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX"
+        )
+        self._pending_resume_fingerprint = os.environ.get(
+            "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT"
+        )
+        self._pending_resume_next_attempt = os.environ.get(
+            "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX"
+        )
         self.worker_launch_id = (
             os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID")
             or f"worker-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         )
+
+    def _consume_resume_authorization(self):
+        parent = self._pending_resume_semantic_call_id
+        generation = self._pending_resume_generation
+        fingerprint = self._pending_resume_fingerprint
+        next_attempt = self._pending_resume_next_attempt
+        self._pending_resume_semantic_call_id = None
+        self._pending_resume_generation = None
+        self._pending_resume_fingerprint = None
+        self._pending_resume_next_attempt = None
+        if os.environ.get(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID") == parent:
+            os.environ.pop(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID", None)
+        if os.environ.get(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX") == generation:
+            os.environ.pop("ANCHORPATCH_INFRASTRUCTURE_RESUME_INDEX", None)
+        if os.environ.get(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT") == fingerprint:
+            os.environ.pop(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_REQUEST_FINGERPRINT", None)
+        if os.environ.get(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX") == next_attempt:
+            os.environ.pop(
+                "ANCHORPATCH_INFRASTRUCTURE_RESUME_NEXT_ATTEMPT_INDEX", None)
 
     def set_step(self, rt_index, direction, target_state_id=None):
         self.rt_index = rt_index
@@ -346,10 +932,12 @@ class ApiCallRecorder:
             pass
         return paths
 
-    def _base_record(self, call_id, call_kind=None):
-        step_id, semantic_call_id = self._semantic_ids(call_kind or "primary")
+    def _base_record(self, call_id, call_kind=None, semantic_context=None):
+        context = semantic_context or self._semantic_context(
+            call_kind or "primary"
+        )
         return {
-            "schema": "anchorpatch.api_call/3",
+            "schema": API_CALL_SCHEMA,
             "created_local": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "sample": self.sample_id,
             "rt_index": self.rt_index,
@@ -360,18 +948,38 @@ class ApiCallRecorder:
             "model": self.model,
             "call_kind": call_kind or "primary",
             "target_state_id": self.target_state_id,
-            "step_id": step_id,
-            "semantic_call_id": semantic_call_id,
+            "step_id": context["step_id"],
+            "semantic_root_id": context["semantic_root_id"],
+            "semantic_call_id": context["semantic_call_id"],
+            "generation_index": context["generation_index"],
+            "parent_semantic_call_id": context["parent_semantic_call_id"],
             "worker_launch_id": self.worker_launch_id,
         }
 
-    def _semantic_ids(self, call_kind):
+    def _semantic_root(self, call_kind):
         rt = "rtNA" if self.rt_index is None else f"rt{int(self.rt_index):02d}"
         direction = self.direction or "unknown"
         step_id = "/".join((
             _safe(self.method), _safe(self.sample_id), rt, _safe(direction),
         ))
         return step_id, f"{step_id}/{_safe(call_kind or 'primary')}"
+
+    def _semantic_context(self, call_kind, generation_index=0,
+                          parent_semantic_call_id=None):
+        step_id, semantic_root_id = self._semantic_root(call_kind)
+        semantic_call_id = (
+            f"{semantic_root_id}/{_generation_segment(generation_index)}"
+        )
+        context = _semantic_lineage_fields(
+            semantic_call_id, parent_semantic_call_id
+        )
+        context["step_id"] = step_id
+        self._semantic_parent_by_id[semantic_call_id] = parent_semantic_call_id
+        return context
+
+    def _semantic_ids(self, call_kind):
+        context = self._semantic_context(call_kind)
+        return context["step_id"], context["semantic_call_id"]
 
     def _semantic_digest(self, semantic_call_id):
         return hashlib.sha256(semantic_call_id.encode("utf-8")).hexdigest()[:24]
@@ -384,12 +992,21 @@ class ApiCallRecorder:
         return os.path.join(self.out_dir, "api_journal", f"{digest}.{kind}.json")
 
     def _append_ledger(self, semantic_call_id, event, **fields):
-        step_id = semantic_call_id.rsplit("/", 1)[0]
+        parent = fields.pop(
+            "parent_semantic_call_id",
+            self._semantic_parent_by_id.get(semantic_call_id),
+        )
+        lineage = _semantic_lineage_fields(
+            semantic_call_id, parent_semantic_call_id=parent
+        )
         record = {
-            "schema": "anchorpatch.api_attempt/3",
+            "schema": API_ATTEMPT_SCHEMA,
             "created_local": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "step_id": step_id,
+            "step_id": lineage["step_id"],
+            "semantic_root_id": lineage["semantic_root_id"],
             "semantic_call_id": semantic_call_id,
+            "generation_index": lineage["generation_index"],
+            "parent_semantic_call_id": lineage["parent_semantic_call_id"],
             "worker_launch_id": self.worker_launch_id,
             "event": event,
         }
@@ -398,88 +1015,346 @@ class ApiCallRecorder:
 
     def _ledger_state(self, semantic_call_id):
         path = self._ledger_path()
-        records = _read_jsonl_records_with_retry(path) if os.path.exists(path) else []
-        records = [r for r in records if r.get("semantic_call_id") == semantic_call_id]
-        response_slots = 0
-        transient_failures = 0
-        http_attempts = 0
-        starts = set()
-        budgeted = set()
-        progress = set()
-        ends = {}
-        terminal_failure = None
-        response_committed = False
-        for record in records:
-            idx = int(record.get("attempt_index") or 0)
-            http_attempts = max(http_attempts, idx, int(record.get("http_attempts_used") or 0))
-            response_slots = max(response_slots, int(record.get("response_slots_used") or 0))
-            transient_failures = max(
-                transient_failures, int(record.get("transient_failure_count") or 0)
+        all_records = (
+            _read_jsonl_records_with_retry(path)
+            if os.path.exists(path) else []
+        )
+        if any(record.get("schema") != API_ATTEMPT_SCHEMA
+               for record in all_records):
+            raise RuntimeError(
+                "API attempt ledger schema differs from transport-v4; "
+                "use a new experiment directory"
             )
-            event = record.get("event")
-            if event == "attempt_start" and idx:
-                starts.add(idx)
-            elif event == "generation_progress" and idx:
-                progress.add(idx)
-            elif event == "attempt_end" and idx:
-                ends[idx] = record
-            elif event == "attempt_budget" and idx:
-                budgeted.add(idx)
-            elif event == "call_failed":
-                terminal_failure = record
-            elif event == "response_committed":
-                response_committed = True
+        if any(not isinstance(record.get("semantic_call_id"), str)
+               or not record.get("semantic_call_id")
+               or not isinstance(record.get("event"), str)
+               or not record.get("event") for record in all_records):
+            raise RuntimeError(
+                "API attempt ledger contains an invalid transport-v4 identity"
+            )
+        records = [
+            record for record in all_records
+            if record.get("semantic_call_id") == semantic_call_id
+        ]
+        return _validated_transport_ledger_state(
+            records, semantic_call_id=semantic_call_id
+        )
 
-        # A process can die between the protocol event and the outer budget
-        # update. Account for every such dangling POST conservatively. Once a
-        # generation delta was seen it is a response slot; before that it is a
-        # transient infrastructure failure.
-        for idx in sorted(starts - budgeted):
-            end_status = (ends.get(idx) or {}).get("status")
-            if end_status == "success" or idx in progress:
-                response_slots += 1
-                if end_status == "success" and not response_committed:
-                    terminal_failure = terminal_failure or dict(
-                        ends[idx], error_type="complete_response_not_journaled"
+    def _all_ledger_records(self):
+        path = self._ledger_path()
+        records = (
+            _read_jsonl_records_with_retry(path)
+            if os.path.exists(path) else []
+        )
+        if any(record.get("schema") != API_ATTEMPT_SCHEMA
+               for record in records):
+            raise RuntimeError(
+                "API attempt ledger schema differs from transport-v4; "
+                "use a new experiment directory"
+            )
+        for record in records:
+            if (not isinstance(record.get("semantic_call_id"), str)
+                    or not record.get("semantic_call_id")
+                    or record.get("event") not in _ATTEMPT_EVENTS):
+                raise RuntimeError(
+                    "API attempt ledger contains an invalid transport-v4 record"
+                )
+            lineage = _semantic_lineage_fields(
+                record["semantic_call_id"],
+                record.get("parent_semantic_call_id"),
+            )
+            if (record.get("semantic_root_id") != lineage["semantic_root_id"]
+                    or record.get("generation_index")
+                    != lineage["generation_index"]
+                    or record.get("step_id") != lineage["step_id"]):
+                raise RuntimeError(
+                    "API attempt ledger semantic lineage is invalid"
+                )
+        return records
+
+    def _lineage_global_http_attempts_used(self, semantic_root_id):
+        attempts = []
+        for record in self._all_ledger_records():
+            if record.get("semantic_root_id") != semantic_root_id:
+                continue
+            attempt_index = record.get("attempt_index")
+            if _exact_nonnegative_int(attempt_index):
+                attempts.append(attempt_index)
+        return max(attempts, default=0)
+
+    def _validated_semantic_lineage(self, semantic_root_id):
+        """Validate contiguous generations, parents, fingerprints and attempts."""
+        groups = {}
+        root_records = [
+            record for record in self._all_ledger_records()
+            if record.get("semantic_root_id") == semantic_root_id
+        ]
+        prior_generation = None
+        prior_record = None
+        for record in root_records:
+            context = _semantic_lineage_fields(
+                record["semantic_call_id"],
+                record.get("parent_semantic_call_id"),
+            )
+            generation = context["generation_index"]
+            if prior_generation is None:
+                if generation != 0:
+                    raise RuntimeError(
+                        "semantic lineage does not begin at generation zero"
                     )
-            elif end_status == "fatal_error":
-                terminal_failure = terminal_failure or ends[idx]
-            else:
-                transient_failures += 1
+            elif generation < prior_generation or generation > prior_generation + 1:
+                raise RuntimeError(
+                    "semantic lineage generation order is invalid"
+                )
+            elif generation == prior_generation + 1:
+                if (record.get("event") != "semantic_request"
+                        or (prior_record or {}).get("event") != "call_failed"):
+                    raise RuntimeError(
+                        "semantic lineage advances before the exhausted parent "
+                        "is terminally recorded"
+                    )
+            groups.setdefault(record["semantic_call_id"], []).append(record)
+            prior_generation = generation
+            prior_record = record
+        if not groups:
+            return []
+        generations = {}
+        all_attempt_indexes = []
+        lineage_fingerprint = None
+        committed_seen = False
+        for semantic_call_id, records in groups.items():
+            context = _semantic_lineage_fields(
+                semantic_call_id, records[0].get("parent_semantic_call_id")
+            )
+            generation = context["generation_index"]
+            if generation in generations:
+                raise RuntimeError(
+                    "semantic lineage contains a duplicate generation"
+                )
+            state = _validated_transport_ledger_state(
+                records, semantic_call_id=semantic_call_id
+            )
+            fingerprint = (state.get("request_fingerprints") or [None])[0]
+            if lineage_fingerprint is None:
+                lineage_fingerprint = fingerprint
+            elif fingerprint != lineage_fingerprint:
+                raise RuntimeError(
+                    "semantic lineage request fingerprint is inconsistent"
+                )
+            attempt_indexes = [
+                record["attempt_index"] for record in records
+                if record.get("event") == "attempt_start"
+            ]
+            all_attempt_indexes.extend(attempt_indexes)
+            committed = any(
+                record.get("event") == "response_committed"
+                for record in records
+            )
+            generations[generation] = {
+                "context": context,
+                "state": state,
+                "committed": committed,
+            }
+        ordered_indexes = sorted(generations)
+        if ordered_indexes != list(range(len(ordered_indexes))):
+            raise RuntimeError("semantic lineage generation sequence has a gap")
+        if (len(all_attempt_indexes) != len(set(all_attempt_indexes))
+                or all_attempt_indexes != sorted(all_attempt_indexes)):
+            raise RuntimeError(
+                "semantic lineage attempt indexes are duplicated/out of order"
+            )
+        ordered = []
+        for generation in ordered_indexes:
+            item = generations[generation]
+            expected_parent = (
+                None if generation == 0
+                else generations[generation - 1]["context"]["semantic_call_id"]
+            )
+            if item["context"]["parent_semantic_call_id"] != expected_parent:
+                raise RuntimeError("semantic lineage parent chain is invalid")
+            if committed_seen:
+                raise RuntimeError(
+                    "semantic lineage continues after a committed response"
+                )
+            if item["committed"]:
+                committed_seen = True
+            elif generation < ordered_indexes[-1]:
+                state = item["state"]
+                terminal = state.get("terminal_failure") or {}
+                if (terminal.get("status") != "provider_failure"
+                        or not state.get("call_failed")
+                        or state.get("last_attempt_status")
+                        != "retryable_error"
+                        or not state.get("retry_budget_exhausted")):
+                    raise RuntimeError(
+                        "semantic lineage advances from a non-exhausted parent"
+                    )
+            ordered.append(item)
+        return ordered
 
-        return {
-            "response_slots_used": response_slots,
-            "transient_failure_count": transient_failures,
-            "http_attempts_used": http_attempts,
-            "terminal_failure": terminal_failure,
-        }
+    def _find_lineage_journal(self, semantic_root_id, request_fingerprint):
+        journal_dir = os.path.join(self.out_dir, "api_journal")
+        if not os.path.isdir(journal_dir):
+            return None, None
+        matches = []
+        for name in sorted(os.listdir(journal_dir)):
+            if not name.endswith(".response.json"):
+                continue
+            path = os.path.join(journal_dir, name)
+            with open(path, encoding="utf-8") as handle:
+                payload = json.load(handle)
+            if payload.get("schema") != API_RESPONSE_JOURNAL_SCHEMA:
+                raise RuntimeError(
+                    f"API response journal schema differs from transport-v4: {path}"
+                )
+            payload_semantic_id = payload.get("semantic_call_id")
+            lineage = _semantic_lineage_fields(
+                payload_semantic_id,
+                payload.get("parent_semantic_call_id"),
+            )
+            expected_name = (
+                f"{self._semantic_digest(payload_semantic_id)}.response.json"
+            )
+            if name != expected_name:
+                raise RuntimeError(
+                    f"API response journal filename digest mismatch: {path}"
+                )
+            if payload.get("semantic_root_id") != lineage["semantic_root_id"]:
+                raise RuntimeError(
+                    f"API response journal semantic root mismatch: {path}"
+                )
+            if payload.get("generation_index") != lineage["generation_index"]:
+                raise RuntimeError(
+                    f"API response journal generation mismatch: {path}"
+                )
+            result = payload.get("result")
+            if (not isinstance(payload.get("call_id"), str)
+                    or not payload.get("call_id")
+                    or not isinstance(result, dict)
+                    or result.get("semantic_root_id")
+                    != lineage["semantic_root_id"]
+                    or result.get("semantic_call_id")
+                    != lineage["semantic_call_id"]
+                    or result.get("generation_index")
+                    != lineage["generation_index"]
+                    or result.get("parent_semantic_call_id")
+                    != lineage["parent_semantic_call_id"]
+                    or result.get("transport_revision")
+                    != "opencode_anthropic_sdk/4"
+                    or result.get("transport_resume_policy")
+                    != "exact_payload_new_semantic_call/1"
+                    or result.get("call_kind") != lineage["call_kind"]
+                    or result.get("stream_complete") is not True
+                    or not isinstance(result.get("stop_reason"), str)
+                    or not result.get("stop_reason").strip()
+                    or not isinstance(result.get("message"), str)
+                    or result.get("input_tokens") is None
+                    or result.get("output_tokens") is None
+                    or result.get("max_response_slots")
+                    != _TRANSPORT_MAX_RESPONSE_SLOTS
+                    or result.get("max_transient_failures")
+                    != _TRANSPORT_MAX_TRANSIENT_FAILURES
+                    or not isinstance(result.get("response_slots_used"), int)
+                    or not (1 <= result.get("response_slots_used")
+                            <= _TRANSPORT_MAX_RESPONSE_SLOTS)
+                    or not isinstance(
+                        result.get("transient_failure_count"), int)
+                    or not (0 <= result.get("transient_failure_count")
+                            <= _TRANSPORT_MAX_TRANSIENT_FAILURES)
+                    or not isinstance(result.get("http_attempts_used"), int)
+                    or result.get("http_attempts_used") <= 0):
+                raise RuntimeError(
+                    f"API response journal result is incomplete or invalid: {path}"
+                )
+            if payload.get("semantic_root_id") != semantic_root_id:
+                continue
+            if payload.get("request_fingerprint") != request_fingerprint:
+                raise RuntimeError(
+                    "API response journal request fingerprint differs within "
+                    "one semantic lineage"
+                )
+            matches.append((path, payload, lineage))
+        if len(matches) > 1:
+            raise RuntimeError(
+                "API response journal contains multiple committed generations "
+                "for one semantic call"
+            )
+        if not matches:
+            return None, None
+        path, payload, lineage = matches[0]
+        result = dict(payload.get("result") or {})
+        result["provider_called"] = False
+        result["response_replayed"] = True
+        result["replayed_from_call_id"] = payload.get("call_id")
+        result["semantic_call_id"] = lineage["semantic_call_id"]
+        result["semantic_root_id"] = lineage["semantic_root_id"]
+        result["generation_index"] = lineage["generation_index"]
+        result["parent_semantic_call_id"] = lineage["parent_semantic_call_id"]
+        return result, lineage
 
-    def _load_journal(self, semantic_call_id):
+    def _load_journal(self, semantic_call_id, request_fingerprint=None):
         path = self._journal_path(semantic_call_id)
         if not os.path.exists(path):
             return None
         with open(path, encoding="utf-8") as handle:
             payload = json.load(handle)
+        if payload.get("schema") != API_RESPONSE_JOURNAL_SCHEMA:
+            raise RuntimeError(
+                f"API response journal schema differs from transport-v4: {path}"
+            )
         if payload.get("semantic_call_id") != semantic_call_id:
             raise RuntimeError(f"API response journal identity mismatch: {path}")
+        lineage = _semantic_lineage_fields(
+            semantic_call_id, payload.get("parent_semantic_call_id")
+        )
+        if (payload.get("semantic_root_id") != lineage["semantic_root_id"]
+                or payload.get("generation_index")
+                != lineage["generation_index"]):
+            raise RuntimeError(f"API response journal lineage mismatch: {path}")
+        stored_fingerprint = payload.get("request_fingerprint")
+        if (not isinstance(stored_fingerprint, str) or not stored_fingerprint
+                or request_fingerprint is None
+                or stored_fingerprint != request_fingerprint):
+            raise RuntimeError(
+                f"API response journal request fingerprint mismatch: {path}"
+            )
         result = dict(payload.get("result") or {})
         result["provider_called"] = False
         result["response_replayed"] = True
         result["replayed_from_call_id"] = payload.get("call_id")
+        result["semantic_call_id"] = lineage["semantic_call_id"]
+        result["semantic_root_id"] = lineage["semantic_root_id"]
+        result["generation_index"] = lineage["generation_index"]
+        result["parent_semantic_call_id"] = lineage["parent_semantic_call_id"]
         return result
 
-    def _save_journal(self, semantic_call_id, call_id, result):
+    def _save_journal(self, semantic_call_id, call_id, result,
+                      request_fingerprint=None):
+        parent_semantic_call_id = self._semantic_parent_by_id.get(
+            semantic_call_id
+        )
+        lineage = _semantic_lineage_fields(
+            semantic_call_id, parent_semantic_call_id
+        )
         compact = dict(result)
         for key in ("_raw_request_messages", "_raw_request_body",
                     "_raw_stream_events", "_raw_response_full"):
             compact.pop(key, None)
         compact["provider_called"] = True
         compact["response_replayed"] = False
+        compact["semantic_root_id"] = lineage["semantic_root_id"]
+        compact["semantic_call_id"] = lineage["semantic_call_id"]
+        compact["generation_index"] = lineage["generation_index"]
+        compact["parent_semantic_call_id"] = lineage["parent_semantic_call_id"]
         payload = {
-            "schema": "anchorpatch.api_response_journal/3",
+            "schema": API_RESPONSE_JOURNAL_SCHEMA,
             "created_local": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "semantic_root_id": lineage["semantic_root_id"],
             "semantic_call_id": semantic_call_id,
+            "generation_index": lineage["generation_index"],
+            "parent_semantic_call_id": lineage["parent_semantic_call_id"],
             "call_id": call_id,
+            "request_fingerprint": request_fingerprint,
             "result": compact,
         }
         write_json_atomic(self._journal_path(semantic_call_id), payload)
@@ -488,6 +1363,8 @@ class ApiCallRecorder:
             response_slots_used=compact.get("response_slots_used"),
             transient_failure_count=compact.get("transient_failure_count"),
             http_attempts_used=compact.get("http_attempts_used"),
+            attempt_index=compact.get("http_attempts_used"),
+            request_fingerprint=request_fingerprint,
         )
 
     def _write_record(self, record):
@@ -500,13 +1377,15 @@ class ApiCallRecorder:
         self.call_index += 1
         call_id = f"call{self.call_index:06d}_{uuid.uuid4().hex[:8]}"
         kwargs = dict(kwargs)
-        requested_model = (
-            kwargs.get("model")
-            or (args[1] if len(args) > 1 and isinstance(args[1], str) else None)
-            or self.model
+        bound_arguments = _normalized_generate_arguments(args, kwargs)
+        requested_model = bound_arguments.get("model") or self.model
+        call_kind = bound_arguments.get("call_kind") or "primary"
+        semantic_context = self._semantic_context(call_kind)
+        semantic_call_id = semantic_context["semantic_call_id"]
+        semantic_root_id = semantic_context["semantic_root_id"]
+        request_fingerprint = _semantic_request_fingerprint(
+            args, kwargs, requested_model, call_kind
         )
-        call_kind = kwargs.get("call_kind") or "primary"
-        _step_id, semantic_call_id = self._semantic_ids(call_kind)
         provider_runtime = {}
         if str(requested_model).lower().startswith("minimax-m3"):
             try:
@@ -515,24 +1394,68 @@ class ApiCallRecorder:
                     max_tokens=kwargs.get("max_tokens"),
                     thinking_mode=kwargs.get("thinking_mode") or "adaptive",
                 )
-            except Exception:
-                provider_runtime = {}
+            except Exception as exc:
+                raise RuntimeError(
+                    "failed to resolve the frozen MiniMax transport runtime "
+                    "before provider POST"
+                ) from exc
         transport_path = None
         transport_fh = None
+        semantic_lock_fh = None
         transport_lock = threading.Lock()
         progress_logged = set()
+        provider_post_started = False
+        transport_preflight_error = None
         secrets = [
             value for value in (
                 os.environ.get("OPENCODE_API_KEY"),
                 os.environ.get("OPENCODE_GO_API_KEY"),
             ) if value
         ]
+
+        def _release_semantic_lock():
+            nonlocal semantic_lock_fh
+            if semantic_lock_fh is None:
+                return
+            try:
+                portalocker.unlock(semantic_lock_fh)
+            finally:
+                semantic_lock_fh.close()
+                semantic_lock_fh = None
+
         if str(requested_model).lower().startswith("minimax-m3"):
+            semantic_lock_dir = os.path.join(
+                self.out_dir, "api_semantic_locks")
+            os.makedirs(semantic_lock_dir, exist_ok=True)
+            semantic_lock_path = os.path.join(
+                semantic_lock_dir,
+                f"{self._semantic_digest(semantic_root_id)}.lock",
+            )
+            semantic_lock_fh = open(
+                semantic_lock_path, "a+", encoding="utf-8")
+            try:
+                portalocker.lock(
+                    semantic_lock_fh,
+                    portalocker.LOCK_EX | portalocker.LOCK_NB,
+                )
+            except Exception as exc:
+                semantic_lock_fh.close()
+                semantic_lock_fh = None
+                raise RuntimeError(
+                    "semantic call already has an active provider owner; "
+                    "refusing a duplicate POST"
+                ) from exc
             transport_path = self._raw_path(call_id, "transport.jsonl")
-            transport_fh = open(transport_path, "w", encoding="utf-8", newline="")
+            try:
+                transport_fh = open(
+                    transport_path, "w", encoding="utf-8", newline="")
+            except Exception:
+                _release_semantic_lock()
+                raise
             prior_sink = kwargs.get("_raw_event_sink")
 
             def _transport_sink(payload):
+                nonlocal provider_post_started
                 if prior_sink is not None:
                     try:
                         prior_sink(payload)
@@ -545,14 +1468,18 @@ class ApiCallRecorder:
                     or 0
                 )
                 if record_type == "attempt_start":
+                    provider_post_started = True
                     self._append_ledger(
                         semantic_call_id, "attempt_start",
                         attempt_index=attempt_index, call_id=call_id,
+                        call_kind=call_kind,
+                        attempt_kind=payload.get("attempt_kind"),
+                        request_fingerprint=request_fingerprint,
                     )
                 elif record_type == "sdk_stream_event":
                     event = payload.get("event") or {}
                     delta_type = str((event.get("delta") or {}).get("type") or "")
-                    if (delta_type in {"thinking_delta", "text_delta", "input_json_delta"}
+                    if (_generation_delta_type(delta_type)
                             and attempt_index not in progress_logged):
                         progress_logged.add(attempt_index)
                         self._append_ledger(
@@ -570,6 +1497,14 @@ class ApiCallRecorder:
                         http_status=attempt.get("http_status"),
                         stream_complete=attempt.get("stream_complete"),
                         stop_reason=attempt.get("stop_reason"),
+                        message_stop_seen=attempt.get("message_stop_seen"),
+                        final_usage_seen=attempt.get("final_usage_seen"),
+                        generation_delta_seen=attempt.get("generation_delta_seen"),
+                        content_blocks_started=attempt.get("content_blocks_started"),
+                        content_blocks_stopped=attempt.get("content_blocks_stopped"),
+                        content_blocks_balanced=attempt.get("content_blocks_balanced"),
+                        terminal_sequence_valid=attempt.get(
+                            "terminal_sequence_valid"),
                     )
                 elif record_type == "attempt_budget":
                     self._append_ledger(
@@ -595,12 +1530,274 @@ class ApiCallRecorder:
 
             kwargs["_raw_event_sink"] = _transport_sink
 
-            replay = self._load_journal(semantic_call_id)
-            retry_state = self._ledger_state(semantic_call_id)
+            def _preflight_guard(function, *call_args, **call_kwargs):
+                try:
+                    return function(*call_args, **call_kwargs)
+                except BaseException:
+                    if transport_fh is not None and not transport_fh.closed:
+                        transport_fh.close()
+                    _release_semantic_lock()
+                    raise
+
+            resume_semantic_id = self._pending_resume_semantic_call_id
+            resume_index_raw = self._pending_resume_generation
+            resume_fingerprint = self._pending_resume_fingerprint
+            resume_next_attempt_raw = self._pending_resume_next_attempt
+            resume_values = (
+                resume_semantic_id, resume_index_raw, resume_fingerprint,
+                resume_next_attempt_raw,
+            )
+            if any(value is None for value in resume_values) and any(
+                    value is not None for value in resume_values):
+                transport_preflight_error = RuntimeError(
+                    "infrastructure resume authorization is incomplete"
+                )
+            lineage_state = []
+            try:
+                lineage_state = _preflight_guard(
+                    self._validated_semantic_lineage, semantic_root_id
+                )
+                replay, replay_lineage = _preflight_guard(
+                    self._find_lineage_journal, semantic_root_id,
+                    request_fingerprint,
+                )
+            except Exception as exc:
+                replay = None
+                replay_lineage = None
+                transport_preflight_error = transport_preflight_error or exc
+            if replay_lineage is not None:
+                replay_state = {}
+                lineage_match = next((
+                    item for item in lineage_state
+                    if item["context"]["semantic_call_id"]
+                    == replay_lineage["semantic_call_id"]
+                ), None)
+                if lineage_match is None:
+                    transport_preflight_error = (
+                        transport_preflight_error or RuntimeError(
+                            "API response journal has no matching attempt-ledger "
+                            "generation"
+                        )
+                    )
+                else:
+                    replay_state = lineage_match["state"]
+                    if (replay_state.get("last_attempt_status") != "success"
+                            or replay_state.get("last_call_id")
+                            != replay.get("replayed_from_call_id")
+                            or replay_state.get("response_slots_used")
+                            != replay.get("response_slots_used")
+                            or replay_state.get("transient_failure_count")
+                            != replay.get("transient_failure_count")
+                            or replay_state.get("http_attempts_used")
+                            != replay.get("http_attempts_used")):
+                        transport_preflight_error = (
+                            transport_preflight_error or RuntimeError(
+                                "API response journal disagrees with its "
+                                "successful attempt-ledger generation"
+                            )
+                        )
+                semantic_context = dict(replay_lineage)
+                semantic_call_id = semantic_context["semantic_call_id"]
+                self._semantic_parent_by_id[semantic_call_id] = (
+                    semantic_context.get("parent_semantic_call_id")
+                )
+                if resume_semantic_id is not None:
+                    try:
+                        resume_parent = _semantic_lineage_fields(
+                            resume_semantic_id
+                        )
+                        resume_generation = int(resume_index_raw or "")
+                        resume_next_attempt = int(
+                            resume_next_attempt_raw or "")
+                    except (RuntimeError, TypeError, ValueError):
+                        transport_preflight_error = (
+                            transport_preflight_error or RuntimeError(
+                                "infrastructure resume authorization is invalid"
+                            )
+                        )
+                    else:
+                        if (resume_parent["semantic_root_id"]
+                                == replay_lineage["semantic_root_id"]):
+                            if (replay_lineage["generation_index"]
+                                    != resume_generation
+                                    or replay_lineage[
+                                        "parent_semantic_call_id"]
+                                    != resume_semantic_id):
+                                transport_preflight_error = (
+                                    transport_preflight_error or RuntimeError(
+                                        "response journal conflicts with the "
+                                        "authorized recovery generation"
+                                    )
+                                )
+                            elif (resume_fingerprint != request_fingerprint
+                                  or resume_next_attempt
+                                  != replay_state.get("first_attempt_index")):
+                                transport_preflight_error = (
+                                    transport_preflight_error or RuntimeError(
+                                        "response journal conflicts with the "
+                                        "authorized recovery fingerprint or "
+                                        "attempt index"
+                                    )
+                                )
+                            else:
+                                self._consume_resume_authorization()
+            if replay is None:
+                if (resume_semantic_id is None) != (resume_index_raw is None):
+                    transport_preflight_error = transport_preflight_error or RuntimeError(
+                        "infrastructure resume authorization is incomplete"
+                    )
+                elif resume_semantic_id is not None:
+                    try:
+                        parent_lineage = _semantic_lineage_fields(
+                            resume_semantic_id
+                        )
+                        authorized_generation = int(resume_index_raw or "")
+                        authorized_next_attempt = int(
+                            resume_next_attempt_raw or "")
+                    except (RuntimeError, TypeError, ValueError):
+                        transport_preflight_error = transport_preflight_error or RuntimeError(
+                            "infrastructure resume authorization is invalid"
+                        )
+                    else:
+                        if parent_lineage["semantic_root_id"] != semantic_root_id:
+                            transport_preflight_error = transport_preflight_error or RuntimeError(
+                                "infrastructure resume parent does not belong "
+                                "to the current semantic root"
+                            )
+                        elif authorized_generation != (
+                                parent_lineage["generation_index"] + 1):
+                            transport_preflight_error = transport_preflight_error or RuntimeError(
+                                "infrastructure resume generation index must "
+                                "be exactly one after the parent generation"
+                            )
+                        elif resume_fingerprint != request_fingerprint:
+                            transport_preflight_error = transport_preflight_error or RuntimeError(
+                                "infrastructure resume request fingerprint "
+                                "changed before provider POST"
+                            )
+                        elif (not lineage_state
+                              or lineage_state[-1]["context"][
+                                  "semantic_call_id"] != resume_semantic_id):
+                            transport_preflight_error = transport_preflight_error or RuntimeError(
+                                "infrastructure resume parent is not the latest "
+                                "semantic generation"
+                            )
+                        else:
+                            parent_state = _preflight_guard(
+                                self._ledger_state, resume_semantic_id)
+                            parent_fingerprints = (
+                                parent_state.get("request_fingerprints") or []
+                            )
+                            parent_failure = parent_state.get("terminal_failure")
+                            if parent_fingerprints != [request_fingerprint]:
+                                transport_preflight_error = transport_preflight_error or RuntimeError(
+                                    "infrastructure resume parent prompt or "
+                                    "generation parameters changed"
+                                )
+                            elif not parent_failure:
+                                transport_preflight_error = transport_preflight_error or RuntimeError(
+                                    "infrastructure resume parent has not failed"
+                                )
+                            elif parent_failure.get("status") != "provider_failure":
+                                transport_preflight_error = transport_preflight_error or RuntimeError(
+                                    "only a provider/API infrastructure failure "
+                                    "is resumable"
+                                )
+                            elif (not parent_state.get("call_failed")
+                                  or parent_state.get("last_attempt_status")
+                                  != "retryable_error"
+                                  or not parent_state.get(
+                                      "retry_budget_exhausted")):
+                                transport_preflight_error = transport_preflight_error or RuntimeError(
+                                    "infrastructure resume requires an exhausted "
+                                    "transport budget"
+                                )
+                            elif authorized_next_attempt != (
+                                    _preflight_guard(
+                                        self._lineage_global_http_attempts_used,
+                                        semantic_root_id) + 1):
+                                transport_preflight_error = transport_preflight_error or RuntimeError(
+                                    "infrastructure resume next HTTP attempt "
+                                    "does not match the audited lineage"
+                                )
+                            else:
+                                semantic_context = self._semantic_context(
+                                    call_kind, authorized_generation,
+                                    parent_semantic_call_id=resume_semantic_id,
+                                )
+                                semantic_call_id = (
+                                    semantic_context["semantic_call_id"]
+                                )
+                                semantic_root_id = (
+                                    semantic_context["semantic_root_id"]
+                                )
+                                self._consume_resume_authorization()
+                retry_state = _preflight_guard(
+                    self._ledger_state, semantic_call_id)
+                fingerprints = retry_state.get("request_fingerprints") or []
+                if len(fingerprints) > 1:
+                    transport_preflight_error = transport_preflight_error or RuntimeError(
+                        "semantic-call request fingerprint history is inconsistent"
+                    )
+                elif fingerprints and fingerprints[0] != request_fingerprint:
+                    transport_preflight_error = transport_preflight_error or RuntimeError(
+                        "semantic-call prompt or generation parameters changed; "
+                        "refusing replay/retry"
+                    )
+                elif not fingerprints and transport_preflight_error is None:
+                    _preflight_guard(
+                        self._append_ledger,
+                        semantic_call_id, "semantic_request", call_id=call_id,
+                        call_kind=call_kind,
+                        request_fingerprint=request_fingerprint,
+                    )
+                    retry_state = _preflight_guard(
+                        self._ledger_state, semantic_call_id)
+                global_attempts = _preflight_guard(
+                    self._lineage_global_http_attempts_used, semantic_root_id)
+                if global_attempts > int(retry_state.get("http_attempts_used") or 0):
+                    retry_state = dict(retry_state)
+                    retry_state["http_attempts_used"] = global_attempts
+            else:
+                retry_state = _preflight_guard(
+                    self._ledger_state, semantic_call_id)
+                if (not retry_state.get("response_committed")
+                        and transport_preflight_error is None):
+                    _preflight_guard(
+                        self._append_ledger,
+                        semantic_call_id, "response_committed",
+                        call_id=replay.get("replayed_from_call_id"),
+                        response_slots_used=replay.get("response_slots_used"),
+                        transient_failure_count=replay.get(
+                            "transient_failure_count"),
+                        http_attempts_used=replay.get("http_attempts_used"),
+                        attempt_index=replay.get("http_attempts_used"),
+                        request_fingerprint=request_fingerprint,
+                    )
+                    retry_state = _preflight_guard(
+                        self._ledger_state, semantic_call_id)
+            if (replay is None and transport_preflight_error is None
+                    and any(item.get("committed") for item in lineage_state)):
+                transport_preflight_error = RuntimeError(
+                    "API attempt ledger records a committed response but the "
+                    "response journal is missing"
+                )
             prior_commit_sink = kwargs.get("_response_commit_sink")
 
             def _commit_response(result):
-                self._save_journal(semantic_call_id, call_id, result)
+                result["semantic_root_id"] = semantic_context["semantic_root_id"]
+                result["semantic_call_id"] = semantic_call_id
+                result["generation_index"] = semantic_context["generation_index"]
+                result["parent_semantic_call_id"] = (
+                    semantic_context["parent_semantic_call_id"]
+                )
+                result["transport_recovery_index"] = (
+                    semantic_context["generation_index"]
+                )
+                self._save_journal(
+                    semantic_call_id, call_id, result,
+                    request_fingerprint=request_fingerprint,
+                )
                 if prior_commit_sink is not None:
                     prior_commit_sink(result)
 
@@ -616,15 +1813,23 @@ class ApiCallRecorder:
 
         t0 = time.time()
         try:
+            if transport_preflight_error is not None:
+                try:
+                    transport_preflight_error._anchorpatch_transport_observability_failure = True
+                except Exception:
+                    pass
+                raise transport_preflight_error
             if replay is not None:
                 out = replay
             elif retry_state.get("terminal_failure"):
                 prior = retry_state["terminal_failure"]
-                raise RuntimeError(
+                duplicate_refusal = RuntimeError(
                     "OpenCode MiniMax-M3 semantic call previously exhausted or "
                     f"failed fatally ({prior.get('error_type') or prior.get('status')}); "
                     "refusing a duplicate provider POST"
                 )
+                duplicate_refusal._anchorpatch_transport_observability_failure = True
+                raise duplicate_refusal
             else:
                 out = self.generate_fn(*args, **kwargs)
         except Exception as exc:
@@ -639,7 +1844,9 @@ class ApiCallRecorder:
             error_message = f"{type(exc).__name__}: {exc}"
             for secret in secrets:
                 error_message = error_message.replace(secret, "<redacted-key>")
-            record = self._base_record(call_id, call_kind)
+            record = self._base_record(
+                call_id, call_kind, semantic_context=semantic_context
+            )
             record.update({
                 "provider_request_id": None,
                 "http_status": _exception_http_status(exc),
@@ -688,10 +1895,12 @@ class ApiCallRecorder:
                 "request_url": provider_runtime.get("request_url"),
                 "transport": provider_runtime.get("transport"),
                 "transport_revision": provider_runtime.get("transport_revision"),
+                "transport_resume_policy": provider_runtime.get(
+                    "transport_resume_policy"),
                 "anthropic_sdk_version": provider_runtime.get("anthropic_sdk_version"),
                 "max_tokens": provider_runtime.get("effective_max_tokens"),
                 "thinking_mode": provider_runtime.get("thinking_mode"),
-                "provider_called": False if retry_state.get("terminal_failure") else True,
+                "provider_called": provider_post_started,
                 "response_replayed": False,
                 "replayed_from_call_id": None,
                 "max_response_slots": provider_runtime.get("max_response_slots"),
@@ -699,10 +1908,18 @@ class ApiCallRecorder:
                 "max_transient_failures": provider_runtime.get("max_transient_failures"),
                 "transient_failure_count": failure_state.get("transient_failure_count"),
                 "http_attempts_used": failure_state.get("http_attempts_used"),
+                "transport_recovery_index": semantic_context["generation_index"],
+                "generation_index": semantic_context["generation_index"],
+                "semantic_root_id": semantic_context["semantic_root_id"],
+                "parent_semantic_call_id": (
+                    semantic_context["parent_semantic_call_id"]
+                ),
+                "request_fingerprint": request_fingerprint,
             })
-            self._write_record(record)
             if (str(requested_model).lower().startswith("minimax-m3")
-                    and classification == "provider/API failure"):
+                    and classification == "provider/API failure"
+                    and provider_post_started
+                    and not failure_state.get("call_failed")):
                 persisted_state = failure_state
                 self._append_ledger(
                     semantic_call_id, "call_failed", call_id=call_id,
@@ -711,11 +1928,30 @@ class ApiCallRecorder:
                     response_slots_used=persisted_state.get("response_slots_used"),
                     transient_failure_count=persisted_state.get("transient_failure_count"),
                     http_attempts_used=persisted_state.get("http_attempts_used"),
+                    attempt_index=persisted_state.get("http_attempts_used"),
+                    request_fingerprint=request_fingerprint,
                 )
+            # The semantic-root lock covers both sides of the terminal
+            # evidence pair.  Publish the ledger terminal before the API row
+            # so a live inspector either sees no mapped API row yet or sees a
+            # complete pair; it must never observe an API failure row whose
+            # matching call_failed event is still pending.
+            self._write_record(record)
+            infrastructure_incomplete = (
+                classification == "provider/API failure"
+                and _is_transport_retry_exhaustion(record, exc)
+            )
             try:
                 setattr(exc, "_anchorpatch_api_recorded", True)
+                setattr(
+                    exc, "_anchorpatch_failure_class",
+                    "infrastructure_incomplete"
+                    if infrastructure_incomplete else "local_failure",
+                )
+                setattr(exc, "_anchorpatch_api_record", dict(record))
             except Exception:
                 pass
+            _release_semantic_lock()
             raise
         _close_transport()
 
@@ -729,7 +1965,19 @@ class ApiCallRecorder:
 
         classification, error_type = _empty_classification(meta, raw)
         latency_ms = int((meta.get("elapsed_time") or (time.time() - t0)) * 1000)
-        record = self._base_record(call_id, meta.get("call_kind") or call_kind)
+        record_context = semantic_context
+        if isinstance(meta, dict) and meta.get("semantic_call_id"):
+            parent_semantic_call_id = meta.get("parent_semantic_call_id")
+            record_context = _semantic_lineage_fields(
+                meta.get("semantic_call_id"), parent_semantic_call_id
+            )
+            self._semantic_parent_by_id[record_context["semantic_call_id"]] = (
+                parent_semantic_call_id
+            )
+        record = self._base_record(
+            call_id, meta.get("call_kind") or call_kind,
+            semantic_context=record_context,
+        )
         record.update({
             "provider_request_id": meta.get("provider_request_id") or meta.get("response_id"),
             "http_status": meta.get("http_status"),
@@ -774,6 +2022,7 @@ class ApiCallRecorder:
             "request_url": meta.get("request_url"),
             "transport": meta.get("transport"),
             "transport_revision": meta.get("transport_revision"),
+            "transport_resume_policy": meta.get("transport_resume_policy"),
             "anthropic_sdk_version": meta.get("anthropic_sdk_version"),
             "temperature": meta.get("temperature"),
             "max_tokens": meta.get("max_tokens"),
@@ -794,12 +2043,21 @@ class ApiCallRecorder:
             "max_transient_failures": meta.get("max_transient_failures"),
             "transient_failure_count": meta.get("transient_failure_count"),
             "http_attempts_used": meta.get("http_attempts_used"),
+            "transport_recovery_index": record_context["generation_index"],
+            "generation_index": record_context["generation_index"],
+            "semantic_root_id": record_context["semantic_root_id"],
+            "parent_semantic_call_id": record_context["parent_semantic_call_id"],
+            "request_fingerprint": request_fingerprint,
         })
         if classification:
             record["subagent_audit_required"] = _audit_required(record)
             record["rerun_recommended"] = False
             record["count_as_method_failure"] = True
         self._write_record(record)
+        # Keep exclusive ownership through raw capture and the terminal API
+        # row.  Releasing after the transport journal alone would permit a
+        # duplicate worker to acquire this root during cross-file commit.
+        _release_semantic_lock()
 
         if isinstance(out, dict):
             out = dict(out)
@@ -815,10 +2073,10 @@ class ApiCallRecorder:
             out["finish_reasons"] = [meta.get("finish_reason")]
         return out
 
-    def record_runner_exception(self, exc):
+    def record_runner_exception(self, exc, call_kind="runner_exception"):
         self.call_index += 1
         call_id = f"runner{self.call_index:06d}_{uuid.uuid4().hex[:8]}"
-        record = self._base_record(call_id)
+        record = self._base_record(call_id, call_kind=call_kind)
         record.update({
             "provider_request_id": None,
             "http_status": None,
@@ -923,9 +2181,8 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                         seed, model, distractor, max_tokens, notes="", printing=True,
                         context_shuffle_seeded=False,
                         context_shuffle_seed_version=None):
-    """Append one invocation record to <out_dir>/run_metadata.jsonl. Returns the
-    record. Warns to stderr if this dir already holds runs with a different code
-    fingerprint (mixing code versions into one campaign dir)."""
+    """Atomically append one transport-v4 invocation metadata record."""
+    del printing
     os.makedirs(out_dir, exist_ok=True)
     fp = code_fingerprint()
     provider_runtime = {}
@@ -951,45 +2208,55 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             context_shuffle_seed_version or "global_random_seed_v1"
         )
     path = os.path.join(out_dir, "run_metadata.jsonl")
-    prior = _read_jsonl_records_with_retry(path) if os.path.exists(path) else []
-    if provider_runtime:
-        current_revision = provider_runtime["transport_revision"]
-        if prior:
-            previous_revision = prior[-1].get("transport_revision")
-            if previous_revision != current_revision:
-                raise RuntimeError(
-                    f"refusing to resume/mix {out_dir!r}: prior transport revision "
-                    f"is {previous_revision or 'unrecorded'}, current revision is "
-                    f"{current_revision}; use a new --out_dir"
-                )
-        else:
-            existing_payload = False
-            for root, _dirs, files in os.walk(out_dir):
-                if any(name.endswith(".ckpt.json") for name in files):
-                    existing_payload = True
-                    break
-                if "api_calls.jsonl" in files:
-                    existing_payload = True
-                    break
-            if existing_payload:
-                raise RuntimeError(
-                    f"refusing to run transport {current_revision} in {out_dir!r}: "
-                    "existing experiment payload has no compatible run metadata; "
-                    "use a new --out_dir"
-                )
-    if printing and prior:
-        prev_fp = prior[-1].get("code_fingerprint")
-        if prev_fp and prev_fp != fp:
-            diff = sorted(k for k in fp if fp.get(k) != (prev_fp or {}).get(k))
-            sys.stderr.write(
-                f"[run_meta] WARNING: {out_dir} already holds runs under a DIFFERENT "
-                f"code fingerprint (changed: {', '.join(diff)}). Mixing code versions "
-                f"in one campaign dir is exactly the ambiguity this convention prevents; "
-                f"prefer a new --out_dir.\n")
-    with open(path, "a", encoding="utf-8") as f:
+    with open(path, "a+", encoding="utf-8") as f:
         portalocker.lock(f, portalocker.LOCK_EX)
         try:
+            f.seek(0)
+            prior = []
+            for line_number, line in enumerate(f, 1):
+                if not line.strip():
+                    continue
+                try:
+                    prior.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise RuntimeError(
+                        f"invalid run metadata JSONL at line {line_number}"
+                    ) from exc
+            if any(row.get("schema") != METADATA_SCHEMA for row in prior):
+                raise RuntimeError(
+                    "prior run metadata is not transport-v4 metadata; use a "
+                    "new --out_dir"
+                )
+            if any(row.get("code_fingerprint") != fp for row in prior):
+                raise RuntimeError(
+                    "prior run metadata code fingerprint differs; use a new "
+                    "--out_dir"
+                )
+            if provider_runtime and prior:
+                revision = provider_runtime["transport_revision"]
+                policy = provider_runtime["transport_resume_policy"]
+                if any(row.get("transport_revision") != revision
+                       or row.get("transport_resume_policy") != policy
+                       for row in prior):
+                    raise RuntimeError(
+                        "prior run metadata transport revision or resume policy "
+                        "differs; use a new --out_dir"
+                    )
+            if provider_runtime and not prior:
+                existing_payload = any(
+                    any(name.endswith(".ckpt.json") for name in files)
+                    or "api_calls.jsonl" in files
+                    for _root, _dirs, files in os.walk(out_dir)
+                )
+                if existing_payload:
+                    raise RuntimeError(
+                        "existing experiment payload has no compatible "
+                        "transport-v4 run metadata; use a new --out_dir"
+                    )
+            f.seek(0, os.SEEK_END)
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
         finally:
             portalocker.unlock(f)
     return rec

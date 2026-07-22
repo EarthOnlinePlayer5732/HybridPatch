@@ -32,6 +32,15 @@ def parse_args() -> argparse.Namespace:
             "target archive. Do not use for the final archival commit."
         ),
     )
+    parser.add_argument(
+        "--sealed-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Reuse a validated raw artifact seal instead of reading "
+            "the target experiment tree again."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -90,12 +99,28 @@ def main() -> int:
         flush=True,
     )
 
+    # Exercise every catalog/record contract before the expensive raw-tree
+    # scan. The temporary output is discarded and aggregate indexes are not
+    # touched. This turns vocabulary/provenance/scope mistakes into cheap
+    # failures instead of multi-minute retries.
+    run(
+        str(BUILDER),
+        "--only",
+        args.experiment_id,
+        "--skip-tree-hash",
+        "--validate-only",
+    )
+
     target_build = [
         str(BUILDER),
         "--only",
         args.experiment_id,
     ]
-    if args.skip_tree_hash:
+    if args.sealed_manifest is not None:
+        target_build.extend(
+            ["--sealed-manifest", str(args.sealed_manifest.resolve())]
+        )
+    elif args.skip_tree_hash:
         target_build.append("--skip-tree-hash")
     run(*target_build)
 

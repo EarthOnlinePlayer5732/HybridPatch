@@ -455,3 +455,432 @@
 - aggregate: FR+Official RS@1/5/10=0.735/0.550/0.508, CF@10=162/2097; original frozen FR remains 0.925/0.682/0.558, CF=167/2097
 - V7 val40 sensitivity: strict38 HP 0.825 vs FR+Official 0.564, Δ+0.262 (p=2.54e-28, d=0.62); retained as mixed-source/post-hoc sensitivity, not a replacement for the same-transport canonical Δ+0.008
 - artifacts: `Baseline/build_fr_plus_official.py`, `Baseline/FR+Official/{README.md,source_manifest.csv,anomaly_by_sample.csv,summary.json,val40_comparison.md}`; FINDINGS §232
+
+## 2026-07-17 - Before Experiment: HP_V8 soft-budget paid smoke2
+
+- experiment: `exp_20260717_hybridv8_softbudget_smoke2`; owner `HP_V8`; level `付费 smoke`; claim role `diagnostic_only`
+- plan: `docs/experiment_plans/exp_20260717_hybridv8_softbudget_smoke2.md`
+- scope: `treebank4,obj3d2` × 2RT × `hybridpatch,fullrewrite`; MiniMax-M3; transport `opencode_anthropic_sdk/3`; seed42; distractor-on; same per-sample task plan
+- gate: run only after independent plan review, full zero-API regression/runtime-evaluator preflight, 11-Key tiny probe and a clean committed tree; 10-sample campaign remains blocked until smoke integrity, preservation and API-ledger checks pass
+- stop: preservation violation, Git identity drift, systematic runner/evaluator/transport error, duplicate/partial RT, unmappable API log or budget breach; no paid call made at entry time
+
+## 2026-07-17 - Before Experiment: HP_V8 soft-budget paired10 diagnostic
+
+- experiment: `exp_20260717_hybridv8_softbudget_paired10`; owner `HP_V8`; level `支持/诊断实验`; claim role `diagnostic_only`
+- plan: `docs/experiment_plans/exp_20260717_hybridv8_softbudget_paired10.md`
+- scope: user-fixed 10 exposed samples × 10RT × `hybridpatch,fullrewrite`; MiniMax-M3; transport `opencode_anthropic_sdk/3`; seed42; distractor-on; same per-sample task plan
+- interpretation boundary: hand-selected and historically exposed samples; report RS@1/5/10 and label the user-requested 20-edit-step endpoint as RT10 backward, never as an unseen-set estimate
+- launch gate: exact same clean commit as successful smoke; no code/config/transport/evaluator/scoring change between phases; no paid call made at entry time
+
+## 2026-07-17 - After Experiment: HP_V8 soft-budget paid smoke2 — operational PASS, effect NO-GO
+
+- identity: `exp_20260717_hybridv8_softbudget_smoke2`; commit `e6abad4449f7c2536c914725586fb44094546d76`; clean tree; MiniMax-M3; transport-v3; seed42; distractor-on
+- preflight: all zero-API tests/runtime evaluators passed; 11/11 Key probes completed with 2,302 provider tokens; no Key value was printed or copied
+- completeness: 16/16 result rows and four checkpoints complete; 17 calls = 16 primary + 1 HP repair; verifier PASS 8/8 backward; `preservation_violations=0`
+- exact RT2: HP 0.500000 vs FR 0.998361, delta -0.498361 (n=2 exposed samples); CF HP 1/2 vs FR 0/2; diagnostic only
+- usage: HP 426,989 tokens / USD 0.388963; FR 316,543 / USD 0.276923; total USD 0.665886; fixed ×25 launch projection USD 16.6471, cost gate GO
+- protocol: HP bounded 8/8; profiles block/default 4/4; repair 1/1/1; protocol failures 0/8; burden overage 0/8
+- review/finalize: two independent read-only reviews; integrity PASS and method-effect NO-GO; official prepare/finalize and both record validators PASS. The generated canonical record/catalog/index snapshot is private-only because committing the global rebuild would rewrite frozen version overlays
+- retention: private ZIP `../hybridpatch_private_archives/exp_20260717_hybridv8_softbudget_smoke2__e6abad4.zip`, SHA-256 `378d160dd25efb38e857983903dac248afd559b057abb7d0add63bdbe6ad5dd6`; exact local-secret and heuristic matches 0
+
+## 2026-07-17 - After Experiment: HP_V8 soft-budget paired10 — failed_informative stop
+
+- identity: `exp_20260717_hybridv8_softbudget_paired10`; same clean commit/config as smoke; smoke completeness/cost gate passed before any main worker launch
+- stop: provider `APIStatusError: Streaming response failed` at `hybridpatch/musicsheet2/rt02/backward/hybridpatch_primary`; dispatcher stopped and reconciled all workers; no preservation, Git, evaluator or duplicate-row trigger
+- integrity: 192/400 committed rows (HP/FR 96/96; backward 48/48), exact checkpoints and API locators; verifier PASS 96/96; preservation 0
+- resume decision: ledger persisted terminal `call_failed`; reserve KEY_11 cannot clear the semantic-call terminal state and a resume would fail before provider POST; two independent audits returned NO-GO, so no resume was attempted
+- endpoint: formal analyzer correctly failed at n=1/10 exact RT10; requested 10-sample/20-edit-step result is unavailable. Docker6 is the sole complete pair (HP 0.982759, FR 0.928855) and is not a method estimate
+- partial diagnostics: CF HP 2/41 vs FR 0/42; routes bounded/local/bulk/dsl 55/30/6/5; protocol failure 1/96; repair attempted/used/success 12/9/8; soft burden 7/96; preservation 0
+- usage lower bounds: committed rows HP/FR 3,318,844/2,448,339 tokens and USD 2.462493/1.790758; API ledger HP/FR 3,545,711/2,635,378 and USD 2.681167/1.995007; eight killed in-flight calls lack final usage
+- retention: `analysis/failure_summary.md`; private ZIP `../hybridpatch_private_archives/exp_20260717_hybridv8_softbudget_paired10__e6abad4__failed_informative.zip`, SHA-256 `08eba3ee36b2c63df5e58b7d0c5796e3ba4b5409ecc1476e9bf4cf4b83d6c694`; secret/heuristic matches 0
+- record status: official prepare stops at incomplete formal endpoint as intended; no manual canonical record was created and no method-effect claim is eligible
+
+## 2026-07-18 - Before Code Change: OpenCode transport-v4 stream classification and sample isolation
+
+- scope: create `opencode_anthropic_sdk/4` without changing transport-v3 history or HP_V8 method protocol/prompt/executor/gate; old `exp_20260717_hybridv8_softbudget_paired10` remains `failed_informative`
+- trigger: MiniMax Anthropic `APIStatusError(status=200, "Streaming response failed")` was not recoverable under the old campaign path, and one exhausted worker stopped unrelated samples
+- planned transport change: classify HTTP-200/incomplete terminal chains before ordinary status handling; enforce event-derived R2/I3; separate transport attempts from HP repair; use exact-payload semantic lineage for audited recovery
+- planned dispatcher change: isolate only four-source-evidenced retry exhaustion; keep missing endpoints null; continue sibling workers; retain preservation/Git/duplicate/half-commit/ledger/local/evaluator/shared-integrity failures as global stops
+- validation: fault injection, real dispatcher/checkpoint zero-API paths, V1–V8 replay, frozen archive replay, runtime evaluator preflight and clean-tree review before any paid call
+- guardrails: no HP_V8 method, FullRewrite, evaluator, scoring, data or frozen-record changes
+
+## 2026-07-18 - Before Experiment: HP_V8 transport-v4 smoke2 and paired10 diagnostic
+
+- experiments: `exp_20260718_hybridv8_transportv4_smoke2` then, only after GO, `exp_20260718_hybridv8_transportv4_paired10`
+- plans: `docs/experiment_plans/exp_20260718_hybridv8_transportv4_smoke2.md` and `docs/experiment_plans/exp_20260718_hybridv8_transportv4_paired10.md`
+- fixed design: MiniMax-M3, seed42, distractor-on, same per-sample plans and alternating method order; 2 samples×2RT smoke followed by the user-fixed 10 samples×10RT
+- claim boundary: all samples are exposed and both experiments are `diagnostic_only`; no method-effect claim from smoke or incomplete main
+- launch status: `NO-GO` until v4 review, all zero-API gates, runtime evaluator preflight, final read-only plan review, clean implementation commit and Key probe pass; no API call made at this entry
+
+## 2026-07-18 - After Code Change / Zero-API Preflight: OpenCode transport-v4
+
+- implementation: `opencode_anthropic_sdk/4` classifies HTTP-200/incomplete terminal chains before ordinary status; per exact semantic call R2/I3; every HTTP attempt rechecks campaign guards; transport retry and HP repair retain separate call kinds, prompts and budgets
+- isolation/recovery: only four-source-evidenced retry exhaustion is sample-local; sibling workers continue; recovery uses exact `gNNN` lineage, one-shot four-field authorization, same fingerprint and continuous attempt index; committed RT creates no POST
+- global integrity: post-call and pre-commit Git/tree/task-plan/latch checks, latch-ordered result commit, preservation stop, semantic-root ownership, active-worker lease retention and provenance-audited CAS closure
+- tests: compile 98 files PASS; HybridPatch executor 72/72; HP transport/dispatcher 84/84; transport-core 47/47; splitter PASS; analyzer 5/5; process-experiment 9/9; burden replay 400 rows/394 successes
+- readonly replay: V4 smoke 70, V5 dev20 400, V6 dev20 400, V7 dev20 400, V8 smoke 8 and V8 partial paired 96 backward RS PASS; frozen V3 dev20full retains its pre-existing `quantum4 RT9 0.9850→1.0000` verifier mismatch under both V3 and V8 verifier, so it is disclosed rather than rewritten
+- runtime preflight: fixed 10 samples all initial evaluator score 1.0; seed42/10RT task-plan references and preregistered hashes match
+- scope audit: no HP_V3–HP_V7, Baseline, data, records/exp archive, HP_V8 protocol/prompt/executor/gate, FullRewrite, evaluator or scoring changes; HP/transport `model_openai.py` byte-identical SHA-256 `cdfe85e9f48b81d16ff85857d51b97db09b559877675456708838959ff15fd93`
+- plan review: fresh-context read-only review returned plan-level GO after fixing cwd/dry-run commands,
+  2RT hashes, verifier/review gates, explicit cost-stop policy, full resume templates and a fixed maximum
+  of one audited recovery (`g001`) per failed semantic root
+- formal dry-run finding: the first clean-commit smoke dry-run stopped before any provider call because a
+  new campaign had no active-worker-set artifact for the real inspector. The dry-run now mirrors launch
+  preflight by writing an explicit empty set; a non-mocked 84th regression test covers this path. The
+  zero-API partial directory was removed file-by-file before rerun.
+- credential/API status: the local Key inventory reported 11 expected nonempty labels without printing
+  values; the failed dry-run made zero provider calls. API remains `NO-GO` until the fix commit, repeated
+  formal dry-run and live Key probe pass.
+
+## 2026-07-18 - After Experiment: transport-v4 paired10 — causal snapshot stop
+
+- identity: `exp_20260718_hybridv8_transportv4_paired10`; commit
+  `6f404de635cc97883736dbccb34c0358ec3f005f`; clean tree; MiniMax-M3; seed42;
+  distractor-on; user-fixed 10 samples
+- prior gate: the same-commit 2-sample smoke completed 16/16 with verifier PASS,
+  preservation 0 and projected main cost USD 15.754035; two independent reviews returned operational GO
+- live transport evidence: HP docker6 RT1 forward and musicsheet2 RT1 forward each observed a
+  generation-progress incomplete stream, consumed response slot 1 and completed the exact-payload replay
+  in slot 2; sibling workers continued
+- stop: at 124/400 committed rows, strict inspection reported missing API mapping for HP/json2 RT7
+  backward and correctly latched a campaign-global integrity stop; all 10 workers were reconciled and the
+  active set became empty
+- diagnosis: final evidence has exactly one API row, `response_committed` ledger event, journal and result
+  for that step. API mtime preceded result by 88 ms, so the inspector combined an old API snapshot with a
+  new result snapshot; this was a cross-file read race, not lost evidence
+- integrity boundary: 137 API terminal rows/journals, 726 attempt rows, 10 in-flight calls at stop, no
+  complete paired sample, preservation 0. No RS@10 or method comparison is eligible; missing remains null
+- retention: campaign is `failed_informative`, never resume/splice. Official prepare stopped as designed
+  at incomplete canonical endpoint n=0/10; no canonical record was fabricated. Credential scan over 1,251 files found
+  zero exact Key/Authorization/Cookie/private-key matches; private ZIP SHA-256
+  `ad3a56972def73ad550db32d4835a4802b14719ad758fb4d5fdf85df9a708407`
+
+## 2026-07-18 - Before Experiment: transport-v4 causal-snapshot smoke2 and paired10
+
+- experiments: `exp_20260718_hybridv8_transportv4_snapshotfix_smoke2`, then only after operational GO,
+  `exp_20260718_hybridv8_transportv4_snapshotfix_paired10`
+- plans: `docs/experiment_plans/exp_20260718_hybridv8_transportv4_snapshotfix_smoke2.md` and
+  `docs/experiment_plans/exp_20260718_hybridv8_transportv4_snapshotfix_paired10.md`
+- unique change: live inspector caches results before API/attempt/journal, the reverse of the fixed writer
+  publication order; schema, lineage, mapping, duplicate and half-commit checks remain unchanged
+- test evidence: a deterministic barrier captures an old API snapshot while a worker publishes two API
+  terminals and an atomic RT, proving the inspector returns a consistent old prefix; a second assertion
+  proves integrity failure latches before worker termination
+- plan review: new-context read-only review returned GO after fixing dataset/split provenance, runtime
+  identity, executable cost/recovery rules, causal claim boundaries and same-commit smoke lifecycle staging
+- fixed design: same model, transport-v4, seed42, task plans, distractor and alternating method order as the
+  stopped run; all samples exposed and both campaigns diagnostic-only
+- launch status: `NO-GO` until full zero-API regression/replay, new-context plan review, clean commit,
+  formal dry-run, 11-Key probe and final identity check pass
+- lifecycle staging: the paid smoke is the main campaign's same-commit preflight stage. If smoke is GO,
+  stop/verifier/strict-inspector/cost gates, ignored prepare and read-only review run before main;
+  only tracked finalize and After documentation are deferred until main ends so the hard same-commit
+  clean-tree gate remains satisfiable. A smoke NO-GO is postprocessed immediately.
+
+## 2026-07-18 - After Experiment: snapshotfix paired10 — audited host-loss continuation complete
+
+- identity: `exp_20260718_hybridv8_transportv4_snapshotfix_paired10`; clean commit
+  `bc4a39f7dd1476848927d45bcf1840a74677e6be`; MiniMax-M3; transport
+  `opencode_anthropic_sdk/4`; seed42; distractor-on; fixed exposed 10-sample scope
+- host interruption: power loss left 362/400 committed rows and three generation-started HTTP attempts
+  without terminal events. A full pre-recovery archive was sealed first (SHA-256
+  `7fe215abe20e311f426e5329e9e8ba0125c9bedbec0f512b8e2d5e373e262354`); the old raw
+  files stayed byte-identical
+- continuation policy: per the user's explicit instruction, the same campaign resumed only
+  `filesystem3`, `musicsheet2` and `satellite4` from the first uncommitted checkpoint suffix. The three
+  host-loss attempts consumed their observed-generation response slots; attempts and raw evidence were
+  append-only. The 82 rows already committed for those samples generated zero later provider POSTs
+- isolation evidence: satellite4 g000 exhausted both response slots and first ended
+  `infrastructure_incomplete`; filesystem3 and musicsheet2 continued to completion. A second ordinary
+  dispatcher resume launched only satellite4 g001, after which all ten latest outcomes were `finished`
+- final integrity: 400/400 unique result rows, 20/20 checkpoints at RT10, no duplicate or half-committed
+  round trip; 436 API rows = 433 provider rows + 3 zero-POST journal replays; 442 attempts = 432 complete
+  responses + 10 generation attempts without final usage; strict inspector `errors=[]`, evidence digest
+  `6e0750f7779ee6c20d4c11c4d0f15a5c84c52c02472e0e0d15e25d0f217de3f2`
+- verification/result: raw replay PASS 200/200 backward. Exact backward RT10 HP/FR
+  `0.745178/0.695854`, paired delta `+0.049324`, sample SD `0.344047`, wins/losses/ties `4/4/2`;
+  CriticalFailure@0.10 `4/90` vs `8/90`. This is diagnostic-only over exposed samples
+- HP telemetry: declared bounded/local/bulk/DSL routes `124/54/14/7` plus one no-route model-empty
+  kept-context row; repair attempted `32/200`, used/success `21/32`; protocol failure `11/200`; soft
+  burden `12/200`; preservation `0` across 199 applicable steps plus one explicit N/A
+- known usage: HP 8,448,270 tokens / USD 7.036488; FR 6,660,571 / USD 5.571257. Ten
+  generation attempts have no final usage, so exact provider billing remains unknown
+- review/finalize: two independent read-only audits returned GO within the diagnostic-only boundary;
+  official verifier, prepare, finalize and both record validators PASS. The unparsed model-empty row's
+  legacy `protocol_version=hybridpatch/1` fallback was excluded from observed-envelope revision
+  collection without editing the raw row; a permanent process-tool regression test was added. The
+  generated record bundle is private rather than catalogued because a catalog hash change would rewrite
+  every frozen HP_V3–HP_V7/Baseline/transport record
+- final zero-API regression: compile 98 files PASS; executor 72/72; splitters byte-exact; HP integrated
+  transport/dispatcher 85/85; transport-core 47/47; analyzer 5/5; process tool 14/14; burden replay
+  400 rows/394 successes; V7 dev20 replay PASS 400; this campaign replay PASS 200; observed revisions
+  exactly `['hybridpatch/8']`; `git diff --check` and records-only validator PASS. The full source-linked
+  validator retains one pre-existing HEAD mismatch: the frozen transport-v2 record stores the older
+  transport log hash/size while current HEAD already contains the later 7,583-byte log; fixing it would
+  rewrite a frozen record, so it is disclosed and left unchanged
+- retention: complete private archive
+  `../hybridpatch_private_archives/exp_20260718_hybridv8_transportv4_snapshotfix_paired10_complete.tgz`,
+  SHA-256 `d24f416498c754d0be317d02c5b8f4916a7f21b4eb558c8e6d64184a89834508`;
+  recovery runtime archive SHA-256
+  `245001818ba8afaa8974f6b48ff6b7f42ac13a17fdb6c030dcd1f2b09f8522f1`; generated record
+  snapshot SHA-256 `d86e944e5ac5cd225c21670626a288861f958d3ed24026635dda5756ca9d5f53`;
+  archive credential scan found zero exact Key, Authorization, Cookie or private-key matches
+
+## 2026-07-19 - Before Experiment: HP_V8 transport-v4 supplemental val40 RT10
+
+- experiment: `exp_20260719_hybridv8_transportv4_supplement40`; plan:
+  `docs/experiment_plans/exp_20260719_hybridv8_transportv4_supplement40.md`
+- scope: V6 val40 的同一 40 样本集合，采用 record canonical sorted order
+  (`val20 + unused_reserve20`)，40 exposed samples,
+  MiniMax-M3, HP_V8 vs FullRewrite, seed42, distractor-on, 10RT, transport
+  `opencode_anthropic_sdk/4`; diagnostic-only
+- grouping: raw output remains a new isolated campaign. After completion it will be reported beside the
+  completed snapshotfix paired10 and in a labeled combined supplemental view; six overlapping sample IDs
+  are disclosed and never silently treated as 50 independent sample identities
+- concurrency: 13 labeled Keys, each first tested at 4-way probe concurrency; formal dispatcher launches
+  one audited paired worker per sample, at most 4 workers per Key, and alternates the first method within
+  each Key so HP and FR run concurrently rather than as method-wide waves
+- reporting commitment: RT1 through RT10 HP, FR and paired delta tables are mandatory for supplement40,
+  prior10 and combined views; RT10-only or overall-average-only reporting is insufficient
+- launch gate: no formal API campaign until zero-API regression, runtime evaluator preflight, fresh-context
+  read-only plan review, clean commit, formal dry-run, exact task-plan check and 13-Key x4 probe all pass
+- plan review: fresh-context read-only review first returned GO WITH FIXES; after correcting V6 set/order
+  wording, making `--require_plans` fail before any probe, freezing fixed complete-chain RT denominators,
+  adding identity/log/budget fields and hard-rejecting `g002+` with regression coverage, final verdict is GO
+- stop/recovery: preservation or shared integrity failures stop globally; strictly evidenced provider
+  exhaustion isolates only that sample. Resume launches only incomplete samples from the first uncommitted
+  RT and never reissues committed forward/backward steps
+
+## 2026-07-19 - Failed Launch and Replacement: supplemental val40 metadata-lock contention
+
+- failed campaign: `exp_20260719_hybridv8_transportv4_supplement40`; clean commit
+  `139fbdcaa13958418d0027405821a19fb6c8b66a`; all preflight gates and 13-Key x4 probes passed
+- stop evidence: after the 40-worker barrier, the first terminal API row was a local
+  `runner_exception: AlreadyLocked`; the strict inspector correctly stopped all workers. There were zero
+  result rows, zero checkpoints and zero response commits. The attempt ledger retained 36 semantic
+  requests, 36 attempt starts and 34 generation-progress events, so provider-side cost is unknown rather
+  than zero
+- root cause: every semantic call's atomic stop-latch read unnecessarily acquired the shared metadata
+  writer lock. Windows high concurrency surfaced normal lock contention as `portalocker.AlreadyLocked`
+- replacement: preserve the failed directory as `failed_informative`; do not resume or splice it. Use new
+  plan `docs/experiment_plans/exp_20260719_hybridv8_transportv4_supplement40_lockfix.md`, new out_dir and
+  new clean commit
+- unique fix: lock-free reads of atomically published `campaign_stop.json`; true metadata writers use a
+  bounded retrying lock. Method protocol, prompts, executor, gate, FullRewrite, evaluator, scoring,
+  transport-v4 request/retry semantics, samples and task plans remain unchanged
+- relaunch gate: complete zero-API regression, fresh read-only plan review, new clean commit and formal
+  dry-run, then revalidate all 13 Keys at 4-way concurrency before any formal provider POST
+
+## 2026-07-19 - After Experiment: supplement40 lockfix complete
+
+- identity: `exp_20260719_hybridv8_transportv4_supplement40_lockfix`; clean commit
+  `effad42675b6d112c62e42d695617166e27f989c`; MiniMax-M3; transport
+  `opencode_anthropic_sdk/4`; seed42; distractor-on; fixed V6 val40 40-sample scope
+- launch: 13/13 Keys passed four-way liveness probes; dispatcher kept at most four workers per Key and
+  balanced HP-first/FR-first 20/20, so HP and FullRewrite ran concurrently rather than in method waves
+- completeness: 1,600/1,600 unique rows, 80/80 RT10 checkpoints, 40/40 latest outcomes and metadata
+  `finished`; 800/800 backward raw responses independently recomputed PASS; strict inspector
+  `errors=[]`; no duplicate, half-committed or unmapped evidence
+- exact trajectory: fixed-n=40 HP/FR at RT1 `0.962799/0.911714`, widening to RT10
+  `0.837339/0.573381` (delta `+0.263959`, sample SD `0.402060`, W/L/T `26/10/4`);
+  CriticalFailure@0.10 `20/360` vs `27/360`. Full RT1–RT10 tables for supplement40, prior10,
+  pooled 50 chains and deduplicated 44 IDs are in
+  `HP_V8/analysis/exp_20260719_hybridv8_transportv4_supplement40_lockfix.md`
+- HP telemetry: routes bounded/local/bulk/DSL `579/148/54/16` plus three no-route kept-context steps;
+  repair attempted/used/success `104/88/78`; final protocol failure `20/800`; soft burden `49/800`
+  and non-blocking; preservation `0` across 797 applicable steps plus three explicit N/A
+- transport/model: 12 incomplete-stream attempts lacked final usage and all recovered within the second
+  g000 response slot; terminal infrastructure failures 0. Ten complete thinking-only max-tokens primary
+  responses (HP 3, FR 7) remain model-content failures under the frozen policy
+- usage: known HP 33,061,891 tokens / USD 26.581893; FR 25,796,080 / USD 21.104516; total
+  58,857,971 / USD 47.686409. A deliberately pessimistic bound for the 12 unknown-usage attempts gives
+  USD 49.948204; failed-launch/probe reserve yields campaign-family upper USD 56.548204 < USD 75
+- review/retention: official prepare, two independent read-only reviews, generated-state finalize and
+  both validators PASS. Global generated records were restored to original bytes to preserve frozen
+  V3–V7/Baseline/transport records; the generated HP_V8 record is privately archived. Final raw archive
+  SHA-256 `79d5573ea606544559c68f6630df1c1f90de4679642bcec5f038f9e0e28b9c10`; 13-Key exact scan found
+  zero Key, Authorization, Cookie or private-key matches
+- final validation: `validate_experiment_records.py --records-only` PASS for all 13 published records.
+  The source-linked mode reports 21 expected stale-hash errors after active research docs changed; those
+  hashes are embedded in frozen V3–V7/Baseline/transport records and are disclosed rather than rewritten
+- claim boundary: all 44 unique IDs are exposed, six IDs appear in both campaigns, and generation/commit/
+  concurrency differ. The pooled 50-chain and deduplicated 44-ID views are descriptive diagnostics, not
+  a new independent holdout, universal-superiority or metadata-lock causal-performance claim
+
+## 2026-07-19 - Before Experiment: HP_V8 method-unseen confirmation68
+
+- experiment: `exp_20260719_hybridv8_transportv4_method_unseen_confirmation68`; plan:
+  `docs/experiment_plans/exp_20260719_hybridv8_transportv4_method_unseen_confirmation68.md`
+- exposure audit: strict any-provider-call evidence covers 234/234 because the frozen FullRewrite baseline
+  called every sample, so absolute provider-unseen is zero. Under the repository's method/developer holdout
+  policy, the 2026-07-03 live HP/FR sealed test20 is now explicitly excluded together with dev/val/unused
+  and registry-contaminated samples. Registry `clean_candidate` has 86 samples, but `python1` has a documented
+  developer content/evaluator investigation and is excluded despite the stale clean label. The resulting 85
+  have zero intersection with sealed splits, scanned HP evidence or known content-level development exposure;
+  current evaluator runtime is 234/234 runnable.
+- selection: because `N=85<100`, seed42 marginal stratification over domain, format, semantic operation/task
+  type, file count and document length selected `round(0.8×85)=68` and froze 17 reserve before any API.
+  Reserve will not be run. Top-level `data/` stays read-only; the committed selection manifest is the overlay.
+- fixed comparison: HP_V8 vs FullRewrite, MiniMax-M3, transport-v4, seed42, distractor-on, 10RT, shared
+  task plans, exact 34/34 method-first balance. One campaign uses 52+16 bounded waves so each of
+  13 Keys has at most four concurrent paired workers and HP/FR remain concurrent.
+- reporting commitment: raw scores stay 0–1; the derived report uses percent and pp, fixed n=68 RT1–RT10,
+  every-sample RT10, W/L/T, CF, mean/median/concentration, pre-registered paired inference,
+  protocol/preservation and usage/retention. `python4`/`audiosyn1` sensitivities cannot replace headline.
+- launch status: `NO-GO` until selection/evaluator/orchestration tests, full zero-API regression/replay,
+  fresh read-only plan review, clean commit, formal dry-run, frozen plan hashes and 13-Key probes pass.
+- freeze: no HP_V8 method/prompt/protocol/executor/gate, FullRewrite, transport, evaluator or scoring
+  changes; no automatic reserve run and no post-result method tuning.
+
+## 2026-07-19 - Scope Replacement Before API: HP_V8 mixed confirmation100
+
+- authorization: the user replaced the blocked absolute-unseen request with an explicit two-cohort scope:
+  60 method/developer-unseen samples plus 40 historical HP/method-exposed samples absent from the latest
+  paired10 and supplement40 campaigns. The earlier confirmation68 plan remains zero-API and unlaunched.
+- experiment: `exp_20260719_hybridv8_transportv4_mixed_confirmation100`; plan:
+  `docs/experiment_plans/exp_20260719_hybridv8_transportv4_mixed_confirmation100.md`.
+- frozen selection: seed42, 81 unseen candidates -> selected60/reserve21; 109 historical candidates after
+  excluding the recent 44 unique IDs -> selected40/reserve69. All 17 eligible direct prior-HP-API samples
+  are included in the historical 40; the other 23 come from method/development exposure. Combined
+  selected100/reserve90 and zero overlap with the latest 10+40.
+- exposure correction: source-level self-test references move `json1`, `molecule1`, `obj3d1`, and
+  `starcatalog1` out of the unseen pool. This is not absolute provider-unseen because the frozen FR
+  baseline called all 234 samples.
+- fixed comparison: HP_V8 vs FullRewrite, MiniMax-M3, transport-v4, seed42, distractor-on, 10RT,
+  shared task plans, 50/50 method-first balance, 13 physically unique Keys, max four paired workers per
+  Key, 52+48 waves. HP_V8 method/prompt/protocol/executor/gate, transport, evaluator and scoring remain
+  frozen.
+- launch status: NO-GO until selection/preflight/tests, fresh read-only plan review, clean commit,
+  formal dry-run and 13-Key probes pass. No API call was made while changing scope.
+
+## 2026-07-20 - After Experiment: mixed confirmation100 incomplete, siblings completed
+
+- identity: `exp_20260719_hybridv8_transportv4_mixed_confirmation100`; MiniMax-M3;
+  transport `opencode_anthropic_sdk/4`; seed42; distractor-on; frozen selected100 and task plans.
+  Recovery used the recorded authorization across commits `23ced3c...` and `0f0b3c8...`; the campaign
+  fingerprint changed only at `run_meta.py`, while HP/FR request semantics, evaluator and scoring stayed
+  frozen.
+- sample isolation: `calendar5` is `evaluator_incomplete` at HP RT5 backward after malformed iCalendar
+  output triggered `BrokenCalendarProperty`; `satellite6` is `infrastructure_incomplete` at FR RT3
+  forward after two incomplete-stream response slots. Failed cells remain absent/null, score imputation
+  is false, and no replacement sample was introduced. All other workers continued.
+- completeness: 3,932/4,000 unique result cells; 98 complete paired samples (3,920 cells), 2 incomplete;
+  no duplicate or half-committed RT. API/ledger lineage closes across 4,343 API rows and 21,437 attempt
+  rows, including 99 valid response-journal replays. Verifier PASS 1,966/1,966 backward; strict inspection
+  has zero unaccepted errors and zero preservation violations. Lifecycle remains `incomplete`; this is
+  not the pre-registered canonical n=100 endpoint.
+- complete98 trajectory: RT1 HP/FR/delta `97.431%/92.558%/+4.873pp`; RT10
+  `79.245%/60.978%/+18.268pp`; W/L/T `65/25/8`; bootstrap mean-delta 95% CI
+  `[+10.864,+26.032]pp`; sign test `p=0.0000297`; CriticalFailure@0.10 `47/882` vs `69/882`.
+  The 60-sample method/developer-unseen cohort is complete with RT10 `+21.563pp`; historical is only
+  38/40 with `+13.064pp`. Post-hoc mathematical bounds for the two missing endpoint deltas give planned
+  n=100 mean delta `[+15.902,+19.902]pp`; this is not imputation.
+- HP complete98 telemetry: bounded/local/bulk/DSL/kept-context `1445/358/98/47/12`; repair
+  attempted/used/success `308/276/259`; protocol failure `37/1960`; preservation 0/1960. Across all
+  1,968 committed HP rows, preservation is also 0.
+- known usage: HP 85,072,528 tokens / USD 71.046620; FR 65,862,257 / USD 55.396233. Fifty-five
+  generation-started attempts lack final usage, so token/cost totals are known lower bounds rather than
+  a complete invoice.
+- review boundary: three independent read-only audits returned GO only for the labeled incomplete
+  complete-pair supporting view and NO-GO for canonical n=100. `calendar5` missingness may be
+  output-related and is not assumed missing at random. User-authorized evaluator sample isolation is
+  recorded as a post-registration deviation rather than rewritten into the original plan.
+- retention: raw private archive
+  `../hybridpatch_private_archives/exp_20260719_hybridv8_transportv4_mixed_confirmation100_incomplete98of100_raw.tgz`,
+  SHA-256 `ed7717030964483828f5ff60ec04b54b032ec08d0b60380a14ce496895e97ac0`; 13-Key exact
+  matches 0. Generic credential markers were confined to literal task-document content in three samples.
+  Official finalize and both validators PASS in generated state; the generated record archive SHA-256 is
+  `babaefce5c5a231d79103cdf0008ff2924bc89fbb8489b883e6cd96894dbfa76`. Existing catalog and
+  frozen HP_V3–HP_V7/Baseline/transport records were then restored byte-for-byte, so the new record stays
+  private/source-only rather than rewriting historical evidence. In restored state `--records-only`
+  passes 13 records; source-linked validation reports the same 21 expected stale source-hash errors caused
+  by active research-doc evolution, which are disclosed rather than repaired by rewriting frozen records.
+
+## 2026-07-21 - Before Experiment: remaining134 global HP then FR
+
+- experiment: `exp_20260721_hybridv8_transportv4_remaining134_hp_then_fr`; plan:
+  `docs/experiment_plans/exp_20260721_hybridv8_transportv4_remaining134_hp_then_fr.md`.
+- scope: exact complement of the prior committed mixed confirmation100 selection inside the current
+  234-sample inventory. All 100 planned IDs are excluded, including the two incomplete
+  samples; remaining count is 134, overlap 0, union 234, sample-ID list SHA-256 `835297a349489dd6c69224ad17ae5a4b767cc3da7bc0baef4b6c2f55c2b99ad4`.
+- exposure: this is not provider-unseen because the frozen FR baseline covered 234/234, and some remaining
+  samples have prior HP/method exposure. Frozen top-level data is not rewritten; the committed plan and
+  immutable campaign manifest are the additive exposure overlay after the first HP POST.
+- exposure strata: 21 prior method/developer-unseen reserve, 69 historical-exposed reserve and 44 recent
+  paired10/supplement40 HP samples; therefore 21 method-unseen versus 113 HP/method-exposed under the
+  existing policy, with prior FullRewrite provider exposure for all 134.
+- fixed comparison: MiniMax-M3, transport-v4, HP_V8 vs FullRewrite, seed42, distractor-on, shared 10-RT
+  task plans, 14 physically unique Keys and max four workers per Key. Each Key has a stable FIFO and
+  refills immediately when a slot opens.
+- user-directed phase order: queue and drain all eligible HybridPatch workers first. Only after a durable
+  134-sample HP terminal barrier may any FullRewrite process launch. This order is intentionally not
+  balanced and is disclosed as a time/provider-state confound; the campaign is supporting evidence.
+- isolation/recovery: HP infrastructure-incomplete blocks the method transition but not sibling HP workers;
+  evaluator-incomplete cancels that sample's later FR phase and remains null. Resume never reposts a
+  committed HP or FR step.
+- launch status: independent read-only plan review returned final `GO`, and the zero-API regression suite
+  passed (executor 72/72, dispatcher/transport/runner 124/124, analyze 5/5, tools 67/67, splitters
+  byte-exact). Formal POST remains `NO-GO` until this change is committed on a clean tree, unified zero-API
+  preflight confirms all 134 runtime evaluators, 14/14 Key probe passes, and the final command is rechecked.
+  No provider call was made during implementation or preflight.
+
+## 2026-07-21 - During Experiment: remaining134 ledger-lock recovery boundary
+
+- observed: HybridPatch completed 134/134 samples and 1,340 RT with preservation 0. FullRewrite then
+  committed 17 complete RT across 15 samples before the first 56-worker cohort was stopped.
+- failure: 23 local `AlreadyLocked` records arose while workers appended the shared API-attempt ledger;
+  7 directly corresponding attempt rows contain no generation delta or committed response. Global stop
+  also interrupted 33 open FR semantic calls (102 attempt rows; 32 had observed generation deltas), none
+  with a response journal or committed result. This is a Windows cross-worker persistence race, not a
+  method/protocol/evaluator failure.
+- fix: shared JSONL writers now use bounded 60-second lock acquisition. Transport revision and provider
+  retry budgets are unchanged. Zero-API transport/runner/dispatcher tests pass 126/126.
+- recovery: after a clean hotfix commit, the stop latch will be archived byte-for-byte and an exact
+  `campaign_recovery_authorization/2` will bind incident row hashes and all 56 interrupted workers.
+  Existing HP results, the 17 committed FR RT, raw evidence, ledgers and checkpoints remain unchanged;
+  resume starts at each sample's first uncommitted RT.
+- recovery validation correction: the first authorized resume admitted 56 workers, then stopped because
+  the authorization validator incorrectly treated later valid rows on an authorized semantic ID as
+  evidence drift. Nine API rows were recorded before the stop: eight zero-POST journal replays and one
+  complete provider response; no new RT was committed. The validator now fixes only the historical row
+  hashes and permits later valid lineage. The first authorization and second stop remain byte-preserved
+  and are chained into a superseding authorization before the next resume.
+- pre-provider residue: the next zero-POST startup audit found four FullRewrite `semantic_request` rows
+  with no `attempt_start` or terminal API row. They are now explicitly classified as interrupted,
+  uncommitted pre-provider calls and hash-bound alongside open streams; no result/checkpoint changes.
+- chained recovery identity: a later resume launched 56 workers, but all exited before authorization
+  because run metadata validation accepted only the original and newest commits, not the SHA-pinned
+  superseded recovery commit already present in metadata. This wave added no API, attempt, result, or
+  checkpoint rows. Recovery now validates the complete authorization chain and records those exact
+  zero-request launches as preauthorization failures before resuming only uncommitted FR steps. Zero-API
+  regression passes: executor 72/72, dispatcher/transport/runner 128/128, analysis 5/5, tools 67/67,
+  and splitters byte-exact.
+- metadata replace contention: the following launch registered six workers, then Windows briefly denied
+  an atomic `run_metadata.jsonl` replacement while the remaining workers were still preauthorization;
+  no API, attempt, result, or checkpoint row was added. JSONL atomic replacement now retries only Windows
+  sharing/access errors 5/32/33 for at most 60 seconds and otherwise remains fail-closed. The focused
+  zero-API regression covers one denied replace followed by a successful byte-valid replacement.
+- queue refill latency: after the clean recovery launched successfully, completed FR workers were removed
+  one at a time because each exit triggered a full campaign-ledger inspection. The active count therefore
+  fell while healthy per-Key slots stayed idle; this was dispatcher scan serialization, not provider,
+  evaluator, protocol, or preservation failure. At the user-directed pause all 12 still-registered worker
+  PIDs had already exited, so no in-flight provider worker was terminated. The queue now batches every exit
+  observed in one poll into one integrity inspection and one active-set write, then refills every free
+  per-Key slot. Existing committed RTs and raw ledger rows remain unchanged; recovery continues this same
+  experiment from each first uncommitted FR step. A dedicated operator-pause recovery path reconciles the
+  terminal metadata/outcome/checkpoint and released lease for every stale active registration, records the
+  full `git status --porcelain`, and SHA-links the existing authorization chain to the new clean commit.
+  It does not edit result, checkpoint, API, attempt or raw-response evidence.
+  The superseding validator keeps the old preauthorization cohort bound to its original archived stop;
+  the newer operator-pause stop is not required to duplicate that historical error string.
+- FR-only resume: the HybridPatch phase is already durably complete at 134/134 samples and 1,340 RT with
+  preservation 0. A resume with that unique valid phase barrier now reuses its terminal scope directly and
+  enters only the unfinished FullRewrite queue; it no longer repeats the completed HP phase preflight.
+  Worker-level FR checkpoints remain authoritative, so committed RTs are not reposted. This is a dispatcher
+  recovery optimization only and does not change either method, transport-v4, evaluator, or scoring.
+- One orphaned FullRewrite worker (`protein4`) was explicitly stopped after its RT9 backward stream had
+  produced a delta and then remained silent while all sibling workers had ended. Recovery records it as
+  `interrupted_before_audited_resume` only after exact launch/PID/lease/running-metadata checks. Its RT1-RT8
+  commits remain intact; no score is imputed and resume starts at the first uncommitted RT9 step.
+  Its open RT9 backward attempt is retained byte-for-byte and hash-bound as a
+  `dispatcher_interrupted_open_attempt`; no synthetic API terminal row is added.

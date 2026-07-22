@@ -642,3 +642,86 @@ transport-v2 把所有异常压成“最多 3 个总 attempt”，无法回答�
 样本全部同条件重跑得到的无偏方法效应。回答同 transport-v3 方法效应时仍使用
 `Δ+0.008`。完整工件见 `Baseline/FR+Official/README.md` 与
 `val40_comparison.md`；构建入口为 `Baseline/build_fr_plus_official.py`。
+
+## 233. HP_V8 supplement40：metadata 锁是高并发本地故障；完整诊断中 HP 的长链优势扩大但高度异质
+
+### 现象与修复
+
+40-worker 首次启动在零结果提交前因 `portalocker.AlreadyLocked` 全局停止。原子写出的
+`campaign_stop.json` 本可无锁读取，但旧实现让每个 semantic call 的只读检查也争抢全局
+metadata writer lock；13 Keys×4 worker 使这条非方法路径成为系统瓶颈。唯一修复是无锁读取
+stop latch、真正 writer 使用有界重试锁。40 进程故障注入和完整零 API replay 通过后，新
+campaign 保持相同 task plans、模型、方法、prompt、protocol、executor、gate、evaluator、
+scoring 与 transport-v4 语义，从新 clean commit 重跑；旧启动 0 结果且不拼接。
+
+### 完整性与结果
+
+`exp_20260719_hybridv8_transportv4_supplement40_lockfix` 完成 1,600/1,600 行和 80 个 RT10
+checkpoint，独立复算 PASS 800/800 backward，preservation 0/797 applicable + 3 N/A。
+12 次 generation-started incomplete stream 均在同一 semantic call 的第二 response slot
+恢复，故没有 infrastructure-incomplete sample。
+
+固定 n=40 的 paired delta 从 RT1 `+0.051086` 增至 RT10 `+0.263959`；RT10 HP/FR 为
+`0.837339/0.573381`，但 sample SD=`0.402060`，且仍有 10 个 HP losses 与 20 个 HP
+CriticalFailure。六条大胜贡献约一半 RT10 总 delta，说明主要现象是部分任务上 FR 长链更快
+坍塌，不是 HP 在所有样本稳定保持。六个与 prior10 相同 task-plan 的 ID 也出现明显跨链
+波动，因此 50-chain pooled 和去重 44-ID 都只能是描述性视图。
+
+### 协议与成本边界
+
+HP route bounded/local/bulk/DSL=`579/148/54/16`；repair attempted/used/success=`104/88/78`；
+final protocol failure=`20/800`。soft burden `49/800` 与 prior10 的比例近似，且始终非阻塞，
+不能把得分差异归因于 burden 阈值。已知 HP/FR usage 为 33.062M/25.796M tokens，费用
+USD 26.581893/21.104516；12 个未知 final usage attempt 使账单只能给区间。
+
+### 结论边界
+
+所有 44 个唯一 ID 都已曝光，两 campaign 的 commit、日期、并发与模型随机链不同。允许的
+主张是：完整固定诊断范围内 HP 的 RT10 均值较高，且 applicable preservation violations=0；
+不允许外推未见集、普遍优越、统计显著性，也不把 score 变化因果归于 metadata lockfix。
+完整 RT1–RT10 表与脱敏证据见
+`HP_V8/analysis/exp_20260719_hybridv8_transportv4_supplement40_lockfix.md`。
+
+## 234. mixed confirmation100：evaluator 故障必须样本级隔离；complete98 支持 HP 长链优势，但 n=100 主张未完成
+
+### 故障机制与处置
+
+`calendar5` 的 HP RT5 backward 生成了 `DTEND=20251104T0100000Z`，当前 iCalendar evaluator
+访问损坏属性时抛出 `BrokenCalendarProperty`。这不是 preservation violation，也不是可通过
+provider 重试修复的 transport 故障；失败步骤没有合法 evaluator endpoint。把它升级为全局
+stop 会无谓取消其他独立 worker。用户因此明确授权：只取消该样本、登记
+`evaluator_incomplete`、保持结果 missing/null，并继续兄弟样本。`satellite6` 的 FR RT3
+forward 则是标准 transport-v4 response-slot 耗尽，登记 `infrastructure_incomplete`。两类终态
+均未写 0，也未用储备样本替换。
+
+严格审计仍保留 calendar5 的 failed-invocation metadata，而不是把原始 errors 改成空数组；
+只有 sidecar schema、evaluator failure stage、source-log SHA、`result_committed=false` 和
+`score_imputed=false` 全部闭合时，派生审计才接受这一条样本级例外。4,343 条 API rows、
+21,437 条 attempt ledger、99 条合法 journal replay、checkpoint 与 3,932 条 result cells
+对应通过；重复、半提交、unaccepted integrity error 和 preservation violation 均为 0。
+
+### 结果与异质性
+
+98 个完整配对样本的 RT10 HP/FR 为 `0.79245/0.60978`，delta `+0.18268`，W/L/T
+`65/25/8`；bootstrap 95% CI `[+0.10864,+0.26032]`，sign test `p=2.97e-5`。但配对差
+SD 为 `0.38496`、IQR `0.41011`、中位差只有 `+0.04667`，说明均值优势由高度异质的
+样本效应组成。CriticalFailure@0.10 在完整配对范围为 `47/882` vs `69/882`；比较必须使用
+`1e-12` 容差，避免把二进制浮点的 `0.09999999999999998` 误判为低于预注册阈值。
+
+method/developer-unseen 60/60 完成，RT10 delta `+0.21563`；historical-exposed 只有 38/40，
+delta `+0.13064`。两个 incomplete 都在 historical 层。尤其 calendar5 的缺失由 HP 输出触发，
+不能假定 missing completely at random；因此 complete98 只能作为 supporting view，不能替代
+预注册 fixed-n=100 endpoint。把两个缺失配对差各限制在 `[-1,+1]` 后，n=100 均值差仍在
+`[+0.15902,+0.19902]`，但这是事后有界敏感性，不是插补或正式完成结论。
+
+### 成本与主张边界
+
+complete98 的 HP routes bounded/local/bulk/DSL/kept=`1445/358/98/47/12`，repair
+attempted `308/1960`，protocol failure `37/1960`，preservation `0/1960`；campaign 全部
+1,968 个已提交 HP steps 同样为 0 violations。已知 HP/FR usage 为 85.073M/65.862M tokens，
+费用 USD 71.046620/55.396233；55 个中断 attempt 缺 final usage，所以这是下界。
+
+允许的结论是：complete98 与完整 unseen60 中，HP_V8 的 RT10 均值高于 FullRewrite，且已提交
+HP steps 未观察到 preservation violation。禁止写成 100/100 campaign 完成、假定缺失随机、
+宣称精确总账单或据此继续调参。若未来需要 fixed-n=100 canonical 结论，应使用新预注册实验，
+而不是把本轮两个缺失样本事后补接。

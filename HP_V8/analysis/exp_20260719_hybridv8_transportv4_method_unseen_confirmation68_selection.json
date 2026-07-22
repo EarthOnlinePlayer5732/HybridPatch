@@ -1,0 +1,3397 @@
+{
+  "schema": "anchorpatch.method_unseen_confirmation_split/1",
+  "experiment_id": "exp_20260719_hybridv8_transportv4_method_unseen_confirmation68",
+  "repo": {
+    "note": "Dynamic generation time, Git HEAD, and dirty status are intentionally omitted so identical input bytes reproduce identical selection bytes. Formal API launch separately requires a clean tree and the committed artifact."
+  },
+  "inputs": {
+    "selector_script": {
+      "path": "tools/build_unseen_confirmation_split.py",
+      "sha256": "a597eec52435575baf41f0bbe2450e923ddcad6675de7d1efef8748d08a48398",
+      "python_version": "3.11.9 (tags/v3.11.9:de54cf5, Apr  2 2024, 10:12:12) [MSC v.1938 64 bit (AMD64)]"
+    },
+    "registry": {
+      "path": "data/CONTAMINATION_REGISTRY.json",
+      "sha256": "c2e622f27e712c5cb3fbba06ae0a34d944e4d889d7658933d3b95f0ee222f305"
+    },
+    "hybrid_split": {
+      "path": "data/hybrid_split.json",
+      "sha256": "f05c92f374f45e6d0caf2a3cfad7cd86cd776163d2cf4286f4dbf446fc50e87f"
+    },
+    "samples_root": "data/samples_delegate52",
+    "sample_count": 234,
+    "sample_json_manifest_sha256": "c4017f9d8062aa3dc96b6c2f28b0ed6f51727b783b973b89e7f32208e665443a"
+  },
+  "exposure_policy": {
+    "strict_any_provider_call": {
+      "description": "Any historical provider/API request counts as exposure; this includes the frozen FullRewrite control baseline.",
+      "sample_ids": [
+        "accounting1",
+        "accounting2",
+        "accounting3",
+        "accounting4",
+        "accounting5",
+        "accounting6",
+        "audiosyn1",
+        "audiosyn4",
+        "calendar1",
+        "calendar5",
+        "chess2",
+        "chess3",
+        "chess4",
+        "chess5",
+        "chess6",
+        "circuit1",
+        "circuit2",
+        "circuit4",
+        "circuit5",
+        "crystal1",
+        "crystal4",
+        "crystal6",
+        "dbschema1",
+        "dbschema2",
+        "dbschema3",
+        "dbschema4",
+        "dbschema5",
+        "dbschema6",
+        "dns1",
+        "dns3",
+        "docker1",
+        "docker2",
+        "docker3",
+        "docker4",
+        "docker5",
+        "docker6",
+        "earncall1",
+        "earncall2",
+        "earncall3",
+        "earncall4",
+        "earncall5",
+        "earncall6",
+        "edifact1",
+        "edifact2",
+        "edifact3",
+        "edifact6",
+        "emails5",
+        "emails6",
+        "filesystem1",
+        "filesystem2",
+        "filesystem3",
+        "filesystem4",
+        "filesystem5",
+        "filesystem6",
+        "fonteng1",
+        "fonteng2",
+        "fonteng3",
+        "fonteng4",
+        "fonteng5",
+        "fonteng6",
+        "foodmenu1",
+        "foodmenu2",
+        "foodmenu3",
+        "foodmenu4",
+        "foodmenu5",
+        "foodmenu6",
+        "genealogy5",
+        "genealogy6",
+        "geodata1",
+        "geodata2",
+        "geodata4",
+        "geotrack1",
+        "geotrack2",
+        "geotrack3",
+        "geotrack4",
+        "geotrack5",
+        "geotrack6",
+        "graphviz1",
+        "graphviz3",
+        "graphviz4",
+        "graphviz5",
+        "graphviz6",
+        "hamradio1",
+        "hamradio2",
+        "hamradio3",
+        "hamradio5",
+        "hamradio6",
+        "infra1",
+        "infra2",
+        "infra3",
+        "infra4",
+        "infra5",
+        "infra6",
+        "jobboard1",
+        "jobboard2",
+        "jobboard3",
+        "jobboard4",
+        "jobboard5",
+        "jobboard6",
+        "json1",
+        "json2",
+        "json3",
+        "json4",
+        "json5",
+        "json6",
+        "landmarks1",
+        "landmarks2",
+        "landmarks3",
+        "landmarks4",
+        "landmarks5",
+        "landmarks6",
+        "latex1",
+        "latex2",
+        "latex3",
+        "latex4",
+        "latex5",
+        "latex6",
+        "libcatalog2",
+        "libcatalog3",
+        "libcatalog5",
+        "libcatalog6",
+        "makefile1",
+        "makefile2",
+        "makefile3",
+        "makefile4",
+        "makefile6",
+        "malware1",
+        "malware2",
+        "malware3",
+        "malware4",
+        "malware5",
+        "malware6",
+        "mathlean1",
+        "mathlean2",
+        "mathlean3",
+        "mathlean4",
+        "mathlean5",
+        "mathlean6",
+        "molecule1",
+        "molecule2",
+        "molecule3",
+        "molecule4",
+        "molecule5",
+        "molecule6",
+        "musicsheet1",
+        "musicsheet2",
+        "musicsheet3",
+        "musicsheet4",
+        "musicsheet5",
+        "musicsheet6",
+        "obj3d1",
+        "obj3d2",
+        "obj3d3",
+        "obj3d4",
+        "obj3d5",
+        "obj3d6",
+        "protein1",
+        "protein2",
+        "protein3",
+        "protein4",
+        "protein5",
+        "protein6",
+        "python1",
+        "python2",
+        "python3",
+        "python4",
+        "python5",
+        "python6",
+        "python7",
+        "quantum1",
+        "quantum2",
+        "quantum3",
+        "quantum4",
+        "quantum5",
+        "quantum6",
+        "recipe1",
+        "robotics1",
+        "robotics2",
+        "robotics3",
+        "satellite1",
+        "satellite2",
+        "satellite3",
+        "satellite4",
+        "satellite5",
+        "satellite6",
+        "screenplay1",
+        "screenplay2",
+        "screenplay3",
+        "screenplay4",
+        "screenplay5",
+        "screenplay6",
+        "slides1",
+        "spreadsheet1",
+        "spreadsheet2",
+        "spreadsheet3",
+        "spreadsheet4",
+        "spreadsheet5",
+        "spreadsheet6",
+        "starcatalog1",
+        "starcatalog2",
+        "starcatalog3",
+        "starcatalog4",
+        "starcatalog5",
+        "starcatalog6",
+        "subtitles2",
+        "subtitles3",
+        "subtitles4",
+        "subtitles5",
+        "subtitles6",
+        "transit1",
+        "transit2",
+        "transit3",
+        "transit5",
+        "translation1",
+        "translation2",
+        "translation3",
+        "translation4",
+        "translation5",
+        "translation6",
+        "treebank1",
+        "treebank2",
+        "treebank3",
+        "treebank4",
+        "treebank5",
+        "treebank6",
+        "vector2",
+        "vector5",
+        "vector6",
+        "weather1",
+        "weather2",
+        "weather3",
+        "weather4",
+        "weather5",
+        "weather6"
+      ],
+      "sample_count": 234,
+      "api_call_files": 22,
+      "api_raw_request_files": 14604,
+      "evidence_manifest_sha256": "da6d58211475269ec3c0d2de0bdd9aeca52d80772e5cd9eaa38592bf4767447e"
+    },
+    "method_developer_unseen": {
+      "description": "Repository holdout policy used for HP method iteration: registry contaminated samples and HP/development exposures are excluded; FR-only frozen control calls are reported but do not consume the HP holdout.",
+      "registry_contaminated_count": 88,
+      "registry_clean_candidate_count": 86,
+      "split_dev_count": 20,
+      "split_val_count": 20,
+      "split_test_count": 20,
+      "split_unused_reserve_count": 20,
+      "actual_method_scan_count": 61,
+      "actual_method_scan_sample_ids": [
+        "accounting1",
+        "circuit2",
+        "crystal6",
+        "docker3",
+        "docker6",
+        "earncall1",
+        "edifact6",
+        "emails5",
+        "filesystem2",
+        "filesystem3",
+        "fonteng1",
+        "fonteng3",
+        "fonteng5",
+        "foodmenu1",
+        "foodmenu6",
+        "geodata1",
+        "geodata4",
+        "geotrack3",
+        "geotrack5",
+        "geotrack6",
+        "hamradio6",
+        "jobboard3",
+        "json2",
+        "json4",
+        "landmarks1",
+        "landmarks2",
+        "landmarks3",
+        "latex2",
+        "libcatalog2",
+        "libcatalog5",
+        "makefile4",
+        "malware6",
+        "mathlean2",
+        "mathlean4",
+        "mathlean5",
+        "molecule2",
+        "musicsheet2",
+        "obj3d2",
+        "obj3d5",
+        "protein1",
+        "python7",
+        "quantum1",
+        "quantum4",
+        "quantum5",
+        "robotics1",
+        "robotics3",
+        "satellite4",
+        "satellite6",
+        "screenplay4",
+        "screenplay5",
+        "screenplay6",
+        "spreadsheet1",
+        "spreadsheet6",
+        "starcatalog4",
+        "subtitles2",
+        "subtitles6",
+        "transit1",
+        "transit2",
+        "translation4",
+        "treebank2",
+        "treebank4"
+      ],
+      "actual_method_path_manifest_sha256": "2a3a8d2e75e21c3ad524175f5125f95c0e73bc9234afc02344ef7638463fcd3c",
+      "documented_developer_content_exposure": {
+        "python1": "docs/FINDINGS.md:370-399"
+      },
+      "clean_candidate_with_method_exposure_count": 1,
+      "clean_candidate_with_method_exposure_ids": [
+        "python1"
+      ],
+      "excluded_sample_count": 149,
+      "excluded_sample_ids": [
+        "accounting1",
+        "accounting2",
+        "accounting3",
+        "accounting4",
+        "accounting5",
+        "accounting6",
+        "calendar1",
+        "calendar5",
+        "chess2",
+        "chess3",
+        "chess5",
+        "chess6",
+        "circuit1",
+        "circuit2",
+        "crystal1",
+        "crystal4",
+        "crystal6",
+        "dbschema1",
+        "dbschema2",
+        "dbschema4",
+        "dbschema5",
+        "dns1",
+        "dns3",
+        "docker1",
+        "docker2",
+        "docker3",
+        "docker4",
+        "docker6",
+        "earncall1",
+        "edifact2",
+        "edifact3",
+        "edifact6",
+        "emails5",
+        "emails6",
+        "filesystem1",
+        "filesystem2",
+        "filesystem3",
+        "fonteng1",
+        "fonteng2",
+        "fonteng3",
+        "fonteng4",
+        "fonteng5",
+        "foodmenu1",
+        "foodmenu5",
+        "foodmenu6",
+        "genealogy6",
+        "geodata1",
+        "geodata2",
+        "geodata4",
+        "geotrack3",
+        "geotrack5",
+        "geotrack6",
+        "graphviz1",
+        "graphviz3",
+        "graphviz6",
+        "hamradio1",
+        "hamradio3",
+        "hamradio6",
+        "infra1",
+        "infra2",
+        "infra5",
+        "jobboard1",
+        "jobboard3",
+        "jobboard5",
+        "json2",
+        "json3",
+        "json4",
+        "json6",
+        "landmarks1",
+        "landmarks2",
+        "landmarks3",
+        "landmarks6",
+        "latex1",
+        "latex2",
+        "latex5",
+        "latex6",
+        "libcatalog2",
+        "libcatalog5",
+        "libcatalog6",
+        "makefile4",
+        "makefile6",
+        "malware3",
+        "malware6",
+        "mathlean1",
+        "mathlean2",
+        "mathlean3",
+        "mathlean4",
+        "mathlean5",
+        "molecule2",
+        "molecule3",
+        "molecule6",
+        "musicsheet1",
+        "musicsheet2",
+        "musicsheet5",
+        "musicsheet6",
+        "obj3d2",
+        "obj3d4",
+        "obj3d5",
+        "protein1",
+        "protein3",
+        "python1",
+        "python2",
+        "python3",
+        "python5",
+        "python6",
+        "python7",
+        "quantum1",
+        "quantum2",
+        "quantum4",
+        "quantum5",
+        "quantum6",
+        "recipe1",
+        "robotics1",
+        "robotics2",
+        "robotics3",
+        "satellite4",
+        "satellite6",
+        "screenplay1",
+        "screenplay2",
+        "screenplay3",
+        "screenplay4",
+        "screenplay5",
+        "screenplay6",
+        "slides1",
+        "spreadsheet1",
+        "spreadsheet5",
+        "spreadsheet6",
+        "starcatalog2",
+        "starcatalog3",
+        "starcatalog4",
+        "starcatalog5",
+        "starcatalog6",
+        "subtitles2",
+        "subtitles3",
+        "subtitles6",
+        "transit1",
+        "transit2",
+        "translation2",
+        "translation4",
+        "treebank2",
+        "treebank3",
+        "treebank4",
+        "treebank6",
+        "vector2",
+        "vector5",
+        "vector6",
+        "weather1",
+        "weather4",
+        "weather5"
+      ]
+    },
+    "unsupported_generation_domain_from_registry": [
+      "audiosyn1",
+      "audiosyn4"
+    ]
+  },
+  "runtime_evaluator_smoke": {
+    "checked_count": 234,
+    "runnable_count": 234,
+    "failed_count": 0,
+    "runnable_sample_ids": [
+      "accounting1",
+      "accounting2",
+      "accounting3",
+      "accounting4",
+      "accounting5",
+      "accounting6",
+      "audiosyn1",
+      "audiosyn4",
+      "calendar1",
+      "calendar5",
+      "chess2",
+      "chess3",
+      "chess4",
+      "chess5",
+      "chess6",
+      "circuit1",
+      "circuit2",
+      "circuit4",
+      "circuit5",
+      "crystal1",
+      "crystal4",
+      "crystal6",
+      "dbschema1",
+      "dbschema2",
+      "dbschema3",
+      "dbschema4",
+      "dbschema5",
+      "dbschema6",
+      "dns1",
+      "dns3",
+      "docker1",
+      "docker2",
+      "docker3",
+      "docker4",
+      "docker5",
+      "docker6",
+      "earncall1",
+      "earncall2",
+      "earncall3",
+      "earncall4",
+      "earncall5",
+      "earncall6",
+      "edifact1",
+      "edifact2",
+      "edifact3",
+      "edifact6",
+      "emails5",
+      "emails6",
+      "filesystem1",
+      "filesystem2",
+      "filesystem3",
+      "filesystem4",
+      "filesystem5",
+      "filesystem6",
+      "fonteng1",
+      "fonteng2",
+      "fonteng3",
+      "fonteng4",
+      "fonteng5",
+      "fonteng6",
+      "foodmenu1",
+      "foodmenu2",
+      "foodmenu3",
+      "foodmenu4",
+      "foodmenu5",
+      "foodmenu6",
+      "genealogy5",
+      "genealogy6",
+      "geodata1",
+      "geodata2",
+      "geodata4",
+      "geotrack1",
+      "geotrack2",
+      "geotrack3",
+      "geotrack4",
+      "geotrack5",
+      "geotrack6",
+      "graphviz1",
+      "graphviz3",
+      "graphviz4",
+      "graphviz5",
+      "graphviz6",
+      "hamradio1",
+      "hamradio2",
+      "hamradio3",
+      "hamradio5",
+      "hamradio6",
+      "infra1",
+      "infra2",
+      "infra3",
+      "infra4",
+      "infra5",
+      "infra6",
+      "jobboard1",
+      "jobboard2",
+      "jobboard3",
+      "jobboard4",
+      "jobboard5",
+      "jobboard6",
+      "json1",
+      "json2",
+      "json3",
+      "json4",
+      "json5",
+      "json6",
+      "landmarks1",
+      "landmarks2",
+      "landmarks3",
+      "landmarks4",
+      "landmarks5",
+      "landmarks6",
+      "latex1",
+      "latex2",
+      "latex3",
+      "latex4",
+      "latex5",
+      "latex6",
+      "libcatalog2",
+      "libcatalog3",
+      "libcatalog5",
+      "libcatalog6",
+      "makefile1",
+      "makefile2",
+      "makefile3",
+      "makefile4",
+      "makefile6",
+      "malware1",
+      "malware2",
+      "malware3",
+      "malware4",
+      "malware5",
+      "malware6",
+      "mathlean1",
+      "mathlean2",
+      "mathlean3",
+      "mathlean4",
+      "mathlean5",
+      "mathlean6",
+      "molecule1",
+      "molecule2",
+      "molecule3",
+      "molecule4",
+      "molecule5",
+      "molecule6",
+      "musicsheet1",
+      "musicsheet2",
+      "musicsheet3",
+      "musicsheet4",
+      "musicsheet5",
+      "musicsheet6",
+      "obj3d1",
+      "obj3d2",
+      "obj3d3",
+      "obj3d4",
+      "obj3d5",
+      "obj3d6",
+      "protein1",
+      "protein2",
+      "protein3",
+      "protein4",
+      "protein5",
+      "protein6",
+      "python1",
+      "python2",
+      "python3",
+      "python4",
+      "python5",
+      "python6",
+      "python7",
+      "quantum1",
+      "quantum2",
+      "quantum3",
+      "quantum4",
+      "quantum5",
+      "quantum6",
+      "recipe1",
+      "robotics1",
+      "robotics2",
+      "robotics3",
+      "satellite1",
+      "satellite2",
+      "satellite3",
+      "satellite4",
+      "satellite5",
+      "satellite6",
+      "screenplay1",
+      "screenplay2",
+      "screenplay3",
+      "screenplay4",
+      "screenplay5",
+      "screenplay6",
+      "slides1",
+      "spreadsheet1",
+      "spreadsheet2",
+      "spreadsheet3",
+      "spreadsheet4",
+      "spreadsheet5",
+      "spreadsheet6",
+      "starcatalog1",
+      "starcatalog2",
+      "starcatalog3",
+      "starcatalog4",
+      "starcatalog5",
+      "starcatalog6",
+      "subtitles2",
+      "subtitles3",
+      "subtitles4",
+      "subtitles5",
+      "subtitles6",
+      "transit1",
+      "transit2",
+      "transit3",
+      "transit5",
+      "translation1",
+      "translation2",
+      "translation3",
+      "translation4",
+      "translation5",
+      "translation6",
+      "treebank1",
+      "treebank2",
+      "treebank3",
+      "treebank4",
+      "treebank5",
+      "treebank6",
+      "vector2",
+      "vector5",
+      "vector6",
+      "weather1",
+      "weather2",
+      "weather3",
+      "weather4",
+      "weather5",
+      "weather6"
+    ],
+    "failed": {},
+    "nonunit_reference_scores": {
+      "makefile1": 0.95,
+      "makefile2": 0.95,
+      "makefile3": 0.95,
+      "makefile4": 0.95,
+      "makefile6": 0.95,
+      "obj3d5": 0.9129,
+      "transit3": 0.9941747572815534
+    },
+    "note": null
+  },
+  "candidate_rule": {
+    "seed": 42,
+    "rule": "candidate_count_below100_select_about80_percent",
+    "candidate_count": 85,
+    "selected_count": 68,
+    "reserve_count": 17,
+    "strict_unseen_candidate_count": 0
+  },
+  "candidate_sample_ids": [
+    "audiosyn1",
+    "audiosyn4",
+    "chess4",
+    "circuit4",
+    "circuit5",
+    "dbschema3",
+    "dbschema6",
+    "docker5",
+    "earncall2",
+    "earncall3",
+    "earncall4",
+    "earncall5",
+    "earncall6",
+    "edifact1",
+    "filesystem4",
+    "filesystem5",
+    "filesystem6",
+    "fonteng6",
+    "foodmenu2",
+    "foodmenu3",
+    "foodmenu4",
+    "genealogy5",
+    "geotrack1",
+    "geotrack2",
+    "geotrack4",
+    "graphviz4",
+    "graphviz5",
+    "hamradio2",
+    "hamradio5",
+    "infra3",
+    "infra4",
+    "infra6",
+    "jobboard2",
+    "jobboard4",
+    "jobboard6",
+    "json1",
+    "json5",
+    "landmarks4",
+    "landmarks5",
+    "latex3",
+    "latex4",
+    "libcatalog3",
+    "makefile1",
+    "makefile2",
+    "makefile3",
+    "malware1",
+    "malware2",
+    "malware4",
+    "malware5",
+    "mathlean6",
+    "molecule1",
+    "molecule4",
+    "molecule5",
+    "musicsheet3",
+    "musicsheet4",
+    "obj3d1",
+    "obj3d3",
+    "obj3d6",
+    "protein2",
+    "protein4",
+    "protein5",
+    "protein6",
+    "python4",
+    "quantum3",
+    "satellite1",
+    "satellite2",
+    "satellite3",
+    "satellite5",
+    "spreadsheet2",
+    "spreadsheet3",
+    "spreadsheet4",
+    "starcatalog1",
+    "subtitles4",
+    "subtitles5",
+    "transit3",
+    "transit5",
+    "translation1",
+    "translation3",
+    "translation5",
+    "translation6",
+    "treebank1",
+    "treebank5",
+    "weather2",
+    "weather3",
+    "weather6"
+  ],
+  "selected_sample_ids": [
+    "audiosyn1",
+    "chess4",
+    "circuit5",
+    "dbschema3",
+    "dbschema6",
+    "docker5",
+    "earncall2",
+    "earncall3",
+    "earncall5",
+    "earncall6",
+    "edifact1",
+    "filesystem4",
+    "filesystem6",
+    "fonteng6",
+    "foodmenu2",
+    "foodmenu3",
+    "foodmenu4",
+    "genealogy5",
+    "geotrack1",
+    "geotrack2",
+    "geotrack4",
+    "graphviz5",
+    "hamradio2",
+    "hamradio5",
+    "infra3",
+    "infra4",
+    "infra6",
+    "jobboard2",
+    "jobboard4",
+    "json1",
+    "json5",
+    "landmarks5",
+    "latex3",
+    "libcatalog3",
+    "makefile2",
+    "makefile3",
+    "malware1",
+    "malware2",
+    "malware5",
+    "mathlean6",
+    "molecule1",
+    "musicsheet3",
+    "musicsheet4",
+    "obj3d1",
+    "obj3d3",
+    "obj3d6",
+    "protein2",
+    "protein4",
+    "protein5",
+    "protein6",
+    "python4",
+    "quantum3",
+    "satellite1",
+    "satellite2",
+    "satellite5",
+    "spreadsheet2",
+    "spreadsheet4",
+    "starcatalog1",
+    "subtitles4",
+    "transit3",
+    "transit5",
+    "translation1",
+    "translation3",
+    "translation6",
+    "treebank1",
+    "treebank5",
+    "weather2",
+    "weather6"
+  ],
+  "reserve_sample_ids": [
+    "audiosyn4",
+    "circuit4",
+    "earncall4",
+    "filesystem5",
+    "graphviz4",
+    "jobboard6",
+    "landmarks4",
+    "latex4",
+    "makefile1",
+    "malware4",
+    "molecule4",
+    "molecule5",
+    "satellite3",
+    "spreadsheet3",
+    "subtitles5",
+    "translation5",
+    "weather3"
+  ],
+  "reserve_selection_order": [
+    "satellite3",
+    "subtitles5",
+    "filesystem5",
+    "weather3",
+    "malware4",
+    "audiosyn4",
+    "latex4",
+    "jobboard6",
+    "makefile1",
+    "molecule5",
+    "earncall4",
+    "molecule4",
+    "translation5",
+    "landmarks4",
+    "graphviz4",
+    "spreadsheet3",
+    "circuit4"
+  ],
+  "features": {
+    "audiosyn1": {
+      "sample_id": "audiosyn1",
+      "domain": "audiosyn",
+      "formats": [
+        ".csd"
+      ],
+      "format_group": ".csd",
+      "task_types": [
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8699,
+      "context_files": [
+        "xanadu.csd"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "audiosyn4": {
+      "sample_id": "audiosyn4",
+      "domain": "audiosyn",
+      "formats": [
+        ".csd"
+      ],
+      "format_group": ".csd",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8114,
+      "context_files": [
+        "Herald.csd"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "chess4": {
+      "sample_id": "chess4",
+      "domain": "chess",
+      "formats": [
+        ".pgn"
+      ],
+      "format_group": ".pgn",
+      "task_types": [
+        "constraint_satisfaction",
+        "context_expansion",
+        "domain_knowledge",
+        "format_knowledge",
+        "referencing",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 3724,
+      "context_files": [
+        "malkav_vs_mhy196_ruy_lopez.pgn"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "circuit4": {
+      "sample_id": "circuit4",
+      "domain": "circuit",
+      "formats": [
+        ".cir"
+      ],
+      "format_group": ".cir",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 11397,
+      "context_files": [
+        "ota_5t.cir"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "circuit5": {
+      "sample_id": "circuit5",
+      "domain": "circuit",
+      "formats": [
+        ".cir"
+      ],
+      "format_group": ".cir",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 5923,
+      "context_files": [
+        "timer_555.cir"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "dbschema3": {
+      "sample_id": "dbschema3",
+      "domain": "dbschema",
+      "formats": [
+        ".sql"
+      ],
+      "format_group": ".sql",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 16204,
+      "context_files": [
+        "prestashop_schema.sql"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "dbschema6": {
+      "sample_id": "dbschema6",
+      "domain": "dbschema",
+      "formats": [
+        ".sql"
+      ],
+      "format_group": ".sql",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 19019,
+      "context_files": [
+        "fleet_schema.sql"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "docker5": {
+      "sample_id": "docker5",
+      "domain": "docker",
+      "formats": [
+        "[none]"
+      ],
+      "format_group": "[none]",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8634,
+      "context_files": [
+        "Dockerfile"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "earncall2": {
+      "sample_id": "earncall2",
+      "domain": "earncall",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 24950,
+      "context_files": [
+        "walmart_earnings.txt"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "earncall3": {
+      "sample_id": "earncall3",
+      "domain": "earncall",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 19567,
+      "context_files": [
+        "jpmorgan_earnings.txt"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "earncall4": {
+      "sample_id": "earncall4",
+      "domain": "earncall",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 21136,
+      "context_files": [
+        "exxonmobil_earnings.txt"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "earncall5": {
+      "sample_id": "earncall5",
+      "domain": "earncall",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 29714,
+      "context_files": [
+        "pfizer_earnings.txt"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "earncall6": {
+      "sample_id": "earncall6",
+      "domain": "earncall",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 21375,
+      "context_files": [
+        "delta_airlines_earnings.txt"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "edifact1": {
+      "sample_id": "edifact1",
+      "domain": "edifact",
+      "formats": [
+        ".edi"
+      ],
+      "format_group": ".edi",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 6778,
+      "context_files": [
+        "order_response.edi"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "filesystem4": {
+      "sample_id": "filesystem4",
+      "domain": "filesystem",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "global_restructure",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12555,
+      "context_files": [
+        "owid_covid.txt"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "filesystem5": {
+      "sample_id": "filesystem5",
+      "domain": "filesystem",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10635,
+      "context_files": [
+        "fzf.txt"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "filesystem6": {
+      "sample_id": "filesystem6",
+      "domain": "filesystem",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "referencing",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12565,
+      "context_files": [
+        "htop.txt"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "fonteng6": {
+      "sample_id": "fonteng6",
+      "domain": "fonteng",
+      "formats": [
+        ".fea"
+      ],
+      "format_group": ".fea",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12709,
+      "context_files": [
+        "features.fea"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "foodmenu2": {
+      "sample_id": "foodmenu2",
+      "domain": "foodmenu",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "domain_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12087,
+      "context_files": [
+        "waldorf_astoria_menu.txt"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "foodmenu3": {
+      "sample_id": "foodmenu3",
+      "domain": "foodmenu",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "domain_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12472,
+      "context_files": [
+        "silsbe_oyster_house_menu.txt"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "foodmenu4": {
+      "sample_id": "foodmenu4",
+      "domain": "foodmenu",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12867,
+      "context_files": [
+        "fraunces_tavern_menu.txt"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "genealogy5": {
+      "sample_id": "genealogy5",
+      "domain": "genealogy",
+      "formats": [
+        ".ged"
+      ],
+      "format_group": ".ged",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 9742,
+      "context_files": [
+        "cs_scholars.ged"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "geotrack1": {
+      "sample_id": "geotrack1",
+      "domain": "geotrack",
+      "formats": [
+        ".gpx"
+      ],
+      "format_group": ".gpx",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10920,
+      "context_files": [
+        "berkeley_walks.gpx"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "geotrack2": {
+      "sample_id": "geotrack2",
+      "domain": "geotrack",
+      "formats": [
+        ".gpx"
+      ],
+      "format_group": ".gpx",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 14620,
+      "context_files": [
+        "seneca_trails.gpx"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "geotrack4": {
+      "sample_id": "geotrack4",
+      "domain": "geotrack",
+      "formats": [
+        ".gpx"
+      ],
+      "format_group": ".gpx",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 13979,
+      "context_files": [
+        "azores_trail.gpx"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "graphviz4": {
+      "sample_id": "graphviz4",
+      "domain": "graphviz",
+      "formats": [
+        ".dot"
+      ],
+      "format_group": ".dot",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10385,
+      "context_files": [
+        "distributed_build.dot"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "graphviz5": {
+      "sample_id": "graphviz5",
+      "domain": "graphviz",
+      "formats": [
+        ".dot"
+      ],
+      "format_group": ".dot",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 11295,
+      "context_files": [
+        "gzip_profile.dot"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "hamradio2": {
+      "sample_id": "hamradio2",
+      "domain": "hamradio",
+      "formats": [
+        ".adi"
+      ],
+      "format_group": ".adi",
+      "task_types": [
+        "classification",
+        "domain_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 7055,
+      "context_files": [
+        "ft8_log.adi"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "hamradio5": {
+      "sample_id": "hamradio5",
+      "domain": "hamradio",
+      "formats": [
+        ".adi"
+      ],
+      "format_group": ".adi",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "domain_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 5988,
+      "context_files": [
+        "sweepstakes.adi"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "infra3": {
+      "sample_id": "infra3",
+      "domain": "infra",
+      "formats": [
+        ".tf"
+      ],
+      "format_group": ".tf",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10432,
+      "context_files": [
+        "main.tf"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "infra4": {
+      "sample_id": "infra4",
+      "domain": "infra",
+      "formats": [
+        ".tf"
+      ],
+      "format_group": ".tf",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 9469,
+      "context_files": [
+        "main.tf"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "infra6": {
+      "sample_id": "infra6",
+      "domain": "infra",
+      "formats": [
+        ".tf"
+      ],
+      "format_group": ".tf",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10670,
+      "context_files": [
+        "main.tf"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "jobboard2": {
+      "sample_id": "jobboard2",
+      "domain": "jobboard",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10690,
+      "context_files": [
+        "jobboard_uk.txt"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "jobboard4": {
+      "sample_id": "jobboard4",
+      "domain": "jobboard",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 11145,
+      "context_files": [
+        "jobboard_business_ml.txt"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "jobboard6": {
+      "sample_id": "jobboard6",
+      "domain": "jobboard",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "domain_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 11321,
+      "context_files": [
+        "jobboard_contract.txt"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "json1": {
+      "sample_id": "json1",
+      "domain": "json",
+      "formats": [
+        ".json"
+      ],
+      "format_group": ".json",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 11469,
+      "context_files": [
+        "grafana_k8s_api_server.json"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "json5": {
+      "sample_id": "json5",
+      "domain": "json",
+      "formats": [
+        ".json"
+      ],
+      "format_group": ".json",
+      "task_types": [
+        "classification",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 19288,
+      "context_files": [
+        "pubspec_schema.json"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "landmarks4": {
+      "sample_id": "landmarks4",
+      "domain": "landmarks",
+      "formats": [
+        ".kml"
+      ],
+      "format_group": ".kml",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12266,
+      "context_files": [
+        "paris_galleries.kml"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "landmarks5": {
+      "sample_id": "landmarks5",
+      "domain": "landmarks",
+      "formats": [
+        ".kml"
+      ],
+      "format_group": ".kml",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12721,
+      "context_files": [
+        "singapore_restaurants.kml"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "latex3": {
+      "sample_id": "latex3",
+      "domain": "latex",
+      "formats": [
+        ".bib",
+        ".tex"
+      ],
+      "format_group": ".bib+.tex",
+      "task_types": [
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "topic_modeling"
+      ],
+      "file_count": 2,
+      "file_count_bin": "2",
+      "doc_bytes": 16699,
+      "context_files": [
+        "hyenadna_genomics.tex",
+        "bibtex.bib"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "latex4": {
+      "sample_id": "latex4",
+      "domain": "latex",
+      "formats": [
+        ".bib",
+        ".tex"
+      ],
+      "format_group": ".bib+.tex",
+      "task_types": [
+        "context_expansion",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 2,
+      "file_count_bin": "2",
+      "doc_bytes": 23818,
+      "context_files": [
+        "quantum_position_verification.tex",
+        "bibtex.bib"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "libcatalog3": {
+      "sample_id": "libcatalog3",
+      "domain": "libcatalog",
+      "formats": [
+        ".xml"
+      ],
+      "format_group": ".xml",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12468,
+      "context_files": [
+        "catalog.xml"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "makefile1": {
+      "sample_id": "makefile1",
+      "domain": "makefile",
+      "formats": [
+        ".mk"
+      ],
+      "format_group": ".mk",
+      "task_types": [
+        "context_expansion",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 17753,
+      "context_files": [
+        "ai_gateway.mk"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "makefile2": {
+      "sample_id": "makefile2",
+      "domain": "makefile",
+      "formats": [
+        ".mk"
+      ],
+      "format_group": ".mk",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 11764,
+      "context_files": [
+        "minio.mk"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "makefile3": {
+      "sample_id": "makefile3",
+      "domain": "makefile",
+      "formats": [
+        ".mk"
+      ],
+      "format_group": ".mk",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "format_knowledge",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 6202,
+      "context_files": [
+        "neovim.mk"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "malware1": {
+      "sample_id": "malware1",
+      "domain": "malware",
+      "formats": [
+        ".yar"
+      ],
+      "format_group": ".yar",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8414,
+      "context_files": [
+        "apt_sandworm_centreon.yar"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "malware2": {
+      "sample_id": "malware2",
+      "domain": "malware",
+      "formats": [
+        ".yar"
+      ],
+      "format_group": ".yar",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 9543,
+      "context_files": [
+        "gen_mimikatz.yar"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "malware4": {
+      "sample_id": "malware4",
+      "domain": "malware",
+      "formats": [
+        ".yar"
+      ],
+      "format_group": ".yar",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 7458,
+      "context_files": [
+        "apt_moonlightmaze.yar"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "malware5": {
+      "sample_id": "malware5",
+      "domain": "malware",
+      "formats": [
+        ".yar"
+      ],
+      "format_group": ".yar",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 14726,
+      "context_files": [
+        "gen_metasploit_payloads.yar"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "mathlean6": {
+      "sample_id": "mathlean6",
+      "domain": "mathlean",
+      "formats": [
+        ".lean"
+      ],
+      "format_group": ".lean",
+      "task_types": [
+        "context_expansion",
+        "format_knowledge",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10939,
+      "context_files": [
+        "ComplexUniformLimit.lean"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "molecule1": {
+      "sample_id": "molecule1",
+      "domain": "molecule",
+      "formats": [
+        ".sdf"
+      ],
+      "format_group": ".sdf",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 6829,
+      "context_files": [
+        "molecules.sdf"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "molecule4": {
+      "sample_id": "molecule4",
+      "domain": "molecule",
+      "formats": [
+        ".sdf"
+      ],
+      "format_group": ".sdf",
+      "task_types": [
+        "classification",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 5973,
+      "context_files": [
+        "molecules.sdf"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "molecule5": {
+      "sample_id": "molecule5",
+      "domain": "molecule",
+      "formats": [
+        ".sdf"
+      ],
+      "format_group": ".sdf",
+      "task_types": [
+        "classification",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 6305,
+      "context_files": [
+        "molecules.sdf"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "musicsheet3": {
+      "sample_id": "musicsheet3",
+      "domain": "musicsheet",
+      "formats": [
+        ".ly"
+      ],
+      "format_group": ".ly",
+      "task_types": [
+        "context_expansion",
+        "format_knowledge",
+        "referencing",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8540,
+      "context_files": [
+        "baroque_harpsichord.ly"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "musicsheet4": {
+      "sample_id": "musicsheet4",
+      "domain": "musicsheet",
+      "formats": [
+        ".ly"
+      ],
+      "format_group": ".ly",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 4889,
+      "context_files": [
+        "baroque_organ_trio.ly"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "obj3d1": {
+      "sample_id": "obj3d1",
+      "domain": "obj3d",
+      "formats": [
+        ".mtl",
+        ".obj"
+      ],
+      "format_group": ".mtl+.obj",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 2,
+      "file_count_bin": "2",
+      "doc_bytes": 6749,
+      "context_files": [
+        "fireplace.obj",
+        "fireplace.mtl"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "obj3d3": {
+      "sample_id": "obj3d3",
+      "domain": "obj3d",
+      "formats": [
+        ".mtl",
+        ".obj"
+      ],
+      "format_group": ".mtl+.obj",
+      "task_types": [
+        "classification",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 2,
+      "file_count_bin": "2",
+      "doc_bytes": 4710,
+      "context_files": [
+        "crate.obj",
+        "crate.mtl"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "obj3d6": {
+      "sample_id": "obj3d6",
+      "domain": "obj3d",
+      "formats": [
+        ".mtl",
+        ".obj"
+      ],
+      "format_group": ".mtl+.obj",
+      "task_types": [
+        "classification",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "string_manipulation"
+      ],
+      "file_count": 2,
+      "file_count_bin": "2",
+      "doc_bytes": 6480,
+      "context_files": [
+        "cube.obj",
+        "cube.mtl"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "protein2": {
+      "sample_id": "protein2",
+      "domain": "protein",
+      "formats": [
+        ".pdb"
+      ],
+      "format_group": ".pdb",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10332,
+      "context_files": [
+        "structure.pdb"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "protein4": {
+      "sample_id": "protein4",
+      "domain": "protein",
+      "formats": [
+        ".pdb"
+      ],
+      "format_group": ".pdb",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 11234,
+      "context_files": [
+        "structure.pdb"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "protein5": {
+      "sample_id": "protein5",
+      "domain": "protein",
+      "formats": [
+        ".pdb"
+      ],
+      "format_group": ".pdb",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 7544,
+      "context_files": [
+        "structure.pdb"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "protein6": {
+      "sample_id": "protein6",
+      "domain": "protein",
+      "formats": [
+        ".pdb"
+      ],
+      "format_group": ".pdb",
+      "task_types": [
+        "classification",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 7626,
+      "context_files": [
+        "structure.pdb"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "python4": {
+      "sample_id": "python4",
+      "domain": "python",
+      "formats": [
+        ".py"
+      ],
+      "format_group": ".py",
+      "task_types": [
+        "context_expansion",
+        "format_knowledge",
+        "local_edit",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 13084,
+      "context_files": [
+        "formatutils.py"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "quantum3": {
+      "sample_id": "quantum3",
+      "domain": "quantum",
+      "formats": [
+        ".qasm"
+      ],
+      "format_group": ".qasm",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 2,
+      "file_count_bin": "2",
+      "doc_bytes": 7237,
+      "context_files": [
+        "arrays.qasm",
+        "scqec.qasm"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "satellite1": {
+      "sample_id": "satellite1",
+      "domain": "satellite",
+      "formats": [
+        ".tle"
+      ],
+      "format_group": ".tle",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 5208,
+      "context_files": [
+        "satellites.tle"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "satellite2": {
+      "sample_id": "satellite2",
+      "domain": "satellite",
+      "formats": [
+        ".tle"
+      ],
+      "format_group": ".tle",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 5132,
+      "context_files": [
+        "satellites.tle"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "satellite3": {
+      "sample_id": "satellite3",
+      "domain": "satellite",
+      "formats": [
+        ".tle"
+      ],
+      "format_group": ".tle",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 5376,
+      "context_files": [
+        "satellites.tle"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "satellite5": {
+      "sample_id": "satellite5",
+      "domain": "satellite",
+      "formats": [
+        ".tle"
+      ],
+      "format_group": ".tle",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 5712,
+      "context_files": [
+        "satellites.tle"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "spreadsheet2": {
+      "sample_id": "spreadsheet2",
+      "domain": "spreadsheet",
+      "formats": [
+        ".csv"
+      ],
+      "format_group": ".csv",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10075,
+      "context_files": [
+        "ferris_wheels.csv"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "spreadsheet3": {
+      "sample_id": "spreadsheet3",
+      "domain": "spreadsheet",
+      "formats": [
+        ".csv"
+      ],
+      "format_group": ".csv",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8534,
+      "context_files": [
+        "centenarians.csv"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "spreadsheet4": {
+      "sample_id": "spreadsheet4",
+      "domain": "spreadsheet",
+      "formats": [
+        ".csv"
+      ],
+      "format_group": ".csv",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 7438,
+      "context_files": [
+        "crop_yields.csv"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "starcatalog1": {
+      "sample_id": "starcatalog1",
+      "domain": "starcatalog",
+      "formats": [
+        ".xml"
+      ],
+      "format_group": ".xml",
+      "task_types": [
+        "classification",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8755,
+      "context_files": [
+        "hipparcos_excerpt.xml"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "subtitles4": {
+      "sample_id": "subtitles4",
+      "domain": "subtitles",
+      "formats": [
+        ".srt"
+      ],
+      "format_group": ".srt",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 4764,
+      "context_files": [
+        "scifi_robot_comedy.srt"
+      ],
+      "doc_length_bin": "q1"
+    },
+    "subtitles5": {
+      "sample_id": "subtitles5",
+      "domain": "subtitles",
+      "formats": [
+        ".srt"
+      ],
+      "format_group": ".srt",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "context_expansion",
+        "domain_knowledge",
+        "format_knowledge",
+        "numerical_reasoning",
+        "string_manipulation",
+        "topic_modeling"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10207,
+      "context_files": [
+        "wikimedia_deutschland.srt"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "transit3": {
+      "sample_id": "transit3",
+      "domain": "transit",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 8,
+      "file_count_bin": "3+",
+      "doc_bytes": 7461,
+      "context_files": [
+        "agency.txt",
+        "calendar.txt",
+        "calendar_dates.txt",
+        "feed_info.txt",
+        "routes.txt",
+        "stop_times.txt",
+        "stops.txt",
+        "trips.txt"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "transit5": {
+      "sample_id": "transit5",
+      "domain": "transit",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 7,
+      "file_count_bin": "3+",
+      "doc_bytes": 9977,
+      "context_files": [
+        "agency.txt",
+        "calendar.txt",
+        "frequencies.txt",
+        "routes.txt",
+        "stop_times.txt",
+        "stops.txt",
+        "trips.txt"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "translation1": {
+      "sample_id": "translation1",
+      "domain": "translation",
+      "formats": [
+        ".po"
+      ],
+      "format_group": ".po",
+      "task_types": [
+        "classification",
+        "domain_knowledge",
+        "format_knowledge",
+        "referencing",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 10169,
+      "context_files": [
+        "fr.po"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "translation3": {
+      "sample_id": "translation3",
+      "domain": "translation",
+      "formats": [
+        ".po"
+      ],
+      "format_group": ".po",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 12523,
+      "context_files": [
+        "pt_BR.po"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "translation5": {
+      "sample_id": "translation5",
+      "domain": "translation",
+      "formats": [
+        ".po"
+      ],
+      "format_group": ".po",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 13649,
+      "context_files": [
+        "pl.po"
+      ],
+      "doc_length_bin": "q5"
+    },
+    "translation6": {
+      "sample_id": "translation6",
+      "domain": "translation",
+      "formats": [
+        ".po"
+      ],
+      "format_group": ".po",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 11675,
+      "context_files": [
+        "bg.po"
+      ],
+      "doc_length_bin": "q4"
+    },
+    "treebank1": {
+      "sample_id": "treebank1",
+      "domain": "treebank",
+      "formats": [
+        ".conllu"
+      ],
+      "format_group": ".conllu",
+      "task_types": [
+        "classification",
+        "format_knowledge",
+        "referencing",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8924,
+      "context_files": [
+        "court_hearing.conllu"
+      ],
+      "doc_length_bin": "q3"
+    },
+    "treebank5": {
+      "sample_id": "treebank5",
+      "domain": "treebank",
+      "formats": [
+        ".conllu"
+      ],
+      "format_group": ".conllu",
+      "task_types": [
+        "classification",
+        "numerical_reasoning",
+        "referencing",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 8071,
+      "context_files": [
+        "treebank.conllu"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "weather2": {
+      "sample_id": "weather2",
+      "domain": "weather",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 6955,
+      "context_files": [
+        "bulletin.txt"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "weather3": {
+      "sample_id": "weather3",
+      "domain": "weather",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "context_expansion",
+        "format_knowledge",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 6894,
+      "context_files": [
+        "bulletin.txt"
+      ],
+      "doc_length_bin": "q2"
+    },
+    "weather6": {
+      "sample_id": "weather6",
+      "domain": "weather",
+      "formats": [
+        ".txt"
+      ],
+      "format_group": ".txt",
+      "task_types": [
+        "classification",
+        "constraint_satisfaction",
+        "numerical_reasoning",
+        "sorting",
+        "split_and_merge",
+        "string_manipulation"
+      ],
+      "file_count": 1,
+      "file_count_bin": "1",
+      "doc_bytes": 6676,
+      "context_files": [
+        "bulletin.txt"
+      ],
+      "doc_length_bin": "q1"
+    }
+  },
+  "coverage": {
+    "candidate": {
+      "domain": {
+        "audiosyn": 2,
+        "chess": 1,
+        "circuit": 2,
+        "dbschema": 2,
+        "docker": 1,
+        "earncall": 5,
+        "edifact": 1,
+        "filesystem": 3,
+        "fonteng": 1,
+        "foodmenu": 3,
+        "genealogy": 1,
+        "geotrack": 3,
+        "graphviz": 2,
+        "hamradio": 2,
+        "infra": 3,
+        "jobboard": 3,
+        "json": 2,
+        "landmarks": 2,
+        "latex": 2,
+        "libcatalog": 1,
+        "makefile": 3,
+        "malware": 4,
+        "mathlean": 1,
+        "molecule": 3,
+        "musicsheet": 2,
+        "obj3d": 3,
+        "protein": 4,
+        "python": 1,
+        "quantum": 1,
+        "satellite": 4,
+        "spreadsheet": 3,
+        "starcatalog": 1,
+        "subtitles": 2,
+        "transit": 2,
+        "translation": 4,
+        "treebank": 2,
+        "weather": 3
+      },
+      "format": {
+        ".adi": 2,
+        ".bib": 2,
+        ".cir": 2,
+        ".conllu": 2,
+        ".csd": 2,
+        ".csv": 3,
+        ".dot": 2,
+        ".edi": 1,
+        ".fea": 1,
+        ".ged": 1,
+        ".gpx": 3,
+        ".json": 2,
+        ".kml": 2,
+        ".lean": 1,
+        ".ly": 2,
+        ".mk": 3,
+        ".mtl": 3,
+        ".obj": 3,
+        ".pdb": 4,
+        ".pgn": 1,
+        ".po": 4,
+        ".py": 1,
+        ".qasm": 1,
+        ".sdf": 3,
+        ".sql": 2,
+        ".srt": 2,
+        ".tex": 2,
+        ".tf": 3,
+        ".tle": 4,
+        ".txt": 19,
+        ".xml": 2,
+        ".yar": 4,
+        "[none]": 1
+      },
+      "task_type": {
+        "classification": 77,
+        "constraint_satisfaction": 21,
+        "context_expansion": 45,
+        "domain_knowledge": 20,
+        "format_knowledge": 66,
+        "global_restructure": 1,
+        "local_edit": 1,
+        "numerical_reasoning": 66,
+        "referencing": 52,
+        "sorting": 78,
+        "split_and_merge": 81,
+        "string_manipulation": 65,
+        "topic_modeling": 13
+      },
+      "file_count": {
+        "1": 77,
+        "2": 6,
+        "3+": 2
+      },
+      "doc_length": {
+        "q1": 17,
+        "q2": 17,
+        "q3": 17,
+        "q4": 17,
+        "q5": 17
+      }
+    },
+    "selected": {
+      "domain": {
+        "audiosyn": 1,
+        "chess": 1,
+        "circuit": 1,
+        "dbschema": 2,
+        "docker": 1,
+        "earncall": 4,
+        "edifact": 1,
+        "filesystem": 2,
+        "fonteng": 1,
+        "foodmenu": 3,
+        "genealogy": 1,
+        "geotrack": 3,
+        "graphviz": 1,
+        "hamradio": 2,
+        "infra": 3,
+        "jobboard": 2,
+        "json": 2,
+        "landmarks": 1,
+        "latex": 1,
+        "libcatalog": 1,
+        "makefile": 2,
+        "malware": 3,
+        "mathlean": 1,
+        "molecule": 1,
+        "musicsheet": 2,
+        "obj3d": 3,
+        "protein": 4,
+        "python": 1,
+        "quantum": 1,
+        "satellite": 3,
+        "spreadsheet": 2,
+        "starcatalog": 1,
+        "subtitles": 1,
+        "transit": 2,
+        "translation": 3,
+        "treebank": 2,
+        "weather": 2
+      },
+      "format": {
+        ".adi": 2,
+        ".bib": 1,
+        ".cir": 1,
+        ".conllu": 2,
+        ".csd": 1,
+        ".csv": 2,
+        ".dot": 1,
+        ".edi": 1,
+        ".fea": 1,
+        ".ged": 1,
+        ".gpx": 3,
+        ".json": 2,
+        ".kml": 1,
+        ".lean": 1,
+        ".ly": 2,
+        ".mk": 2,
+        ".mtl": 3,
+        ".obj": 3,
+        ".pdb": 4,
+        ".pgn": 1,
+        ".po": 3,
+        ".py": 1,
+        ".qasm": 1,
+        ".sdf": 1,
+        ".sql": 2,
+        ".srt": 1,
+        ".tex": 1,
+        ".tf": 3,
+        ".tle": 3,
+        ".txt": 15,
+        ".xml": 2,
+        ".yar": 3,
+        "[none]": 1
+      },
+      "task_type": {
+        "classification": 62,
+        "constraint_satisfaction": 17,
+        "context_expansion": 36,
+        "domain_knowledge": 16,
+        "format_knowledge": 53,
+        "global_restructure": 1,
+        "local_edit": 1,
+        "numerical_reasoning": 53,
+        "referencing": 42,
+        "sorting": 63,
+        "split_and_merge": 65,
+        "string_manipulation": 52,
+        "topic_modeling": 10
+      },
+      "file_count": {
+        "1": 61,
+        "2": 5,
+        "3+": 2
+      },
+      "doc_length": {
+        "q1": 14,
+        "q2": 13,
+        "q3": 14,
+        "q4": 14,
+        "q5": 13
+      }
+    },
+    "reserve": {
+      "domain": {
+        "audiosyn": 1,
+        "circuit": 1,
+        "earncall": 1,
+        "filesystem": 1,
+        "graphviz": 1,
+        "jobboard": 1,
+        "landmarks": 1,
+        "latex": 1,
+        "makefile": 1,
+        "malware": 1,
+        "molecule": 2,
+        "satellite": 1,
+        "spreadsheet": 1,
+        "subtitles": 1,
+        "translation": 1,
+        "weather": 1
+      },
+      "format": {
+        ".bib": 1,
+        ".cir": 1,
+        ".csd": 1,
+        ".csv": 1,
+        ".dot": 1,
+        ".kml": 1,
+        ".mk": 1,
+        ".po": 1,
+        ".sdf": 2,
+        ".srt": 1,
+        ".tex": 1,
+        ".tle": 1,
+        ".txt": 4,
+        ".yar": 1
+      },
+      "task_type": {
+        "classification": 15,
+        "constraint_satisfaction": 4,
+        "context_expansion": 9,
+        "domain_knowledge": 4,
+        "format_knowledge": 13,
+        "numerical_reasoning": 13,
+        "referencing": 10,
+        "sorting": 15,
+        "split_and_merge": 16,
+        "string_manipulation": 13,
+        "topic_modeling": 3
+      },
+      "file_count": {
+        "1": 16,
+        "2": 1
+      },
+      "doc_length": {
+        "q1": 3,
+        "q2": 4,
+        "q3": 3,
+        "q4": 3,
+        "q5": 4
+      }
+    }
+  },
+  "algorithm": {
+    "name": "reserve-first greedy stratified selection with local swaps",
+    "reserve_selection_order": "final reserve set sorted by the seed42 tie-rank after local swaps",
+    "tie_breaker": "random.Random(seed).shuffle(candidate_ids) rank; equal-loss ties are not resolved by sample_id",
+    "tie_rank": {
+      "audiosyn1": 58,
+      "audiosyn4": 26,
+      "chess4": 38,
+      "circuit4": 82,
+      "circuit5": 73,
+      "dbschema3": 45,
+      "dbschema6": 46,
+      "docker5": 35,
+      "earncall2": 18,
+      "earncall3": 50,
+      "earncall4": 55,
+      "earncall5": 75,
+      "earncall6": 19,
+      "edifact1": 77,
+      "filesystem4": 83,
+      "filesystem5": 14,
+      "filesystem6": 39,
+      "fonteng6": 78,
+      "foodmenu2": 32,
+      "foodmenu3": 7,
+      "foodmenu4": 12,
+      "genealogy5": 52,
+      "geotrack1": 42,
+      "geotrack2": 31,
+      "geotrack4": 44,
+      "graphviz4": 66,
+      "graphviz5": 9,
+      "hamradio2": 70,
+      "hamradio5": 79,
+      "infra3": 69,
+      "infra4": 3,
+      "infra6": 80,
+      "jobboard2": 30,
+      "jobboard4": 15,
+      "jobboard6": 36,
+      "json1": 81,
+      "json5": 21,
+      "landmarks4": 62,
+      "landmarks5": 40,
+      "latex3": 2,
+      "latex4": 27,
+      "libcatalog3": 28,
+      "makefile1": 41,
+      "makefile2": 29,
+      "makefile3": 54,
+      "malware1": 33,
+      "malware2": 43,
+      "malware4": 25,
+      "malware5": 57,
+      "mathlean6": 4,
+      "molecule1": 23,
+      "molecule4": 60,
+      "molecule5": 47,
+      "musicsheet3": 65,
+      "musicsheet4": 74,
+      "obj3d1": 59,
+      "obj3d3": 13,
+      "obj3d6": 63,
+      "protein2": 1,
+      "protein4": 11,
+      "protein5": 56,
+      "protein6": 51,
+      "python4": 0,
+      "quantum3": 48,
+      "satellite1": 68,
+      "satellite2": 22,
+      "satellite3": 5,
+      "satellite5": 20,
+      "spreadsheet2": 8,
+      "spreadsheet3": 76,
+      "spreadsheet4": 53,
+      "starcatalog1": 16,
+      "subtitles4": 67,
+      "subtitles5": 10,
+      "transit3": 34,
+      "transit5": 71,
+      "translation1": 37,
+      "translation3": 49,
+      "translation5": 61,
+      "translation6": 64,
+      "treebank1": 6,
+      "treebank5": 84,
+      "weather2": 72,
+      "weather3": 17,
+      "weather6": 24
+    },
+    "stratification_dimensions": [
+      "domain",
+      "format multi-label",
+      "semantic_operations/task_type",
+      "file_count_bin",
+      "doc_length_quintile"
+    ],
+    "selected_is_complement_of_reserve": true
+  },
+  "caveats": [
+    "Strict any-provider exposure leaves zero unseen samples because the frozen FullRewrite baseline has raw API evidence for all 234 delegate52 samples.",
+    "The selected confirmation set is method/developer-unseen under the repository holdout policy, not absolute provider-unseen.",
+    "The sealed dev, val, test, and unused-reserve splits are all excluded; in particular, the 2026-07-03 live HybridPatch test20 cannot re-enter through a stale registry label.",
+    "python1 is excluded because docs/FINDINGS.md:370-399 records a developer-level task/evaluator investigation even though the older registry still labels it clean_candidate.",
+    "audiosyn1 and audiosyn4 retain the registry's historical unsupported_generation_domain annotation but are eligible because the user-specified current evaluator runtime criterion passes; the annotation remains disclosed.",
+    "Runtime-runnable means the current evaluator entry returns a finite score without local/API exceptions; it does not prove every evaluator is discriminative.",
+    "This tool performs zero API calls and is not an effect experiment."
+  ],
+  "artifact_sha256_preview": "0f1a793550d4c4cbe8450bb7d1640b95e4d54cbd1b51fd0e16dff9cf6fb911bb"
+}

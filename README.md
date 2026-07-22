@@ -6,6 +6,7 @@ HybridPatch is a constrained-write alternative to full document rewriting for lo
 
 ```text
 HP_V3/ ... HP_V7/  frozen, self-contained method snapshots
+HP_V8/             active draft method snapshot and diagnostic records
   src/              method + runner + verifier + transport state of that version
   prompts/          real copy; domain evaluators load it relative to cwd
   data/             Windows junction to the shared top-level data/
@@ -21,7 +22,7 @@ _attic/             retained deletion candidates and pre-restructure fallback
 MIGRATION_MAP.md    old path -> new path inventory
 ```
 
-`HP_V7` is the latest frozen runnable reference. There is currently no writable active method snapshot: the next method change must first copy it to a new `HP_V8`. Every HP directory is its own run root: enter it before invoking `src/*.py`. Top-level `.env` files are never copied into versions, so API commands must inject the parent environment explicitly.
+`HP_V7` is the latest frozen runnable reference; `HP_V8` is the current active draft. Do not mutate HP_V8 method semantics after its recorded campaign—a new method change begins in `HP_V9`. Every HP directory is its own run root: enter it before invoking `src/*.py`. Top-level `.env` files are never copied into versions, so API commands must inject the parent environment explicitly.
 
 ## Setup
 
@@ -29,7 +30,7 @@ From `hybridpatch_clean`:
 
 ```bash
 pip install -r ./requirements.txt
-cd ./HP_V7
+cd ./HP_V8
 export PYTHONUTF8=1
 ```
 
@@ -43,11 +44,10 @@ python -B ./src/test_model_openai.py
 
 ## Run a paired experiment
 
-Only run a new method experiment inside a newly created writable version such as `HP_V8`; do not add results to frozen `HP_V3`–`HP_V7`. Use a new out_dir. Return to the `hybridpatch_clean` root before running this block. `python-dotenv` loads the single top-level secret file into the child process without copying it:
+Only run a new method experiment inside the active writable version, and create `HP_V9` before changing the recorded HP_V8 method; do not add results to frozen `HP_V3`–`HP_V7`. Use a new out_dir. Return to the `hybridpatch_clean` root before running this block. `python-dotenv` loads the single top-level secret file into the child process without copying it:
 
 ```bash
 export PYTHONUTF8=1
-# After HP_V8 has been intentionally created from the frozen HP_V7 reference:
 cd ./HP_V8
 python -m dotenv -f ../.env run -- python ./src/experiment_runner.py --sample malware6 latex2 --methods hybridpatch fullrewrite --num_round_trips 10 --skip_distractor --model minimax-m3 --out_dir exp_demo --notes "demo"
 python -B ./src/verify_anchorpatch.py --dir ./exp_demo
@@ -75,8 +75,10 @@ Baseline/records/<experiment_id>/report.md
 transport/records/<experiment_id>/report.md
 ```
 
-For example, the current V7 report is
-[`HP_V7/records/exp_20260712_hybridv7val40_transportv3/report.md`](./HP_V7/records/exp_20260712_hybridv7val40_transportv3/report.md).
+The same-transport canonical boundary remains the
+[`HP_V7 strict38 report`](./HP_V7/records/exp_20260712_hybridv7val40_transportv3/report.md).
+The current active-version diagnostic is the
+[`HP_V8 snapshotfix paired10 summary`](./HP_V8/analysis/exp_20260718_hybridv8_transportv4_snapshotfix_paired10.md).
 These compact records are the Git-tracked, GitHub-readable audit surface. Raw
 `exp_*` archives and API payloads remain ignored and are retained separately as
 described in [the experiment-record policy](./docs/EXPERIMENT_RECORDS.md).
@@ -92,9 +94,6 @@ follow the [standard experiment process](./docs/标准实验流程.md). After al
 stop, use the two-stage post-processing workflow:
 
 ```bash
-# Once, after HP_V8 is created:
-python ./tools/process_experiment.py activate --owner HP_V8
-
 python ./tools/process_experiment.py prepare \
   --experiment ./HP_V8/exp_YYYYMMDD_SLUG \
   --confirm-stopped

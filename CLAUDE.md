@@ -122,8 +122,8 @@ python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch ful
 ```
 
 - 默认模型 `deepseek-v4-flash`（OpenAI 兼容端点，CNY）；`minimax-m3` 固定走 OpenCode Go `https://opencode.ai/zen/go/v1/messages`（USD），Python 使用 Anthropic SDK，所有调用均为 adaptive thinking，默认/硬上限 `max_tokens=131072`。
-- MiniMax OpenCode 正式实验遵循 `transport/docs/API_TRANSPORT_FROZEN_V3.md`：完整终止链才提交；每个 semantic call 最多 2 个 response slot（首次 + 1 次全量重发），另有 3 次生成前 transient failure；预算跨 worker/换 Key 持久化，禁止 partial continuation。
-- 完整空/near-empty 是模型失败，不做 transport retry，也不触发 HP repair；基础设施耗尽会在提交实验行前终止该步并留存 ledger，分析时按缺失的 `score=null` 处理，禁止记模型 0 分。新实验必须使用 transport revision `opencode_anthropic_sdk/3` 和新 `out_dir`。
+- MiniMax OpenCode 新实验遵循 `transport/docs/API_TRANSPORT_V4.md`：完整终止链才提交；HTTP 200 `Streaming response failed`、缺 `message_stop`/终结 usage 或 block 未正常闭合先分类为 retryable `incomplete_stream`；每个 exact semantic call 最多 2 个 response slot（首次 + 1 次全量重发），另有 3 次生成前 transient failure，禁止 partial continuation。冻结 transport-v3 归档仍只按 `API_TRANSPORT_FROZEN_V3.md` 解释。
+- 完整空/near-empty 是模型失败，不做 transport retry，也不触发 HP repair；基础设施耗尽会在提交实验行前终止该步并留存 ledger，分析时按缺失的 `score=null` 处理，禁止记模型 0 分。paired campaign 仅隔离四证一致的 retry exhaustion sample，其他 sample 继续；恢复用同 fingerprint 的新 semantic generation，不在同一 semantic ID 内重置 R2/I3。新实验必须使用 transport revision `opencode_anthropic_sdk/4` 和新 `out_dir`。
 - 另有 MiniMax **官方非流式**传输 `minimax_official_nonstream/1`（`MINIMAX_TRANSPORT=official_nonstream` + `MINIMAX_API_KEY`，详见 `transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md`）：baseline 对齐语义（盲重试、完整 200 照单接受含 `finish=abort`）、5h 限额自动等待；与 OpenCode 路线按 revision 门禁互斥，禁止混目录；`MINIMAX_TRANSPORT` 不得写入 `.env`。
 - API 密钥只在顶层 `.env` / `.env.frkeys`。HP 内 `model_openai.py` 不会上溯发现它；用父进程环境或 `python -m dotenv -f ../.env run -- ...` 注入。多 Key 工具显式传 `--keys_file ../.env.frkeys`。
 - `experiment_runner.py` 单进程、每次一个/多个样本；并行靠多开进程（每样本独立 checkpoint 幂等续跑）。
@@ -154,6 +154,7 @@ python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch ful
 | `Baseline/FR+Official/README.md` | 新增派生基线 **FR+Official**：87 条完整 MiniMax 官方 API 链替换对应来源、146 条保留原冻结 FR；不覆盖原 FR，含异常率定义与复现清单 |
 | `Baseline/FR+Official/val40_comparison.md` | val40 对 FR+Official 的 post-hoc 混合来源敏感性分析；不得解释为无偏方法效应 |
 | `transport/docs/API_TRANSPORT_FROZEN_V3.md` | OpenCode Go / Anthropic Messages 完整性、双预算 retry、空响应、崩溃回放与计分的冻结规范 |
+| `transport/docs/API_TRANSPORT_V4.md` | 新 OpenCode 活动规范：HTTP 200 不完整流、严格 R2/I3、semantic lineage、样本级隔离与恢复 |
 | `transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md` | MiniMax 官方非流式传输（baseline 对齐语义、`finish=abort` 病理、5h 限额预案、官方重跑来源与 FR+Official 派生规则）；`MINIMAX_TRANSPORT=official_nonstream` 启用 |
 | `MIGRATION_MAP.md` | HP_Vx 重构逐路径映射、归档归属与最终冻结状态 |
 | `HP_Vx/VERSION.md` | 每版五问、来源、指纹等级、四连验收真实输出 |

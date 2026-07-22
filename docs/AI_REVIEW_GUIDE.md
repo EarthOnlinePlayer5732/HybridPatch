@@ -26,8 +26,8 @@ the one declared scope that may be used for the experiment's formal claim.
    boundaries and version discipline.
 2. [`HYBRIDPATCH_DESIGN.md`](HYBRIDPATCH_DESIGN.md) for the current method and
    protocol semantics.
-3. [`项目结构与迭代史.md`](项目结构与迭代史.md) for v3→v7 decisions and the
-   current V8 decision gate.
+3. [`项目结构与迭代史.md`](项目结构与迭代史.md) for v3→v8 decisions and the
+   current V9 decision gate.
 4. [`标准实验流程.md`](标准实验流程.md) for how experiments are planned,
    independently reviewed, finalized, and archived.
 5. [`EXPERIMENT_INDEX.md`](EXPERIMENT_INDEX.md) for all catalogued experiments.
@@ -61,6 +61,16 @@ the one declared scope that may be used for the experiment's formal claim.
   method-effect estimate.
 - Earlier dev and val campaigns remain useful mechanism evidence, but their
   claim role is exactly the `claim_eligibility` declared in each record.
+- The current V8 operational/method diagnostic is the
+  [HP_V8 snapshotfix paired10 summary](../HP_V8/analysis/exp_20260718_hybridv8_transportv4_snapshotfix_paired10.md):
+  ten previously exposed samples, exact backward RT10 HP `0.745` versus
+  FullRewrite `0.696`, paired endpoint delta `+0.049`, and preservation
+  `0/199 applicable + 1 N/A`. It is diagnostic-only, has large sample
+  heterogeneity, and does not replace the strict38 same-transport result or
+  prove that V8 prompt reduction caused a score change.
+  Its official generated record bundle is privately retained rather than
+  catalogued because the current catalog hash design would rewrite every frozen
+  HP_V3–HP_V7/Baseline/transport record.
 
 Do not conflate the two questions: use `+0.008` for the same-transport method
 effect and `+0.262` when reporting the paper's stated official non-streaming
@@ -95,8 +105,8 @@ A useful next-iteration review should separate:
 
 Rank recommendations by expected effect on the current canonical weakness, not
 by how interesting the change sounds. Preserve the byte-level preservation
-invariant and do not edit frozen `HP_V3`–`HP_V7`; a method change begins in a
-new `HP_V8`.
+invariant and do not edit frozen `HP_V3`–`HP_V7`; do not mutate active HP_V8
+method semantics after its recorded run. A new method change begins in HP_V9.
 
 ## Suggested review prompt
 
@@ -104,21 +114,23 @@ new `HP_V8`.
 Review this repository as a research engineer. Read docs/AI_REVIEW_GUIDE.md
 first and obey every experiment's claim_eligibility and canonical scope.
 
-Goal: recommend the next HybridPatch iteration after HP_V7.
+Goal: recommend the next HybridPatch iteration after HP_V8.
 
-1. Audit whether the current code matches the documented v7 semantics.
-2. Analyze the current canonical strict38 report and casebook before using
-   historical or sensitivity evidence.
+1. Audit whether the current code matches the documented v8 semantics without
+   reinterpreting v1-v7 replay.
+2. Analyze the canonical strict38 record and the diagnostic V8 paired10 record
+   at their declared, different claim boundaries before using historical or
+   sensitivity evidence.
 3. Identify recurring, code-addressable failure mechanisms; distinguish model,
    protocol, executor, gate, evaluator, transport, and infrastructure causes.
-4. Propose at most three V8 changes. For each give observation,
+4. Propose at most three V9 changes. For each give observation,
    interpretation, implication, minimal change, regression test, small paid
    experiment, expected metric movement, and risk.
 5. State which conclusions require private raw-log inspection.
 
 Treat FR+Official `+0.262` as the paper-protocol-aligned available result while
 preserving its mixed-source disclosure; do not invent missing raw content, and
-do not recommend modifying frozen HP_V3–HP_V7.
+do not recommend modifying frozen HP_V3–HP_V7 or the recorded HP_V8 method.
 ```
 
 ## Known evidence gaps

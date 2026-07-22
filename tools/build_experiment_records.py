@@ -16,7 +16,9 @@ import math
 import os
 import re
 import statistics
+import tempfile
 from collections import Counter, defaultdict
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -85,6 +87,7 @@ FAILURE_STAGE = {
     "format_regression": "gate",
     "evaluator_error": "evaluator",
     "dependency_missing": "data",
+    "evaluator_incomplete": "evaluator",
     "infrastructure_incomplete": "infrastructure",
     "content_regression": "quality",
     "unknown_failure": "unknown",
@@ -130,6 +133,23 @@ def parse_args() -> argparse.Namespace:
         "--check",
         action="store_true",
         help="Compare generated content with disk instead of writing it.",
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help=(
+            "Build selected records in a temporary directory to validate all "
+            "contracts without changing generated records or indexes."
+        ),
+    )
+    parser.add_argument(
+        "--sealed-manifest",
+        type=Path,
+        default=None,
+        help=(
+            "Reuse a validated artifact seal for the single --only experiment "
+            "instead of scanning the raw tree again."
+        ),
     )
     return parser.parse_args()
 
@@ -186,9 +206,9 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def load_local_secret_values() -> list[bytes]:
+def load_local_secret_values(root: Path = ROOT) -> list[bytes]:
     values: set[bytes] = set()
-    for env_path in sorted(ROOT.glob(".env*")):
+    for env_path in sorted(root.glob(".env*")):
         if not env_path.is_file() or env_path.name.endswith(".example"):
             continue
         with env_path.open(encoding="utf-8", errors="ignore") as handle:
@@ -249,7 +269,12 @@ def hash_and_scan_file(
     return digest.hexdigest(), exact_matches, pattern_matches
 
 
-def tree_digest(path: Path, *, scan_credentials: bool = False) -> dict[str, Any]:
+def tree_digest(
+    path: Path,
+    *,
+    scan_credentials: bool = False,
+    secret_root: Path | None = None,
+) -> dict[str, Any]:
     """Hash path + size + content digest for every safe regular file."""
 
     digest = hashlib.sha256()
@@ -259,7 +284,9 @@ def tree_digest(path: Path, *, scan_credentials: bool = False) -> dict[str, Any]
     credential_pattern_matches: Counter[str] = Counter()
     skipped_sensitive: list[str] = []
     skipped_links: list[str] = []
-    secret_values = load_local_secret_values() if scan_credentials else []
+    secret_values = (
+        load_local_secret_values(secret_root or ROOT) if scan_credentials else []
+    )
     for candidate in sorted(path.rglob("*"), key=lambda item: item.as_posix()):
         relative = candidate.relative_to(path).as_posix()
         if candidate.is_symlink():
@@ -424,6 +451,52 @@ def unique_values(records: list[dict[str, Any]], key: str) -> list[Any]:
         seen.add(marker)
         values.append(value)
     return values
+
+
+def resolve_metadata_code_provenance(
+    archive: Path,
+    metadata: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Preserve legacy identities and strictly validate recovery pairs."""
+    fingerprints = unique_values(metadata, "code_fingerprint")
+    commits = unique_values(metadata, "run_git_commit") or unique_values(
+        metadata, "git_commit"
+    )
+    if len(commits) <= 1:
+        return {
+            "code_fingerprint": fingerprints[0] if len(fingerprints) == 1 else None,
+            "code_fingerprints": fingerprints,
+            "run_git_commit": commits[0] if commits else None,
+            "run_git_commits": commits,
+            "campaign_recovery_authorization": None,
+            "provenance_warnings": [],
+        }
+
+    try:
+        from process_experiment import code_provenance
+    except ModuleNotFoundError:  # pragma: no cover - package-style import
+        from tools.process_experiment import code_provenance
+    return code_provenance(archive, metadata)
+
+
+def invariant_fingerprint_value(
+    fingerprints: list[dict[str, Any]],
+    key: str,
+) -> Any:
+    values = [
+        fingerprint.get(key)
+        for fingerprint in fingerprints
+        if isinstance(fingerprint, dict)
+    ]
+    if len(values) != len(fingerprints) or not values or any(
+        value is None for value in values
+    ):
+        return None
+    markers = {
+        json.dumps(value, ensure_ascii=False, sort_keys=True)
+        for value in values
+    }
+    return values[0] if len(markers) == 1 else None
 
 
 def scalar_or_list(values: list[Any]) -> Any:
@@ -633,12 +706,17 @@ def classify_row(
     critical: bool = False,
 ) -> dict[str, Any]:
     if row is None:
+        failure_label = (
+            "evaluator_incomplete"
+            if "evaluator_incomplete" in missing_reason.lower()
+            else "infrastructure_incomplete"
+        )
         return {
             "execution_route": "none",
             "execution_status": "missing",
             "commit_outcome": "missing",
-            "failure_stage": "infrastructure",
-            "failure_label": "infrastructure_incomplete",
+            "failure_stage": FAILURE_STAGE[failure_label],
+            "failure_label": failure_label,
             "reason_summary": sanitize_text(missing_reason or "No committed row exists."),
         }
 
@@ -2005,6 +2083,7 @@ def raw_manifest_document(
     skip_tree_hash: bool,
     existing_path: Path,
     source_experiments: list[str],
+    sealed_manifest: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prior = read_json(existing_path) if skip_tree_hash and existing_path.exists() else {}
     prior_artifact = (prior.get("artifacts") or [{}])[0]
@@ -2018,7 +2097,20 @@ def raw_manifest_document(
         "skipped_symlinks": prior_artifact.get("skipped_symlinks", []),
         "credential_scan": prior_artifact.get("credential_scan"),
     }
-    if not skip_tree_hash:
+    if sealed_manifest is not None:
+        sealed_tree = sealed_manifest["tree"]
+        tree = {
+            "algorithm": sealed_tree["algorithm"],
+            "tree_sha256": sealed_tree["tree_sha256"],
+            "file_count": sealed_tree["file_count"],
+            "size_bytes": sealed_tree["size_bytes"],
+            "skipped_sensitive_files": sealed_tree.get(
+                "skipped_sensitive_files", []
+            ),
+            "skipped_symlinks": sealed_tree.get("skipped_symlinks", []),
+            "credential_scan": sealed_tree.get("credential_scan"),
+        }
+    elif not skip_tree_hash:
         tree = tree_digest(archive, scan_credentials=is_raw_archive)
     credential_scan = tree.get("credential_scan")
     if credential_scan is None:
@@ -2040,7 +2132,9 @@ def raw_manifest_document(
             if entry.get("kind") == "manifest_view"
             else "experiment_directory"
         ),
-        "archive_status": "not_compressed",
+        "archive_status": (
+            "compressed_private" if sealed_manifest is not None else "not_compressed"
+        ),
         "storage": (
             "repository_worktree_derived_view"
             if entry.get("kind") == "manifest_view"
@@ -2053,7 +2147,15 @@ def raw_manifest_document(
         "size_bytes": tree.get("size_bytes"),
         "skipped_sensitive_files": tree.get("skipped_sensitive_files"),
         "skipped_symlinks": tree.get("skipped_symlinks"),
-        "compression": None,
+        "compression": (
+            {
+                "format": sealed_manifest["archive"]["format"],
+                "sha256": sealed_manifest["archive"]["sha256"],
+                "size_bytes": sealed_manifest["archive"]["size_bytes"],
+            }
+            if sealed_manifest is not None
+            else None
+        ),
         "shareability": "private_only" if is_raw_archive else "repository_safe",
         "retention": entry.get("raw_retention"),
         "source_experiments": source_experiments,
@@ -2083,6 +2185,8 @@ def build_experiment(
     catalog_digest: str,
     skip_tree_hash: bool,
     check: bool,
+    sealed_manifest: dict[str, Any] | None = None,
+    output_directory: Path | None = None,
 ) -> dict[str, Any]:
     owner = record_set["owner"]
     archive = ROOT / entry["archive_path"]
@@ -2209,7 +2313,8 @@ def build_experiment(
 
     metadata_path = archive / "run_metadata.jsonl"
     metadata = read_jsonl(metadata_path) if metadata_path.exists() else []
-    fingerprints = unique_values(metadata, "code_fingerprint")
+    code_provenance = resolve_metadata_code_provenance(archive, metadata)
+    fingerprints = code_provenance["code_fingerprints"]
     command_templates = sorted(
         {
             normalize_command(str(record["command"]))
@@ -2224,14 +2329,11 @@ def build_experiment(
             or unique_values(metadata, "created_local")
         )
     )
-    run_git_commits = unique_values(metadata, "run_git_commit") or unique_values(
-        metadata, "git_commit"
-    )
+    run_git_commits = code_provenance["run_git_commits"]
     git_tree_states = unique_values(metadata, "git_tree_state")
     finished = unique_values(metadata, "finished_at")
     timezones = unique_values(metadata, "timezone")
     for field, values in (
-        ("run_git_commit", run_git_commits),
         ("git_tree_state", git_tree_states),
         ("finished_at", finished),
         ("timezone", timezones),
@@ -2271,7 +2373,7 @@ def build_experiment(
     source_canonical = (
         source_canonical_record["path"] if source_canonical_record else None
     )
-    directory = record_dir(owner, entry["experiment_id"])
+    directory = output_directory or record_dir(owner, entry["experiment_id"])
     source_report_link = None
     source_report_snapshot = None
     source_report_embedded = False
@@ -2340,6 +2442,39 @@ def build_experiment(
             }
         )
 
+    code_document = {
+        "run_git_commit": code_provenance["run_git_commit"],
+        "git_tree_state": git_tree_states[0] if git_tree_states else None,
+        "provenance_level": (
+            "git_commit_and_fingerprints"
+            if run_git_commits and fingerprints
+            else "git_commit_only"
+            if run_git_commits
+            else "fingerprints_only"
+            if fingerprints
+            else "documented_reference_only"
+        ),
+        "fingerprint_algorithm": "sha1-12" if fingerprints else None,
+        "fingerprint_count": len(fingerprints),
+        "fingerprints": fingerprints,
+        "version_reference": entry.get("code_reference"),
+    }
+    if code_provenance["campaign_recovery_authorization"] is not None:
+        code_document.update({
+            "run_git_commits": run_git_commits,
+            "campaign_recovery_authorization": code_provenance[
+                "campaign_recovery_authorization"
+            ],
+            "provenance_warnings": code_provenance["provenance_warnings"],
+        })
+
+    def protocol_fingerprint(key: str) -> Any:
+        if len(fingerprints) == 1 and fingerprints[0]:
+            return fingerprints[0].get(key)
+        if code_provenance["campaign_recovery_authorization"] is not None:
+            return invariant_fingerprint_value(fingerprints, key)
+        return None
+
     experiment_document = {
         "schema": "hybridpatch.experiment_record/1",
         "record_revision": 1,
@@ -2358,23 +2493,7 @@ def build_experiment(
             "raw_artifact_id": artifact_id,
             "source_experiments": source_experiments,
         },
-        "code": {
-            "run_git_commit": run_git_commits[0] if run_git_commits else None,
-            "git_tree_state": git_tree_states[0] if git_tree_states else None,
-            "provenance_level": (
-                "git_commit_and_fingerprints"
-                if run_git_commits and fingerprints
-                else "git_commit_only"
-                if run_git_commits
-                else "fingerprints_only"
-                if fingerprints
-                else "documented_reference_only"
-            ),
-            "fingerprint_algorithm": "sha1-12" if fingerprints else None,
-            "fingerprint_count": len(fingerprints),
-            "fingerprints": fingerprints,
-            "version_reference": entry.get("code_reference"),
-        },
+        "code": code_document,
         "execution": {
             "working_directory_ref": owner if owner.startswith("HP_V") else None,
             "command_templates": command_templates,
@@ -2423,21 +2542,9 @@ def build_experiment(
             "declared_campaign_revision": declared_protocol,
             "observed_valid_envelope_revisions": protocols,
             "prompt_revision": None,
-            "prompt_fingerprint": (
-                fingerprints[0].get("hybrid_prompt.py")
-                if len(fingerprints) == 1 and fingerprints[0]
-                else None
-            ),
-            "executor_fingerprint": (
-                fingerprints[0].get("hybrid_executor.py")
-                if len(fingerprints) == 1 and fingerprints[0]
-                else None
-            ),
-            "runner_fingerprint": (
-                fingerprints[0].get("experiment_runner.py")
-                if len(fingerprints) == 1 and fingerprints[0]
-                else None
-            ),
+            "prompt_fingerprint": protocol_fingerprint("hybrid_prompt.py"),
+            "executor_fingerprint": protocol_fingerprint("hybrid_executor.py"),
+            "runner_fingerprint": protocol_fingerprint("experiment_runner.py"),
         },
         "data": {
             "dataset": entry["dataset"],
@@ -2503,6 +2610,7 @@ def build_experiment(
         skip_tree_hash=skip_tree_hash,
         existing_path=directory / "raw_manifest.json",
         source_experiments=source_experiments,
+        sealed_manifest=sealed_manifest,
     )
     representative = representative_cases(cases)
     casebook = build_casebook(entry, sample_rows, methods)
@@ -2715,28 +2823,70 @@ def global_index(results: list[dict[str, Any]]) -> str:
 
 def main() -> int:
     args = parse_args()
+    if args.validate_only and not args.only:
+        raise RuntimeError("--validate-only requires at least one --only experiment")
+    if args.sealed_manifest is not None and len(args.only) != 1:
+        raise RuntimeError("--sealed-manifest requires exactly one --only experiment")
+    if args.sealed_manifest is not None and args.skip_tree_hash:
+        raise RuntimeError("--sealed-manifest and --skip-tree-hash are mutually exclusive")
     catalog_path = args.catalog.resolve()
     catalog = load_catalog(catalog_path)
     digest = sha256_file(catalog_path)
     only = set(args.only)
     built: list[dict[str, Any]] = []
-    for record_set, entry in catalog_entries(catalog):
-        if only and entry["experiment_id"] not in only:
-            continue
-        built.append(
-            build_experiment(
-                record_set,
-                entry,
-                catalog_digest=digest,
-                skip_tree_hash=args.skip_tree_hash,
-                check=args.check,
+    selected = [
+        (record_set, entry)
+        for record_set, entry in catalog_entries(catalog)
+        if not only or entry["experiment_id"] in only
+    ]
+    sealed = None
+    if args.sealed_manifest is not None:
+        from experiment_artifacts import load_valid_seal
+
+        entry = selected[0][1] if selected else None
+        if entry is None:
+            raise RuntimeError("sealed experiment is absent from the catalog")
+        sealed = load_valid_seal(
+            args.sealed_manifest.resolve(),
+            experiment_id=entry["experiment_id"],
+            source=ROOT / entry["archive_path"],
+        )
+
+    context = (
+        tempfile.TemporaryDirectory(
+            prefix=".hybridpatch-record-validation-",
+            dir=ROOT,
+        )
+        if args.validate_only
+        else nullcontext(None)
+    )
+    with context as temporary:
+        for record_set, entry in selected:
+            output_directory = (
+                Path(temporary) / record_set["owner"] / entry["experiment_id"]
+                if args.validate_only
+                else None
             )
-        )
-        print(
-            f"[records] {record_set['owner']}/{entry['experiment_id']}: "
-            f"canonical_samples={built[-1]['canonical_samples']} "
-            f"changed={built[-1]['changed_files']}"
-        )
+            built.append(
+                build_experiment(
+                    record_set,
+                    entry,
+                    catalog_digest=digest,
+                    skip_tree_hash=args.skip_tree_hash,
+                    check=False if args.validate_only else args.check,
+                    sealed_manifest=sealed,
+                    output_directory=output_directory,
+                )
+            )
+            print(
+                f"[records] {record_set['owner']}/{entry['experiment_id']}: "
+                f"canonical_samples={built[-1]['canonical_samples']} "
+                f"changed={built[-1]['changed_files']}"
+            )
+
+    if args.validate_only:
+        print("[records] VALIDATE-ONLY PASS; generated state was not changed")
+        return 0
 
     if only:
         print("[records] --only selected: aggregate indexes were not rewritten")
