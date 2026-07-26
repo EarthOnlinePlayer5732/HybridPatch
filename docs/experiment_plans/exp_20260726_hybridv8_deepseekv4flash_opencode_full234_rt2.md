@@ -32,10 +32,10 @@
 - 计划运行 Git commit：包含本计划的 clean commit，由 immutable dispatch
   manifest 和 `run_metadata.jsonl` 记录。
 - 方法：`HP_V8 hybridpatch/8` 与 `fullrewrite`；方法语义冻结。
-- provider / endpoint：OpenCode Zen，
-  `https://opencode.ai/zen/v1/chat/completions`
+- provider / endpoint：OpenCode Zen Go，
+  `https://opencode.ai/zen/go/v1/chat/completions`
 - model：`deepseek-v4-flash`
-- transport revision：`opencode_openai_compatible/1`
+- transport revision：`opencode_openai_compatible/2`
 - API：OpenAI-compatible non-stream；SDK retry=0，wrapper 最多 3 个可见 attempts。
 - max tokens：`20000`
 - reasoning effort：固定 `high`，审计 SDK 参数、raw request、API ledger、

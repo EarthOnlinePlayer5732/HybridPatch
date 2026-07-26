@@ -9853,7 +9853,7 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
     def _generate(self, outcomes, captures, **kwargs):
         env = {
             "OPENAI_API_KEY": "unit-test-key",
-            "OPENAI_BASE_URL": "https://opencode.ai/zen/v1",
+            "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
         }
         fake_cls = _official_client_factory(list(outcomes), captures)
         events = []
@@ -9881,7 +9881,7 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         constructor = captures[0]["_ctor"]
         request = captures[1]
         self.assertEqual(
-            constructor["base_url"], "https://opencode.ai/zen/v1")
+            constructor["base_url"], "https://opencode.ai/zen/go/v1")
         self.assertEqual(constructor["max_retries"], 0)
         self.assertEqual(request["model"], "deepseek-v4-flash")
         self.assertEqual(request["reasoning_effort"], "high")
@@ -9891,10 +9891,10 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(result["provider"], "opencode_zen")
         self.assertEqual(result["transport"], "openai_sdk_nonstream")
         self.assertEqual(
-            result["transport_revision"], "opencode_openai_compatible/1")
+            result["transport_revision"], "opencode_openai_compatible/2")
         self.assertEqual(
             result["request_url"],
-            "https://opencode.ai/zen/v1/chat/completions")
+            "https://opencode.ai/zen/go/v1/chat/completions")
         self.assertEqual(result["reasoning_effort"], "high")
         self.assertEqual(result["http_attempts_used"], 1)
         self.assertEqual(result["retry_count"], 0)
@@ -9930,7 +9930,7 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
     def test_runtime_config_and_reasoning_validation(self):
         with mock.patch.dict(
             os.environ,
-            {"OPENAI_BASE_URL": "https://opencode.ai/zen/v1"},
+            {"OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1"},
             clear=False,
         ):
             config = model_openai.model_runtime_config(
@@ -9940,7 +9940,7 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             )
         self.assertEqual(config["provider"], "opencode_zen")
         self.assertEqual(
-            config["transport_revision"], "opencode_openai_compatible/1")
+            config["transport_revision"], "opencode_openai_compatible/2")
         self.assertEqual(config["reasoning_effort"], "high")
         with self.assertRaises(ValueError):
             model_openai._effective_reasoning_effort("ultra")
@@ -9950,7 +9950,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
     def test_formal_runner_requires_opencode_zen_and_high(self):
         with mock.patch.dict(
                 os.environ,
-                {"OPENAI_BASE_URL": "https://opencode.ai/zen/v1"},
+                {"OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1"},
                 clear=False):
             experiment_runner._require_formal_opencode_transport(
                 "deepseek-v4-flash", "high")
@@ -10115,7 +10115,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         self.assertEqual(environment["OPENAI_API_KEY"], "secret-key")
         self.assertEqual(
             environment["OPENAI_BASE_URL"],
-            "https://opencode.ai/zen/v1")
+            "https://opencode.ai/zen/go/v1")
         self.assertNotIn("OPENCODE_API_KEY", environment)
         self.assertNotIn("MINIMAX_API_KEY", environment)
         self.assertNotIn("MINIMAX_TRANSPORT", environment)

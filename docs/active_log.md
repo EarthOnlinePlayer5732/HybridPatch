@@ -7,8 +7,8 @@
   plan: `docs/experiment_plans/exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2.md`.
 - scope: fixed 15-sample worst-context cross-type stress set, HybridPatch and FullRewrite,
   distractor-on, seed42, RT2, one labeled Key, 15 worker slots.
-- runtime: OpenCode Zen `deepseek-v4-flash`, OpenAI-compatible non-stream,
-  `opencode_openai_compatible/1`, max tokens 20,000, audited `reasoning_effort=high`.
+- runtime: OpenCode Zen Go `deepseek-v4-flash`, OpenAI-compatible non-stream,
+  `opencode_openai_compatible/2`, max tokens 20,000, audited `reasoning_effort=high`.
 - gate: all 15 workers and every committed step must finish with exact runtime identity,
   no terminal provider/Key failure, no campaign-integrity error and preservation 0 before
   any full campaign can start. This is capacity evidence, not a method-quality claim.
@@ -18,7 +18,7 @@
 
 - experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_full234_rt2`;
   plan: `docs/experiment_plans/exp_20260726_hybridv8_deepseekv4flash_opencode_full234_rt2.md`.
-- launch gate: capacity15 strict PASS, all four candidate labels probed, at least two physically
+- launch gate: capacity15 strict PASS, all three candidate labels probed, at least two physically
   unique live Keys and a clean commit. The user explicitly waived unified zero-API preflight and
   dispatcher dry-run after the independent review returned `GO WITH FIXES`.
 - scope: exact sorted 234-sample inventory (dispatcher canonical ID-list SHA-256

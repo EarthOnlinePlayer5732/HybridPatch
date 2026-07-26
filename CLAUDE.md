@@ -123,8 +123,8 @@ python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch ful
 
 - 默认模型 `deepseek-v4-flash` 仍可使用显式配置的 OpenAI 兼容端点；正式 OpenCode
   DeepSeek-V4-Flash campaign 固定走 OpenCode Zen
-  `https://opencode.ai/zen/v1/chat/completions`（USD），revision
-  `opencode_openai_compatible/1`，non-stream，`reasoning_effort=high`，并从 raw request
+  `https://opencode.ai/zen/go/v1/chat/completions`（USD），revision
+  `opencode_openai_compatible/2`，non-stream，`reasoning_effort=high`，并从 raw request
   到 result row 全链审计。`minimax-m3` 固定走 OpenCode Go
   `https://opencode.ai/zen/go/v1/messages`（USD），Python 使用 Anthropic SDK，所有调用均为
   adaptive thinking，默认/硬上限 `max_tokens=131072`。

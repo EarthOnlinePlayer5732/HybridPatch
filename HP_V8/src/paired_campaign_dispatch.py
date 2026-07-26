@@ -60,9 +60,9 @@ from utils_relay_plan import (
 
 SCHEMA = "anchorpatch.paired_campaign_manifest/1"
 TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
-DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/1"
+DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/2"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
-DEEPSEEK_BASE_URL = "https://opencode.ai/zen/v1"
+DEEPSEEK_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEEPSEEK_REASONING_EFFORT = "high"
 DEEPSEEK_MAX_TOKENS = 20000
 API_CALL_SCHEMA = "anchorpatch.api_call/4"

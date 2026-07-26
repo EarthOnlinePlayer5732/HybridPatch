@@ -38,11 +38,11 @@ _OPENCODE_TRANSPORT_SDK = "anthropic_sdk_v2"
 _OPENCODE_TRANSPORT_LEGACY = "urllib_v1"
 _OPENCODE_TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
 _OPENCODE_TRANSPORT_RESUME_POLICY = "exact_payload_new_semantic_call/1"
-_OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
+_OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/go/v1"
 _OPENCODE_ZEN_CHAT_COMPLETIONS_URL = (
     _OPENCODE_ZEN_BASE_URL + "/chat/completions"
 )
-_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/1"
+_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/2"
 _REASONING_EFFORTS = {"low", "medium", "high"}
 # MiniMax official OpenAI-compatible endpoint (docs/Minimax_OPENAI.md), selected
 # ONLY via MINIMAX_TRANSPORT=official_nonstream. Own transport revision with

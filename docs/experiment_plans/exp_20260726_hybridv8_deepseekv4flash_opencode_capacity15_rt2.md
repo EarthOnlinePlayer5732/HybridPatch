@@ -35,9 +35,9 @@
   manifest 和 `run_metadata.jsonl` 记录。
 - 方法：`HP_V8 hybridpatch/8` 与 `fullrewrite`；不改 prompt、executor、gate、
   evaluator、scoring 或 preservation 语义。
-- transport revision：`opencode_openai_compatible/1`
-- provider / endpoint：OpenCode Zen，
-  `https://opencode.ai/zen/v1/chat/completions`
+- transport revision：`opencode_openai_compatible/2`
+- provider / endpoint：OpenCode Zen Go，
+  `https://opencode.ai/zen/go/v1/chat/completions`
 - model：`deepseek-v4-flash`
 - API：OpenAI-compatible non-stream；SDK 内建 retry 关闭，wrapper 最多
   3 个可见 HTTP attempts。

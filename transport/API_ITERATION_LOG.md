@@ -67,6 +67,15 @@
 - 首次付费调用前仍需 capacity/full 两份计划的独立审阅、clean commit、unified zero-API
   preflight、单 Key probe；全量另需 capacity PASS 和全部候选 Key probe。
 
+### `opencode_openai_compatible/2`（DeepSeek V4 Flash OpenCode Go 端点纠正）
+
+- `/1` 错配到非 Go 的 `https://opencode.ai/zen/v1/chat/completions`，真实探针返回 HTTP 401
+  `CreditsError: Insufficient balance`，不能用于判断 Go 渠道 Key 存活。
+- `/2` 固定用户确认的 `https://opencode.ai/zen/go/v1/chat/completions`；model、OpenAI SDK
+  non-stream、wrapper retry 上限和 `reasoning_effort=high` 均不变。
+- 纠正后从顶层 `.env.frkeys` 读取 3 个标签，正式 wrapper 探针 3/3 HTTP 200、完整终止，
+  每个 Key 均只有 1 次 attempt、0 retry。
+
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 
 - 动机：为 FR baseline 忠实翻译上游 DELEGATE-52 的官方非流式 + 盲异常重试语义，与 OpenCode v3 公平性策略分线。

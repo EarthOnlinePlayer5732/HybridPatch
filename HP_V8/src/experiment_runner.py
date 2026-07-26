@@ -300,10 +300,10 @@ def _require_formal_opencode_transport(model, reasoning_effort=None):
     model_l = str(model).lower()
     if model_l.startswith("deepseek-v4-"):
         base_url = (os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
-        if base_url != "https://opencode.ai/zen/v1":
+        if base_url != "https://opencode.ai/zen/go/v1":
             raise RuntimeError(
                 "formal DeepSeek-V4 experiments require OPENAI_BASE_URL="
-                "https://opencode.ai/zen/v1"
+                "https://opencode.ai/zen/go/v1"
             )
         if reasoning_effort != "high":
             raise RuntimeError(

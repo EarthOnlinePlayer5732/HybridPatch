@@ -702,3 +702,10 @@ worker authorization、API/result/checkpoint linkage、reasoning 和 preservatio
 首次付费 POST 前仍需两份预注册计划的独立只读审阅、clean commit、unified zero-API
 preflight 和单 Key probe；全量另以 capacity15 完整 PASS、全部候选 Key probe 且至少两个
 存活为启动门。
+
+端点纠正：初始 revision `/1` 错配为非 Go 的
+`https://opencode.ai/zen/v1/chat/completions`，真实请求返回 HTTP 401
+`CreditsError: Insufficient balance`。用户提供并由 3 个独立 Key 实测确认的正式端点为
+`https://opencode.ai/zen/go/v1/chat/completions`；当前 revision 升为
+`opencode_openai_compatible/2`，其余 non-stream、retry、`reasoning_effort=high` 与审计语义
+不变。纠正后的正式 Key probe 为 3/3 HTTP 200。

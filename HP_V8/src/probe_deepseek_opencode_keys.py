@@ -17,7 +17,7 @@ from fr_baseline_dispatch import read_keys
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 _DEFAULT_KEYS_FILE = os.path.join(_ROOT, "..", ".env.frkeys")
-_BASE_URL = "https://opencode.ai/zen/v1"
+_BASE_URL = "https://opencode.ai/zen/go/v1"
 _MODEL = "deepseek-v4-flash"
 
 _PROBE_SOURCE = (
@@ -103,7 +103,7 @@ def probe_key(label, value, timeout, max_tokens=512):
         identity_ok = (
             result.get("provider") == "opencode_zen"
             and result.get("transport_revision")
-            == "opencode_openai_compatible/1"
+            == "opencode_openai_compatible/2"
             and result.get("base_url") == _BASE_URL
             and result.get("reasoning_effort") == "high"
         )
