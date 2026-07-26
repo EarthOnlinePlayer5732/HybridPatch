@@ -54,6 +54,26 @@
   evidence. Missing samples remain null and cannot be renamed into a smaller “full” campaign.
 - API status: no provider call made at registration time.
 
+## 2026-07-26 - After Experiment: DeepSeek V4 Flash OpenCode Go full234 RT2 c10
+
+- runtime: commit `c98dcc00dc78d2e3069f0674a7bb05cfd49bf6f0`, HP_V8
+  `hybridpatch/8` versus `fullrewrite`, 3 live Keys, 10 slots per Key, RT2,
+  `opencode_openai_compatible/2`, Go endpoint and audited `reasoning_effort=high`.
+- queue observation: all three Keys initially held 10 workers. The first completed sample
+  released a `KEY_3` slot and the dispatcher immediately launched the next FIFO sample,
+  restoring 30 active workers without a wave barrier.
+- terminal result after about 11 minutes: 114 API terminal rows, 113 HTTP 200 and one
+  `dbschema5` HybridPatch RT1 backward HTTP 503 after all 3 attempts. Provider error was
+  `Inference is temporarily unavailable` / `failover_exhausted`; 11 failed 503 attempts
+  occurred across 9 retried calls, with 8 calls recovering. There were no 429 responses or
+  rate-limit waits.
+- committed evidence at stop: 44 HybridPatch rows, 50 FullRewrite rows, 1 fully finished
+  sample, preservation 0, and runtime identity matched on all 114 API rows.
+- disposition: the unsupported terminal provider failure triggered the configured global
+  stop; metadata records 1 failed worker, 1 finished worker and 29 dispatcher-interrupted
+  workers. Active workers returned to zero. This is incomplete supporting evidence, not a
+  completed full234 result.
+
 ## 2026-07-03 - Before No-API Validation: HybridPatch Track Switch
 
 - track: `hybridpatch vs fullrewrite`

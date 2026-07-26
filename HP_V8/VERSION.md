@@ -722,3 +722,12 @@ RT2，未启动 full234。
 旧启动门，直接使用 3 个已 probe HTTP 200 的 Key 开跑。`deepseek_capacity15` 仍保持单
 Key 15 槽的既有诊断语义；`deepseek_full234` 单独固定为每 Key 10 槽，总上限 30 worker，
 稳定 FIFO 即时补位，HP 明确为 `HP_V8 hybridpatch/8`，对照为 `fullrewrite`，RT2。
+
+full234 c10 实跑由 commit `c98dcc00dc78d2e3069f0674a7bb05cfd49bf6f0` 启动。3 个 Key
+均保持 10 槽；首个样本完成后同 Key FIFO 立即补位，确认 work-conserving。约 11 分钟后，
+`dbschema5` 的 HybridPatch RT1 backward 在 3 次 attempt 后仍为 HTTP 503
+`failover_exhausted`，触发既有全局停止。终态为 114 条 API 记录（113 HTTP 200、1 HTTP
+503），9 条调用发生 retry、共 11 次失败 503 attempt、无 429/rate-limit wait；已提交
+HybridPatch 44 行、FullRewrite 50 行，1 sample 完成，preservation=0。metadata 为 1 failed、
+1 finished、29 dispatcher-interrupted，active worker 归零。本档只是不完整 supporting
+evidence，不构成 full234 结果。
