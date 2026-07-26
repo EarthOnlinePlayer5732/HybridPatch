@@ -3792,12 +3792,13 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                     f"{current_revision}; use a new --out_dir"
                 )
             current_policy = provider_runtime["transport_resume_policy"]
-            previous_policy = _one_prior_value(
-                prior, "transport_resume_policy")
-            if previous_policy != current_policy:
+            previous_policies = {
+                record.get("transport_resume_policy") for record in prior
+            }
+            if previous_policies != {current_policy}:
                 raise RuntimeError(
                     f"refusing to resume/mix {out_dir!r}: prior transport "
-                    f"resume policy is {previous_policy or 'unrecorded'}, "
+                    f"resume policies are {sorted(map(str, previous_policies))}, "
                     f"current policy is {current_policy}; use a new --out_dir"
                 )
 
