@@ -57,6 +57,31 @@
   Go endpoint and high reasoning remain unchanged.
 - launch is direct, with no dry-run or zero-API gate.
 
+## 2026-07-26 - After Experiment: DeepSeek full234 retry2 torn snapshot
+
+- observed prefix: 22/234 workers finished; 118 HP and 128 FR rows were committed.
+  All 285 terminal API rows were HTTP 200. The 36 HTTP 503 attempts were retried with
+  `retry_budget_consumed=false`; preservation remained 0.
+- stop cause: the DeepSeek inspector read the API ledger before committed results and
+  combined an old API prefix with a newer `crystal1` HP RT1 backward result. Both referenced
+  call IDs are present in the final API ledger, so this was an inspector torn snapshot, not
+  missing evidence or an API/503 failure.
+- disposition: the directory remains unchanged. It is not resumed because 16 successful
+  but uncommitted API rows would require a new recovery protocol to avoid ambiguous replay.
+
+## 2026-07-27 - Before Experiment: DeepSeek full234 RT2 c10 retry3 snapshot fix
+
+- experiment: `exp_dsv4f_hpfr_full234_rt2_c10_r3`.
+- code fix: commit `30280aa` centralizes the causally consistent result-then-API snapshot
+  used by both generic and DeepSeek inspectors. A deterministic DeepSeek concurrency
+  regression fails under the old order and passes under the shared order; a persistent
+  missing-linkage negative control remains fatal. Full transport/dispatcher regression:
+  146/146 PASS.
+- scope and runtime remain exact full234, HP_V8 versus FR, RT2, three Keys at c10,
+  work-conserving FIFO, OpenCode Go revision `/3`, free HTTP 503 retry and
+  `reasoning_effort=high`.
+- launch is direct with no repeated Key probe, dry-run or zero-API preflight.
+
 ## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode capacity15 RT2
 
 - experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2`;
