@@ -717,3 +717,8 @@ provider 正文为 `Inference is temporarily unavailable`、`failover_exhausted`
 unsupported provider failure 后停止 cohort：1 worker 完成、4 worker provider-failed、
 10 worker interrupted、active worker 归零、preservation 仍为 0。因此并发 15 未撑完整个
 RT2，未启动 full234。
+
+用户随后明确把 full234 调整为每 Key 10 worker，并授权忽略 capacity15 未完整通过这一
+旧启动门，直接使用 3 个已 probe HTTP 200 的 Key 开跑。`deepseek_capacity15` 仍保持单
+Key 15 槽的既有诊断语义；`deepseek_full234` 单独固定为每 Key 10 槽，总上限 30 worker，
+稳定 FIFO 即时补位，HP 明确为 `HP_V8 hybridpatch/8`，对照为 `fullrewrite`，RT2。

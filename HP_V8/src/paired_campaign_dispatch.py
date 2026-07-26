@@ -98,7 +98,8 @@ CONFIRMATION_GRID_STEPS = 2720
 FULL234_SAMPLE_COUNT = 234
 FULL234_KEY_COUNT = 13
 FULL234_SLOTS_PER_KEY = 4
-DEEPSEEK_SLOTS_PER_KEY = 15
+DEEPSEEK_CAPACITY_SLOTS_PER_KEY = 15
+DEEPSEEK_FULL_SLOTS_PER_KEY = 10
 DEEPSEEK_CAPACITY_KEY_COUNT = 1
 DEEPSEEK_CAPACITY_SAMPLES = [
     "earncall1", "latex6", "screenplay4", "dbschema1", "circuit4",
@@ -685,7 +686,7 @@ def _validate_campaign_grid(args):
             raise RuntimeError(
                 "deepseek_capacity15 cannot declare --smoke_dir")
         if (getattr(args, "slots_per_key", None)
-                != DEEPSEEK_SLOTS_PER_KEY):
+                != DEEPSEEK_CAPACITY_SLOTS_PER_KEY):
             raise RuntimeError(
                 "deepseek_capacity15 requires --slots_per_key 15")
     elif args.campaign_role in {"full234", "deepseek_full234"}:
@@ -694,7 +695,7 @@ def _validate_campaign_grid(args):
             2 if args.campaign_role == "deepseek_full234" else 10
         )
         expected_slots = (
-            DEEPSEEK_SLOTS_PER_KEY
+            DEEPSEEK_FULL_SLOTS_PER_KEY
             if args.campaign_role == "deepseek_full234"
             else FULL234_SLOTS_PER_KEY
         )
@@ -3226,8 +3227,13 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
         elif args.campaign_role == "full234":
             slots_per_key = FULL234_SLOTS_PER_KEY
             key_count = FULL234_KEY_COUNT
-        elif args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
-            slots_per_key = DEEPSEEK_SLOTS_PER_KEY
+        elif args.campaign_role == "deepseek_capacity15":
+            slots_per_key = DEEPSEEK_CAPACITY_SLOTS_PER_KEY
+            key_count = len({
+                item["key_label"] for item in assignments
+            })
+        elif args.campaign_role == "deepseek_full234":
+            slots_per_key = DEEPSEEK_FULL_SLOTS_PER_KEY
             key_count = len({
                 item["key_label"] for item in assignments
             })
@@ -6391,7 +6397,7 @@ def main():
         if args.smoke_dir:
             parser.error(
                 "--smoke_dir is not valid for deepseek_capacity15")
-        if args.slots_per_key != DEEPSEEK_SLOTS_PER_KEY:
+        if args.slots_per_key != DEEPSEEK_CAPACITY_SLOTS_PER_KEY:
             parser.error(
                 "deepseek_capacity15 requires --slots_per_key 15")
         if not args.key_labels or len(args.key_labels) != 1:
@@ -6405,9 +6411,9 @@ def main():
                 "with 2 round trips")
         if args.smoke_dir:
             parser.error("--smoke_dir is not valid for deepseek_full234")
-        if args.slots_per_key != DEEPSEEK_SLOTS_PER_KEY:
+        if args.slots_per_key != DEEPSEEK_FULL_SLOTS_PER_KEY:
             parser.error(
-                "deepseek_full234 requires --slots_per_key 15")
+                "deepseek_full234 requires --slots_per_key 10")
         if not args.key_labels or len(args.key_labels) < 2:
             parser.error(
                 "deepseek_full234 requires at least two --key_labels entries")

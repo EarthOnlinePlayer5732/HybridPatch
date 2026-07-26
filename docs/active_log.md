@@ -37,17 +37,17 @@
 
 ## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode full234 RT2
 
-- experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_full234_rt2`;
+- experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_go_full234_rt2_c10`;
   plan: `docs/experiment_plans/exp_20260726_hybridv8_deepseekv4flash_opencode_full234_rt2.md`.
-- launch gate: capacity15 strict PASS, all three candidate labels probed, at least two physically
-  unique live Keys and a clean commit. The user explicitly waived unified zero-API preflight and
-  dispatcher dry-run after the independent review returned `GO WITH FIXES`.
+- launch decision: capacity15 exposed sustained-load 503; the user explicitly lowered the full
+  campaign to 10 slots per Key and authorized direct launch with all three HTTP-200 Key labels,
+  overriding the earlier capacity-complete gate and waiving zero-API preflight/dry-run.
 - scope: exact sorted 234-sample inventory (dispatcher canonical ID-list SHA-256
   `a3e4f063f324e201082d7481a6bcd46615fb4d63579fbed3e7def90b1cfb7b6a`;
   sample.json manifest SHA-256
   `c4017f9d8062aa3dc96b6c2f28b0ed6f51727b783b973b89e7f32208e665443a`),
   paired HybridPatch/FullRewrite, distractor-on, seed42, RT2.
-- queue: every live Key receives 15 slots and a stable FIFO under
+- queue: each of the three live Keys receives 10 slots and a stable FIFO under
   `per_key_work_conserving_v1`; slots refill immediately after a worker exit audit, with no
   batch/wave barrier.
 - exposure: not provider-unseen or method-unseen; the campaign is supporting compatibility

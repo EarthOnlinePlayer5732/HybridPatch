@@ -75,6 +75,8 @@
   non-stream、wrapper retry 上限和 `reasoning_effort=high` 均不变。
 - 纠正后从顶层 `.env.frkeys` 读取 3 个标签，正式 wrapper 探针 3/3 HTTP 200、完整终止，
   每个 Key 均只有 1 次 attempt、0 retry。
+- capacity15 暴露 sustained-load 503 后，用户明确将 full234 调度改为 3 个存活 Key、
+  每 Key 10 worker；capacity15 仍保留单 Key 15 worker 的诊断配置。
 
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 

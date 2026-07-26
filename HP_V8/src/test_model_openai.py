@@ -10001,7 +10001,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         self.assertEqual(
             config["dispatch_policy"], "per_key_work_conserving_v1")
 
-    def test_full_manifest_is_four_key_work_conserving_queue(self):
+    def test_full_manifest_is_three_key_work_conserving_queue(self):
         args = argparse.Namespace(
             campaign_role="deepseek_full234",
             num_round_trips=2,
@@ -10014,9 +10014,9 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             },
         )
         samples = list(args._full234_scope_record["sample_ids"])
-        labels = ["KEY_1", "KEY_2", "KEY_3", "KEY_4"]
+        labels = ["KEY_1", "KEY_2", "KEY_3"]
         assignments = paired_dispatch.build_key_assignments(
-            samples, labels, 15,
+            samples, labels, 10,
             alternate_within_key=True, allow_queue=True)
         task_plans = {
             sample: {
@@ -10034,17 +10034,17 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             manifest = paired_dispatch.build_manifest(
                 "unused", samples, assignments, task_plans, args)
         config = manifest["config"]
-        self.assertEqual(config["key_count"], 4)
-        self.assertEqual(config["slots_per_key"], 15)
-        self.assertEqual(config["max_worker_count"], 60)
-        self.assertEqual(config["queued_worker_count"], 174)
+        self.assertEqual(config["key_count"], 3)
+        self.assertEqual(config["slots_per_key"], 10)
+        self.assertEqual(config["max_worker_count"], 30)
+        self.assertEqual(config["queued_worker_count"], 204)
         self.assertEqual(
             config["dispatch_policy"], "per_key_work_conserving_v1")
         queues = manifest["assignment_queues"]
-        self.assertEqual(len(queues), 4)
+        self.assertEqual(len(queues), 3)
         self.assertEqual(
             sorted(queue["worker_count"] for queue in queues),
-            [58, 58, 59, 59])
+            [78, 78, 78])
 
     def test_worker_launch_uses_per_key_openai_env_and_high(self):
         captured = {}
