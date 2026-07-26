@@ -39,6 +39,24 @@
 - all other scope, identity, RT2, three-Key c10 work-conserving queue and no-dry-run launch
   settings are unchanged.
 
+## 2026-07-26 - After Experiment: DeepSeek full234 503-free retry1
+
+- observed prefix: 100 terminal API rows, all HTTP 200; two recovered HTTP 503 attempts
+  were recorded with `retry_budget_consumed=false`. No model-empty response occurred.
+- stop cause: `accounting3` completed a valid HP RT2 forward model call, then
+  `dump_step_docs` attempted to open a 265-character absolute Windows path and raised
+  `FileNotFoundError`. This is a local path-length failure, not an API/model failure.
+- disposition: 24 HP and 52 FR result rows were committed; 1 worker failed and 29 were
+  interrupted, active workers returned to zero, and the evidence directory remains intact.
+
+## 2026-07-26 - Before Experiment: DeepSeek full234 RT2 c10 retry2 short path
+
+- experiment: `exp_dsv4f_hpfr_full234_rt2_c10_r2`.
+- the shorter out-dir reduces the observed worst path from 265 to 218 characters. Dataset,
+  HP_V8/FR methods, RT2, revision `/3`, 503-free retry, three Keys at c10, FIFO queue,
+  Go endpoint and high reasoning remain unchanged.
+- launch is direct, with no dry-run or zero-API gate.
+
 ## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode capacity15 RT2
 
 - experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2`;
