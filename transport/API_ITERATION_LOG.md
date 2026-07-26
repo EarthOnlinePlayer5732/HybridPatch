@@ -78,6 +78,12 @@
 - capacity15 暴露 sustained-load 503 后，用户明确将 full234 调度改为 3 个存活 Key、
   每 Key 10 worker；capacity15 仍保留单 Key 15 worker 的诊断配置。
 
+### `opencode_openai_compatible/3`（OpenCode Go HTTP 503 免费重试）
+
+- OpenCode Go 返回 HTTP 503 时持续重试，不消耗 `max_retries` 的有限额度。
+- 每次 503 仍保留实际 attempt、状态码与等待记录，并标记
+  `retry_budget_consumed=false`；其他错误仍遵循原有重试额度。
+
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 
 - 动机：为 FR baseline 忠实翻译上游 DELEGATE-52 的官方非流式 + 盲异常重试语义，与 OpenCode v3 公平性策略分线。

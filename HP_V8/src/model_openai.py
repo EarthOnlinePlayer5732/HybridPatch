@@ -42,7 +42,7 @@ _OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/go/v1"
 _OPENCODE_ZEN_CHAT_COMPLETIONS_URL = (
     _OPENCODE_ZEN_BASE_URL + "/chat/completions"
 )
-_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/2"
+_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/3"
 _REASONING_EFFORTS = {"low", "medium", "high"}
 # MiniMax official OpenAI-compatible endpoint (docs/Minimax_OPENAI.md), selected
 # ONLY via MINIMAX_TRANSPORT=official_nonstream. Own transport revision with
@@ -1563,6 +1563,7 @@ class OpenAI_Model:
         else:
             max_attempts = max(1, int(max_retries) if max_retries is not None else 1)
             attempt_index = 0
+            retry_budget_attempt_index = 0
             while True:
                 http_attempt_index = attempt_index + 1
                 if not is_minimax_official:
@@ -1645,6 +1646,12 @@ class OpenAI_Model:
                         time.sleep(4)
                         continue
                     retryable = _is_retryable_opencode_error(exc)
+                    free_opencode_503 = (
+                        is_opencode_zen
+                        and _transport_status_code(exc) == 503
+                    )
+                    if not free_opencode_503:
+                        retry_budget_attempt_index += 1
                     attempt_record = {
                         "attempt_index": http_attempt_index,
                         "status": (
@@ -1653,6 +1660,8 @@ class OpenAI_Model:
                         "error_type": _transport_error_type(exc),
                         "http_status": _transport_status_code(exc),
                         "stream_complete": False,
+                        "retry_budget_consumed": not free_opencode_503,
+                        "retry_budget_attempt_index": retry_budget_attempt_index,
                     }
                     transport_attempts.append(attempt_record)
                     _emit_transport_event(_raw_event_sink, {
@@ -1660,7 +1669,10 @@ class OpenAI_Model:
                         "attempt_index": http_attempt_index,
                         "attempt": attempt_record,
                     })
-                    if not retryable or attempt_index >= max_attempts:
+                    if not retryable or (
+                        not free_opencode_503
+                        and retry_budget_attempt_index >= max_attempts
+                    ):
                         raise OpenAICompatibleTransportError(
                             "OpenAI-compatible provider failed after "
                             f"{attempt_index} attempt(s)",

@@ -1840,7 +1840,7 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(result["provider"], "opencode_zen")
         self.assertEqual(result["transport"], "openai_sdk_nonstream")
         self.assertEqual(
-            result["transport_revision"], "opencode_openai_compatible/2")
+            result["transport_revision"], "opencode_openai_compatible/3")
         self.assertEqual(
             result["request_url"],
             "https://opencode.ai/zen/go/v1/chat/completions")
@@ -1876,6 +1876,29 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
         )
 
+    def test_503_retries_do_not_consume_retry_budget(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                model_openai._HTTPStatusError(503, "unavailable"),
+                model_openai._HTTPStatusError(503, "unavailable"),
+                model_openai._HTTPStatusError(503, "unavailable"),
+                _official_payload(content="Hello", finish_reason="stop"),
+            ],
+            captures,
+            max_retries=1,
+        )
+        self.assertEqual(result["http_attempts_used"], 4)
+        self.assertEqual(result["retry_count"], 3)
+        failed = result["transport_attempts"][:-1]
+        self.assertEqual([item["http_status"] for item in failed], [503, 503, 503])
+        self.assertTrue(all(
+            item["retry_budget_consumed"] is False for item in failed
+        ))
+        self.assertTrue(all(
+            item["retry_budget_attempt_index"] == 0 for item in failed
+        ))
+
     def test_runtime_config_and_reasoning_validation(self):
         with mock.patch.dict(
             os.environ,
@@ -1889,7 +1912,7 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             )
         self.assertEqual(config["provider"], "opencode_zen")
         self.assertEqual(
-            config["transport_revision"], "opencode_openai_compatible/2")
+            config["transport_revision"], "opencode_openai_compatible/3")
         self.assertEqual(config["reasoning_effort"], "high")
         with self.assertRaises(ValueError):
             model_openai._effective_reasoning_effort("ultra")

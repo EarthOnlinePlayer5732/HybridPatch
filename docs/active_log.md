@@ -1,6 +1,21 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode full234 RT2 c10 503-free retry
+
+- experiment:
+  `exp_20260726_hybridv8_deepseekv4flash_opencode_go_full234_rt2_c10_503free`;
+  previous incomplete c10 evidence remains untouched.
+- runtime: `opencode_openai_compatible/3`, OpenCode Zen Go
+  `deepseek-v4-flash`, non-stream, max tokens 20,000 and audited
+  `reasoning_effort=high`.
+- retry: HTTP 503 is recorded as an actual failed attempt but does not consume the finite
+  retry budget; it retries until success or an explicit external stop. Other error classes
+  retain the prior bounded behavior.
+- queue: exact 234-sample scope, HP_V8 `hybridpatch/8` versus `fullrewrite`, RT2,
+  three live Key labels, 10 work-conserving FIFO slots per Key and no wave barrier.
+- launch decision: direct full experiment; no dry-run or zero-API gate.
+
 ## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode capacity15 RT2
 
 - experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2`;

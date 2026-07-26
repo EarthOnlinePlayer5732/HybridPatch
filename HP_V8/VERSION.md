@@ -707,8 +707,10 @@ preflight 和单 Key probe；全量另以 capacity15 完整 PASS、全部候选 
 `https://opencode.ai/zen/v1/chat/completions`，真实请求返回 HTTP 401
 `CreditsError: Insufficient balance`。用户提供并由 3 个独立 Key 实测确认的正式端点为
 `https://opencode.ai/zen/go/v1/chat/completions`；当前 revision 升为
-`opencode_openai_compatible/2`，其余 non-stream、retry、`reasoning_effort=high` 与审计语义
-不变。纠正后的正式 Key probe 为 3/3 HTTP 200。
+`opencode_openai_compatible/3`，其余 non-stream、retry、`reasoning_effort=high` 与审计语义
+不变。`/3` 将 OpenCode Go 的 HTTP 503 视为不消耗有限重试额度的瞬时服务错误；每次失败
+仍记录实际 HTTP attempt，并持续重试直至成功或外部明确停止。纠正后的正式 Key probe
+为 3/3 HTTP 200。
 
 Go 端点 capacity15 实跑中，15 个 `KEY_1` worker 同时授权并保持满槽约 9 分钟。最终
 47 条 terminal API 记录中 43 条 HTTP 200，4 条在各 3 次 attempt 后仍为 HTTP 503；

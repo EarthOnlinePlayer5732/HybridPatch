@@ -103,7 +103,7 @@ def probe_key(label, value, timeout, max_tokens=512):
         identity_ok = (
             result.get("provider") == "opencode_zen"
             and result.get("transport_revision")
-            == "opencode_openai_compatible/2"
+            == "opencode_openai_compatible/3"
             and result.get("base_url") == _BASE_URL
             and result.get("reasoning_effort") == "high"
         )
