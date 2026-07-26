@@ -3347,13 +3347,48 @@ def write_or_verify_manifest(out_dir, manifest, *, resume=False):
     return path, manifest
 
 
+def _valid_deepseek_retry_evidence(row):
+    attempts = row.get("transport_attempts")
+    if (not isinstance(attempts, list) or not attempts
+            or row.get("http_attempts_used") != len(attempts)
+            or row.get("retry_count") != len(attempts) - 1
+            or row.get("failed_attempt_count") != len(attempts) - 1):
+        return False
+    if attempts[-1].get("status") != "success":
+        return False
+
+    budget_attempt_index = 0
+    for expected_index, attempt in enumerate(attempts, 1):
+        if attempt.get("attempt_index") != expected_index:
+            return False
+        if expected_index == len(attempts):
+            continue
+        if attempt.get("status") != "retryable_error":
+            return False
+        free_503 = attempt.get("http_status") == 503
+        if attempt.get("retry_budget_consumed") is not (not free_503):
+            return False
+        if not free_503:
+            budget_attempt_index += 1
+        if attempt.get("retry_budget_attempt_index") != budget_attempt_index:
+            return False
+
+    max_attempts = row.get("max_retries")
+    return (
+        _is_exact_int(max_attempts)
+        and max_attempts >= 1
+        and budget_attempt_index < max_attempts
+    )
+
+
 def _inspect_deepseek_campaign(
         out_dir, manifest, *, require_complete=False,
         active_samples=None, required_complete_samples=None):
     """Audit the OpenCode Zen DeepSeek prefix without MiniMax stream ledgers.
 
     The OpenAI-compatible transport is non-streaming and owns bounded retries
-    inside one semantic call, so the MiniMax attempt-ledger/journal invariants
+    inside one semantic call, except that OpenCode Go HTTP 503 retries do not
+    consume that finite budget.  The MiniMax attempt-ledger/journal invariants
     do not apply.  This inspector keeps the shared campaign, worker, result,
     checkpoint, and preservation invariants, and additionally verifies the
     exact provider route plus the serialized ``reasoning_effort=high`` request.
@@ -3524,15 +3559,22 @@ def _inspect_deepseek_campaign(
                 errors.append(f"DeepSeek API {key} mismatch at row {index}")
         if row.get("generation_index") != 0:
             errors.append(f"DeepSeek API generation mismatch at row {index}")
-        if (row.get("classification") is not None
+        classification = row.get("classification")
+        response_classification = row.get("response_classification")
+        auditable_model_empty = (
+            classification == "transport-valid but model-empty"
+            and response_classification == "model_empty"
+            and row.get("error_type") == "model_empty"
+            and row.get("raw_content_length") == 0
+            and row.get("stream_complete") is True
+            and row.get("http_status") == 200
+        )
+        if ((classification is not None and not auditable_model_empty)
                 or row.get("stream_complete") is not True
                 or row.get("input_tokens") is None
                 or row.get("output_tokens") is None):
             errors.append(f"DeepSeek API response incomplete at row {index}")
-        attempts = row.get("transport_attempts")
-        if (not isinstance(attempts, list) or not attempts
-                or len(attempts) > 3
-                or row.get("http_attempts_used") != len(attempts)):
+        if not _valid_deepseek_retry_evidence(row):
             errors.append(f"DeepSeek retry evidence invalid at row {index}")
         request_path = row.get("raw_request_saved_path")
         try:

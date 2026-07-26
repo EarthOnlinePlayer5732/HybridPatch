@@ -709,8 +709,10 @@ preflight 和单 Key probe；全量另以 capacity15 完整 PASS、全部候选 
 `https://opencode.ai/zen/go/v1/chat/completions`；当前 revision 升为
 `opencode_openai_compatible/3`，其余 non-stream、retry、`reasoning_effort=high` 与审计语义
 不变。`/3` 将 OpenCode Go 的 HTTP 503 视为不消耗有限重试额度的瞬时服务错误；每次失败
-仍记录实际 HTTP attempt，并持续重试直至成功或外部明确停止。纠正后的正式 Key probe
-为 3/3 HTTP 200。
+仍记录实际 HTTP attempt，并持续重试直至成功或外部明确停止。DeepSeek campaign
+inspector 允许任意数量、明确标记为不消耗额度的 503 attempts；完整 HTTP 200 但最终
+`content=""` 的响应作为可审计 `model_empty` 方法失败保留，不再误报为全局证据完整性
+故障。纠正后的正式 Key probe 为 3/3 HTTP 200。
 
 Go 端点 capacity15 实跑中，15 个 `KEY_1` worker 同时授权并保持满槽约 9 分钟。最终
 47 条 terminal API 记录中 43 条 HTTP 200，4 条在各 3 次 attempt 后仍为 HTTP 503；

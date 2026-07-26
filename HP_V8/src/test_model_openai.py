@@ -9970,6 +9970,54 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
 
 
 class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
+    def test_retry_audit_allows_unbounded_free_503_attempts(self):
+        attempts = [
+            {
+                "attempt_index": index,
+                "status": "retryable_error",
+                "http_status": 503,
+                "retry_budget_consumed": False,
+                "retry_budget_attempt_index": 0,
+            }
+            for index in range(1, 6)
+        ]
+        attempts.append({
+            "attempt_index": 6,
+            "status": "success",
+            "http_status": 200,
+        })
+        self.assertTrue(paired_dispatch._valid_deepseek_retry_evidence({
+            "transport_attempts": attempts,
+            "http_attempts_used": 6,
+            "retry_count": 5,
+            "failed_attempt_count": 5,
+            "max_retries": 3,
+        }))
+
+    def test_retry_audit_rejects_exhausted_non_503_budget(self):
+        attempts = [
+            {
+                "attempt_index": index,
+                "status": "retryable_error",
+                "http_status": 429,
+                "retry_budget_consumed": True,
+                "retry_budget_attempt_index": index,
+            }
+            for index in range(1, 4)
+        ]
+        attempts.append({
+            "attempt_index": 4,
+            "status": "success",
+            "http_status": 200,
+        })
+        self.assertFalse(paired_dispatch._valid_deepseek_retry_evidence({
+            "transport_attempts": attempts,
+            "http_attempts_used": 4,
+            "retry_count": 3,
+            "failed_attempt_count": 3,
+            "max_retries": 3,
+        }))
+
     def test_formal_runner_requires_opencode_zen_and_high(self):
         with mock.patch.dict(
                 os.environ,

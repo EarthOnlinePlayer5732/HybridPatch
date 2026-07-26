@@ -16,6 +16,29 @@
   three live Key labels, 10 work-conserving FIFO slots per Key and no wave barrier.
 - launch decision: direct full experiment; no dry-run or zero-API gate.
 
+## 2026-07-26 - After Experiment: DeepSeek full234 c10 503-free first attempt
+
+- experiment:
+  `exp_20260726_hybridv8_deepseekv4flash_opencode_go_full234_rt2_c10_503free`.
+- observed prefix: 30 active workers, 79 terminal API rows, all HTTP 200, no retries,
+  exact Go endpoint, revision `/3` and `reasoning_effort=high`.
+- stop cause: row 78, FullRewrite `accounting4` RT2 backward, was a complete HTTP 200
+  with 3,240 completion tokens entirely in `reasoning_content`, `finish_reason=stop` and
+  final `content=""`. The prior strict inspector treated this auditable `model_empty`
+  outcome as a global integrity failure and interrupted all workers.
+- disposition: evidence is preserved; active workers returned to zero. This is not a 503,
+  transport failure, or completed full234 result.
+
+## 2026-07-26 - Before Experiment: DeepSeek full234 RT2 c10 503-free retry1
+
+- experiment:
+  `exp_20260726_hybridv8_deepseekv4flash_opencode_go_full234_rt2_c10_503free_retry1`.
+- policy correction: auditable HTTP-200 `model_empty` remains a real method failure but no
+  longer stops the campaign. Retry audit accepts any number of free HTTP 503 attempts while
+  still enforcing the finite budget for every other retryable error.
+- all other scope, identity, RT2, three-Key c10 work-conserving queue and no-dry-run launch
+  settings are unchanged.
+
 ## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode capacity15 RT2
 
 - experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2`;
