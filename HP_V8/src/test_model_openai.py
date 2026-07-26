@@ -9970,6 +9970,268 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
 
 
 class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
+    @staticmethod
+    def _write_inspection_fixture(out_dir):
+        sample = "sample"
+        worker_id = "worker-a"
+        worker_pid = os.getpid()
+        methods = ["hybridpatch", "fullrewrite"]
+        plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+        utils_relay_plan.save_relay_task_plan(
+            plan_path, ["state-1", "state-2"])
+        manifest = {
+            "schema": paired_dispatch.SCHEMA,
+            "run_git_commit": "1" * 40,
+            "config": {
+                "campaign_role": "deepseek_full234",
+                "samples": [sample],
+                "method_set": methods,
+                "num_round_trips": 2,
+                "model": paired_dispatch.DEEPSEEK_MODEL,
+                "provider": "opencode_zen",
+                "transport": "openai_sdk_nonstream",
+                "transport_revision": (
+                    paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                "transport_resume_policy": None,
+                "openai_base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                "reasoning_effort": (
+                    paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+            },
+            "task_plans": {
+                sample: {
+                    "path": os.path.basename(plan_path),
+                    "sha256": paired_dispatch._sha256(plan_path),
+                    "forward_state_sequence": ["state-1", "state-2"],
+                },
+            },
+        }
+        paired_dispatch._write_active_worker_set(
+            out_dir, manifest, [{
+                "worker_launch_id": worker_id,
+                "sample": sample,
+            }])
+        dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+        run_meta.append_jsonl_locked(dispatch_log, {
+            "event": "launch",
+            "worker_launch_id": worker_id,
+            "sample": sample,
+            "pid": worker_pid,
+        })
+        run_meta.append_jsonl_locked(dispatch_log, {
+            "event": "worker_authorized",
+            "worker_launch_id": worker_id,
+            "sample": sample,
+            "worker_pid": worker_pid,
+        })
+        run_meta.append_jsonl_locked(
+            os.path.join(out_dir, "run_metadata.jsonl"), {
+                "schema": run_meta.METADATA_SCHEMA,
+                "invocation_id": "invocation-a",
+                "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
+                "samples": [sample],
+                "methods": methods,
+                "model": paired_dispatch.DEEPSEEK_MODEL,
+                "provider": "opencode_zen",
+                "transport": "openai_sdk_nonstream",
+                "transport_revision": (
+                    paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                "transport_resume_policy": None,
+                "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                "reasoning_effort": (
+                    paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                "campaign_config": {
+                    "reasoning_effort": (
+                        paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                },
+                "status": "running",
+                "finished_at": None,
+            })
+        for method in methods:
+            os.makedirs(os.path.join(out_dir, method), exist_ok=True)
+        return manifest, sample, worker_id, worker_pid
+
+    @staticmethod
+    def _deepseek_api_row(
+            out_dir, sample, worker_id, worker_pid, direction):
+        request_id = f"call-{direction}"
+        raw_path = os.path.join(
+            out_dir, "api_raw", f"{request_id}.request.json")
+        run_meta.write_json_atomic(raw_path, {
+            "request_body": {
+                "model": paired_dispatch.DEEPSEEK_MODEL,
+                "reasoning_effort": (
+                    paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                "max_completion_tokens": (
+                    paired_dispatch.DEEPSEEK_MAX_TOKENS),
+            },
+        })
+        return {
+            "schema": paired_dispatch.API_CALL_SCHEMA,
+            "request_id": request_id,
+            "semantic_call_id": f"semantic-{direction}",
+            "sample": sample,
+            "method": "fullrewrite",
+            "rt_index": 1,
+            "direction": direction,
+            "call_kind": "fullrewrite_primary",
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+            "model": paired_dispatch.DEEPSEEK_MODEL,
+            "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+            "request_url": (
+                f"{paired_dispatch.DEEPSEEK_BASE_URL}/chat/completions"),
+            "transport": "openai_sdk_nonstream",
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+            "transport_resume_policy": None,
+            "reasoning_effort": (
+                paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+            "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+            "provider_called": True,
+            "response_replayed": False,
+            "generation_index": 0,
+            "classification": None,
+            "response_classification": "normal",
+            "stream_complete": True,
+            "http_status": 200,
+            "input_tokens": 1,
+            "output_tokens": 1,
+            "transport_attempts": [{
+                "attempt_index": 1,
+                "status": "success",
+                "http_status": 200,
+            }],
+            "http_attempts_used": 1,
+            "retry_count": 0,
+            "failed_attempt_count": 0,
+            "max_retries": 3,
+            "raw_request_saved_path": raw_path,
+        }
+
+    @staticmethod
+    def _fullrewrite_result_rows(sample, call_ids):
+        return [
+            {
+                "sample_id": sample,
+                "method": "fullrewrite",
+                "round_trip_num": 1,
+                "round_trip_direction": direction,
+                "api_call_ids": [call_id],
+                "model_name": paired_dispatch.DEEPSEEK_MODEL,
+                "reasoning_effort": (
+                    paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                "evaluation": (
+                    {"score": 1.0} if direction == "backward" else {}),
+            }
+            for direction, call_id in zip(
+                ("forward", "backward"), call_ids)
+        ]
+
+    def test_live_inspection_avoids_deepseek_api_linkage_torn_snapshot(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            api_rows = [
+                self._deepseek_api_row(
+                    out_dir, sample, worker_id, worker_pid, direction)
+                for direction in ("forward", "backward")
+            ]
+            result_rows = self._fullrewrite_result_rows(
+                sample, [row["request_id"] for row in api_rows])
+            api_snapshot_taken = threading.Event()
+            writer_done = threading.Event()
+            inspection_results = []
+            inspection_errors = []
+            real_read_jsonl = paired_dispatch._read_jsonl
+
+            def blocked_read_jsonl(path):
+                rows = real_read_jsonl(path)
+                if (os.path.basename(path) == "api_calls.jsonl"
+                        and not api_snapshot_taken.is_set()):
+                    api_snapshot_taken.set()
+                    if not writer_done.wait(5):
+                        raise RuntimeError(
+                            "unit-test publication barrier timed out")
+                return rows
+
+            def inspect_live_campaign():
+                try:
+                    inspection_results.append(
+                        paired_dispatch.inspect_campaign(
+                            out_dir, manifest,
+                            active_samples={sample}))
+                except BaseException as exc:
+                    inspection_errors.append(exc)
+
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")), mock.patch.object(
+                        paired_dispatch, "_read_jsonl",
+                        side_effect=blocked_read_jsonl):
+                inspector = threading.Thread(
+                    target=inspect_live_campaign, daemon=True)
+                inspector.start()
+                self.assertTrue(api_snapshot_taken.wait(5))
+                try:
+                    for row in api_rows:
+                        run_meta.append_jsonl_locked(
+                            os.path.join(out_dir, "api_calls.jsonl"), row)
+                    commit = run_meta.append_relay_rows_and_checkpoint(
+                        os.path.join(
+                            out_dir, "fullrewrite", f"{sample}.jsonl"),
+                        os.path.join(
+                            out_dir, "fullrewrite",
+                            f"{sample}.ckpt.json"),
+                        result_rows, {"completed_round_trips": 1},
+                        campaign_out_dir=out_dir)
+                    self.assertEqual(commit["status"], "appended")
+                finally:
+                    writer_done.set()
+                inspector.join(5)
+
+            self.assertFalse(inspector.is_alive())
+            self.assertEqual(inspection_errors, [])
+            self.assertEqual(len(inspection_results), 1)
+            self.assertEqual(inspection_results[0]["errors"], [])
+            self.assertEqual(len(real_read_jsonl(os.path.join(
+                out_dir, "api_calls.jsonl"))), 2)
+            self.assertEqual(len(real_read_jsonl(os.path.join(
+                out_dir, "fullrewrite", f"{sample}.jsonl"))), 2)
+
+    def test_deepseek_inspection_rejects_persistent_missing_api_linkage(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            for direction in ("forward", "backward"):
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "api_calls.jsonl"),
+                    self._deepseek_api_row(
+                        out_dir, sample, worker_id, worker_pid, direction))
+            result_rows = self._fullrewrite_result_rows(
+                sample, ["missing-forward", "missing-backward"])
+            commit = run_meta.append_relay_rows_and_checkpoint(
+                os.path.join(
+                    out_dir, "fullrewrite", f"{sample}.jsonl"),
+                os.path.join(
+                    out_dir, "fullrewrite", f"{sample}.ckpt.json"),
+                result_rows, {"completed_round_trips": 1},
+                campaign_out_dir=out_dir)
+            self.assertEqual(commit["status"], "appended")
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")):
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, active_samples={sample})
+            self.assertEqual(set(inspection["errors"]), {
+                "committed row API linkage mismatch: "
+                "fullrewrite/sample/(1, 'forward')",
+                "committed row API linkage mismatch: "
+                "fullrewrite/sample/(1, 'backward')",
+            })
+
     def test_retry_audit_allows_unbounded_free_503_attempts(self):
         attempts = [
             {

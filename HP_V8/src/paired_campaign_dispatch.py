@@ -3347,6 +3347,24 @@ def write_or_verify_manifest(out_dir, manifest, *, resume=False):
     return path, manifest
 
 
+def _read_relay_publication_snapshot(out_dir, samples, methods):
+    """Read a causally consistent live prefix of relay results and API rows.
+
+    A worker publishes each API row before committing the result/checkpoint
+    that references it.  Reading those files in reverse publication order
+    therefore cannot pair a new result row with an older API-ledger prefix.
+    Keep this ordering shared by every provider-specific inspector.
+    """
+    committed_rows = {}
+    for sample in samples:
+        for method in methods:
+            result_path = os.path.join(
+                out_dir, method, f"{sample}.jsonl")
+            committed_rows[(sample, method)] = _read_jsonl(result_path)
+    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    return committed_rows, api_rows
+
+
 def _valid_deepseek_retry_evidence(row):
     attempts = row.get("transport_attempts")
     if (not isinstance(attempts, list) or not attempts
@@ -3510,7 +3528,10 @@ def _inspect_deepseek_campaign(
                 f"latest run_metadata invocation failed: "
                 f"{(record.get('samples') or ['unknown'])[0]}")
 
-    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    committed_rows, api_rows = _read_relay_publication_snapshot(
+        out_dir, config.get("samples") or [],
+        config.get("method_set") or [],
+    )
     api_by_id = {}
     calls_by_step = {}
     api_rows_by_worker = {}
@@ -3609,12 +3630,9 @@ def _inspect_deepseek_campaign(
                 or worker_metadata[0].get("samples") != [sample]):
             errors.append(f"API worker provenance mismatch at row {index}")
 
-    committed_rows = {}
     for sample in config.get("samples") or []:
         for method in config.get("method_set") or []:
-            rows = _read_jsonl(
-                os.path.join(out_dir, method, f"{sample}.jsonl"))
-            committed_rows[(sample, method)] = rows
+            rows = committed_rows[(sample, method)]
             seen = set()
             for row in rows:
                 key = (
@@ -3926,19 +3944,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         elif _sha256(plan_path) != plan.get("sha256"):
             errors.append(f"task-plan hash drift: {sample}")
 
-    # Relay publication is causally ordered as attempt ledger/journal, then the
-    # terminal API row, then the committed result/checkpoint.  Read that chain
-    # in reverse publication order so a live inspection can observe either the
-    # old prefix or the new prefix, never an old API snapshot paired with a new
-    # result row.  Per-file locks alone cannot provide a cross-file snapshot.
-    committed_rows = {}
-    for sample in config["samples"]:
-        for method in config["method_set"]:
-            result_path = os.path.join(
-                out_dir, method, f"{sample}.jsonl")
-            committed_rows[(sample, method)] = _read_jsonl(result_path)
-
-    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    committed_rows, api_rows = _read_relay_publication_snapshot(
+        out_dir, config["samples"], config["method_set"])
     recovery_incidents = campaign_recovery_incident_evidence(out_dir)
     authorized_api_incident_hashes = recovery_incidents["api_row_hashes"]
     authorized_attempt_incident_hashes = recovery_incidents[
