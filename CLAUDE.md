@@ -121,7 +121,13 @@ python -B ./src/analyze.py --dir ./exp_SLUG --K 10 --critical_theta 0.10
 python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch fullrewrite --watch
 ```
 
-- 默认模型 `deepseek-v4-flash`（OpenAI 兼容端点，CNY）；`minimax-m3` 固定走 OpenCode Go `https://opencode.ai/zen/go/v1/messages`（USD），Python 使用 Anthropic SDK，所有调用均为 adaptive thinking，默认/硬上限 `max_tokens=131072`。
+- 默认模型 `deepseek-v4-flash` 仍可使用显式配置的 OpenAI 兼容端点；正式 OpenCode
+  DeepSeek-V4-Flash campaign 固定走 OpenCode Zen
+  `https://opencode.ai/zen/v1/chat/completions`（USD），revision
+  `opencode_openai_compatible/1`，non-stream，`reasoning_effort=high`，并从 raw request
+  到 result row 全链审计。`minimax-m3` 固定走 OpenCode Go
+  `https://opencode.ai/zen/go/v1/messages`（USD），Python 使用 Anthropic SDK，所有调用均为
+  adaptive thinking，默认/硬上限 `max_tokens=131072`。
 - MiniMax OpenCode 新实验遵循 `transport/docs/API_TRANSPORT_V4.md`：完整终止链才提交；HTTP 200 `Streaming response failed`、缺 `message_stop`/终结 usage 或 block 未正常闭合先分类为 retryable `incomplete_stream`；每个 exact semantic call 最多 2 个 response slot（首次 + 1 次全量重发），另有 3 次生成前 transient failure，禁止 partial continuation。冻结 transport-v3 归档仍只按 `API_TRANSPORT_FROZEN_V3.md` 解释。
 - 完整空/near-empty 是模型失败，不做 transport retry，也不触发 HP repair；基础设施耗尽会在提交实验行前终止该步并留存 ledger，分析时按缺失的 `score=null` 处理，禁止记模型 0 分。paired campaign 仅隔离四证一致的 retry exhaustion sample，其他 sample 继续；恢复用同 fingerprint 的新 semantic generation，不在同一 semantic ID 内重置 R2/I3。新实验必须使用 transport revision `opencode_anthropic_sdk/4` 和新 `out_dir`。
 - 另有 MiniMax **官方非流式**传输 `minimax_official_nonstream/1`（`MINIMAX_TRANSPORT=official_nonstream` + `MINIMAX_API_KEY`，详见 `transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md`）：baseline 对齐语义（盲重试、完整 200 照单接受含 `finish=abort`）、5h 限额自动等待；与 OpenCode 路线按 revision 门禁互斥，禁止混目录；`MINIMAX_TRANSPORT` 不得写入 `.env`。

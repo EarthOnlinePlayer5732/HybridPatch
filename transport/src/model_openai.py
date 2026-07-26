@@ -38,6 +38,12 @@ _OPENCODE_TRANSPORT_SDK = "anthropic_sdk_v2"
 _OPENCODE_TRANSPORT_LEGACY = "urllib_v1"
 _OPENCODE_TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
 _OPENCODE_TRANSPORT_RESUME_POLICY = "exact_payload_new_semantic_call/1"
+_OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1"
+_OPENCODE_ZEN_CHAT_COMPLETIONS_URL = (
+    _OPENCODE_ZEN_BASE_URL + "/chat/completions"
+)
+_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/1"
+_REASONING_EFFORTS = {"low", "medium", "high"}
 # MiniMax official OpenAI-compatible endpoint (docs/Minimax_OPENAI.md), selected
 # ONLY via MINIMAX_TRANSPORT=official_nonstream. Own transport revision with
 # baseline-aligned semantics: blocking non-streaming create(), blanket-exception
@@ -111,6 +117,11 @@ _PRICING_USD = {
     "o4-mini":          (1.10,  4.40),
 }
 
+_OPENCODE_PRICING_USD = {
+    "deepseek-v4-flash": (0.14, 0.28),
+    "deepseek-v4-pro": (1.74, 3.48),
+}
+
 # Per-1M-token CNY costs: (input cache hit, input cache miss, output).
 # Source: DeepSeek official Chinese pricing page, checked 2026-06-06.
 _DEEPSEEK_PRICING_CNY = {
@@ -143,6 +154,16 @@ class OpenCodeTransportError(RuntimeError):
         self.status_code = getattr(last_error, "status_code", None)
 
 
+class OpenAICompatibleTransportError(RuntimeError):
+    """Terminal OpenAI-compatible failure with per-attempt audit metadata."""
+
+    def __init__(self, message, *, attempts, last_error):
+        super().__init__(message)
+        self.transport_attempts = list(attempts)
+        self.last_error = last_error
+        self.status_code = getattr(last_error, "status_code", None)
+
+
 def _match_pricing(model, pricing):
     model_l = model.lower()
     matched = None
@@ -155,6 +176,31 @@ def _match_pricing(model, pricing):
 
 def _is_minimax_model(model):
     return model.lower().startswith("minimax-m3")
+
+
+def _normalized_base_url(value):
+    return str(value or "").strip().rstrip("/")
+
+
+def _is_opencode_zen_runtime(model, base_url=None):
+    return (
+        str(model or "").lower().startswith("deepseek-v4-")
+        and _normalized_base_url(
+            base_url if base_url is not None else os.environ.get(
+                "OPENAI_BASE_URL")
+        ) == _OPENCODE_ZEN_BASE_URL
+    )
+
+
+def _effective_reasoning_effort(value):
+    if value is None:
+        return None
+    effort = str(value).strip().lower()
+    if effort not in _REASONING_EFFORTS:
+        raise ValueError(
+            "reasoning_effort must be one of low, medium, high, or omitted"
+        )
+    return effort
 
 
 def _effective_minimax_max_tokens(max_tokens):
@@ -248,6 +294,47 @@ def minimax_runtime_config(max_tokens=None, thinking_mode="adaptive"):
         "max_transient_failures": _MINIMAX_MAX_TRANSIENT_FAILURES,
         "transport_resume_policy": _OPENCODE_TRANSPORT_RESUME_POLICY,
     }
+
+
+def openai_compatible_runtime_config(
+        model, max_tokens=None, reasoning_effort=None):
+    """Side-effect-free runtime identity for an OpenAI-compatible model."""
+    resolved = resolve_model_name(model)
+    base_url = _normalized_base_url(os.environ.get("OPENAI_BASE_URL")) or None
+    opencode_zen = _is_opencode_zen_runtime(resolved, base_url)
+    return {
+        "provider": (
+            "opencode_zen" if opencode_zen else "openai_chat_completions"
+        ),
+        "transport": "openai_sdk_nonstream",
+        "transport_revision": (
+            _OPENCODE_OPENAI_COMPATIBLE_REVISION if opencode_zen else None
+        ),
+        "base_url": base_url,
+        "request_url": (
+            _OPENCODE_ZEN_CHAT_COMPLETIONS_URL if opencode_zen else None
+        ),
+        "anthropic_sdk_version": None,
+        "effective_max_tokens": max_tokens,
+        "thinking_mode": None,
+        "reasoning_effort": _effective_reasoning_effort(reasoning_effort),
+        "max_response_slots": None,
+        "max_response_retries": None,
+        "max_transient_failures": None,
+        "transport_resume_policy": None,
+    }
+
+
+def model_runtime_config(
+        model, max_tokens=None, thinking_mode="adaptive",
+        reasoning_effort=None):
+    if _is_minimax_model(resolve_model_name(model)):
+        return minimax_runtime_config(
+            max_tokens=max_tokens, thinking_mode=thinking_mode
+        )
+    return openai_compatible_runtime_config(
+        model, max_tokens=max_tokens, reasoning_effort=reasoning_effort
+    )
 
 
 def _as_plain_dict(value):
@@ -1073,6 +1160,29 @@ def _estimate_costs(model, usage):
     return {"total_usd": total_usd, "total_cny": total_cny, "cost_currency": currency}
 
 
+def _estimate_runtime_costs(model, usage, *, opencode_zen=False):
+    if opencode_zen:
+        pricing = _match_pricing(model, _OPENCODE_PRICING_USD)
+        prompt_tokens = usage.get("prompt_tokens", 0) or 0
+        completion_tokens = usage.get("completion_tokens", 0) or 0
+        cached, non_cached, cache_available = _prompt_cache_usage(usage)
+        if not cache_available:
+            cached, non_cached = 0, prompt_tokens
+        total_usd = 0.0
+        if pricing:
+            input_price, output_price = pricing
+            total_usd = (
+                ((non_cached + cached * 0.2) / 1_000_000) * input_price
+                + (completion_tokens / 1_000_000) * output_price
+            )
+        return {
+            "total_usd": total_usd,
+            "total_cny": 0.0,
+            "cost_currency": "USD",
+        }
+    return _estimate_costs(model, usage)
+
+
 # ── Model maps (alias → deployment name) ────────────────────────────────
 
 model_maps = {
@@ -1117,10 +1227,12 @@ class OpenAI_Model:
             assert openai_key, (
                 "Set OPENAI_API_KEY (or AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT)"
             )
-            self.client = OpenAI(
-                api_key=openai_key,
-                base_url=os.environ.get("OPENAI_BASE_URL") or None,  # 未设则自动回落 OpenAI 官方
-            )
+            base_url = os.environ.get("OPENAI_BASE_URL") or None
+            client_args = {"api_key": openai_key, "base_url": base_url}
+            if _normalized_base_url(base_url) == _OPENCODE_ZEN_BASE_URL:
+                # generate() owns retries so every OpenCode attempt is visible.
+                client_args["max_retries"] = 0
+            self.client = OpenAI(**client_args)
         return self.client
 
     def _client_for_model(self, model):
@@ -1151,6 +1263,7 @@ class OpenAI_Model:
         variables={},
         instance=None,
         thinking_mode="adaptive",
+        reasoning_effort=None,
         call_kind="primary",
         _raw_event_sink=None,
         max_response_retries=1,
@@ -1172,6 +1285,8 @@ class OpenAI_Model:
             variables: Dict of [[KEY]] → value replacements for the prompt.
             instance: Ignored (API compat).
             thinking_mode: MiniMax Anthropic thinking mode (adaptive by default).
+            reasoning_effort: OpenAI-compatible reasoning effort. Formal
+                OpenCode Zen DeepSeek runs use ``high``.
             call_kind: Audit label such as hybridpatch_primary or repair.
             max_response_retries: MiniMax retries after a response began but the
                 Anthropic terminal chain was incomplete. Frozen maximum is one.
@@ -1207,6 +1322,14 @@ class OpenAI_Model:
         effective_thinking_mode = (
             _minimax_thinking_config(thinking_mode)["type"] if is_minimax else None
         )
+        effective_reasoning_effort = _effective_reasoning_effort(reasoning_effort)
+        if is_minimax and effective_reasoning_effort is not None:
+            raise ValueError(
+                "reasoning_effort is only valid for OpenAI-compatible models"
+            )
+        is_opencode_zen = (
+            not is_minimax and _is_opencode_zen_runtime(resolved)
+        )
         effective_temperature = (
             1.0 if is_minimax and effective_thinking_mode == "adaptive" else temperature
         )
@@ -1238,6 +1361,7 @@ class OpenAI_Model:
         timeout_hit = False
         last_error_type = None
         transport_attempts = []
+        raw_request_body = None
         if is_minimax and not is_minimax_official:
             max_response_slots = min(
                 _MINIMAX_MAX_RESPONSE_SLOTS,
@@ -1440,6 +1564,17 @@ class OpenAI_Model:
             max_attempts = max(1, int(max_retries) if max_retries is not None else 1)
             attempt_index = 0
             while True:
+                http_attempt_index = attempt_index + 1
+                if not is_minimax_official:
+                    _emit_transport_event(_raw_event_sink, {
+                        "record_type": "attempt_start",
+                        "attempt_index": http_attempt_index,
+                        "attempt_kind": (
+                            "openai_compatible_initial"
+                            if http_attempt_index == 1
+                            else "openai_compatible_retry"
+                        ),
+                    })
                 try:
                     extra = dict(kwargs)
                     request_model = resolved
@@ -1455,6 +1590,14 @@ class OpenAI_Model:
                         }
                     elif max_tokens is not None:
                         extra["max_completion_tokens"] = max_tokens
+                    if not is_minimax_official and effective_reasoning_effort:
+                        extra["reasoning_effort"] = effective_reasoning_effort
+                    raw_request_body = {
+                        "model": request_model,
+                        "messages": messages,
+                        "temperature": effective_temperature,
+                        **extra,
+                    }
                     response = client.chat.completions.create(
                         model=request_model,
                         messages=messages,
@@ -1462,6 +1605,20 @@ class OpenAI_Model:
                         temperature=effective_temperature,
                         **extra,
                     )
+                    if not is_minimax_official:
+                        success_record = {
+                            "attempt_index": http_attempt_index,
+                            "status": "success",
+                            "error_type": None,
+                            "http_status": 200,
+                            "stream_complete": True,
+                        }
+                        transport_attempts.append(success_record)
+                        _emit_transport_event(_raw_event_sink, {
+                            "record_type": "attempt_end",
+                            "attempt_index": http_attempt_index,
+                            "attempt": success_record,
+                        })
                     break
                 except Exception as exc:
                     if (is_minimax_official and _is_official_rate_limit(exc)
@@ -1480,17 +1637,51 @@ class OpenAI_Model:
                     last_err = exc
                     last_error_type = type(exc).__name__
                     attempt = attempt_index
-                    if attempt_index >= max_attempts:
-                        raise RuntimeError(
-                            f"Failed after {max_attempts} attempt(s): {last_err}"
+                    if is_minimax_official:
+                        if attempt_index >= max_attempts:
+                            raise RuntimeError(
+                                f"Failed after {max_attempts} attempt(s): {last_err}"
+                            ) from last_err
+                        time.sleep(4)
+                        continue
+                    retryable = _is_retryable_opencode_error(exc)
+                    attempt_record = {
+                        "attempt_index": http_attempt_index,
+                        "status": (
+                            "retryable_error" if retryable else "fatal_error"
+                        ),
+                        "error_type": _transport_error_type(exc),
+                        "http_status": _transport_status_code(exc),
+                        "stream_complete": False,
+                    }
+                    transport_attempts.append(attempt_record)
+                    _emit_transport_event(_raw_event_sink, {
+                        "record_type": "attempt_end",
+                        "attempt_index": http_attempt_index,
+                        "attempt": attempt_record,
+                    })
+                    if not retryable or attempt_index >= max_attempts:
+                        raise OpenAICompatibleTransportError(
+                            "OpenAI-compatible provider failed after "
+                            f"{attempt_index} attempt(s)",
+                            attempts=transport_attempts,
+                            last_error=last_err,
                         ) from last_err
-                    time.sleep(4)
+                    if attempt_record["error_type"] == "rate_limit":
+                        quota_waits += 1
+                    else:
+                        transient_waits += 1
+                    time.sleep(_retry_after_seconds(last_err, attempt_index))
+            if not is_minimax_official:
+                attempt = max(len(transport_attempts) - 1, 0)
 
         elapsed = time.time() - t0
         if isinstance(response, dict):
             resp = response
         else:
             resp = response.to_dict() if hasattr(response, "to_dict") else response.model_dump()
+        if raw_request_body is not None:
+            resp["_raw_request_body"] = raw_request_body
         usage = resp.get("usage", {})
         raw_usage = resp.get("raw_usage") or {}
         choices = resp.get("choices") or []
@@ -1527,7 +1718,9 @@ class OpenAI_Model:
                     "aborted_partial_text" if has_text else "model_empty")
             else:
                 official_classification = "normal" if has_text else "model_empty"
-        costs = _estimate_costs(resolved, usage)
+        costs = _estimate_runtime_costs(
+            resolved, usage, opencode_zen=is_opencode_zen
+        )
         prompt_cache_hit, prompt_cache_miss, cache_available = _prompt_cache_usage(usage)
 
         # Extract reasoning tokens if present (o1/o3 models)
@@ -1557,11 +1750,16 @@ class OpenAI_Model:
             base_url_label = _opencode_base_url()
             request_url_label = _opencode_messages_url()
         else:
-            provider_label = "openai_chat_completions"
-            transport_label = "openai_sdk"
-            transport_revision_label = None
-            base_url_label = os.environ.get("OPENAI_BASE_URL") or None
-            request_url_label = None
+            runtime = openai_compatible_runtime_config(
+                resolved,
+                max_tokens=effective_max_tokens,
+                reasoning_effort=effective_reasoning_effort,
+            )
+            provider_label = runtime["provider"]
+            transport_label = runtime["transport"]
+            transport_revision_label = runtime["transport_revision"]
+            base_url_label = runtime["base_url"]
+            request_url_label = runtime["request_url"]
         result = {
             "message": response_text,
             # Raw API-log side channel (recorder writes then strips these):
@@ -1592,6 +1790,7 @@ class OpenAI_Model:
             "max_tokens": effective_max_tokens,
             "requested_max_tokens": max_tokens,
             "thinking_mode": effective_thinking_mode,
+            "reasoning_effort": effective_reasoning_effort,
             "call_kind": call_kind,
             "call_kinds": [call_kind],
             "timeout": eff_timeout,
@@ -1606,11 +1805,11 @@ class OpenAI_Model:
             "max_transient_failures": retry_budget_state.get("max_transient_failures"),
             "transient_failure_count": retry_budget_state.get("transient_failure_count"),
             "http_attempts_used": (
-                attempt + 1 if is_minimax_official
+                attempt + 1 if (is_minimax_official or not is_minimax)
                 else retry_budget_state.get("http_attempts_used")
             ),
             "retry_count": (
-                attempt if is_minimax_official
+                attempt if (is_minimax_official or not is_minimax)
                 else max((retry_budget_state.get("response_slots_used") or 1) - 1, 0)
             ),
             "failed_attempt_count": (
@@ -1624,21 +1823,31 @@ class OpenAI_Model:
             "transient_wait_count": transient_waits,
             "timeout_hit": timeout_hit,
             "last_error_type": last_error_type,
-            "http_status": resp.get("http_status", 200 if is_minimax else None),
+            "http_status": resp.get("http_status", 200),
             "finish_reason": finish_reason,
             "stop_reason": resp.get("stop_reason") or finish_reason,
             "stream_complete": (
-                True if is_minimax_official
+                True if (is_minimax_official or not is_minimax)
                 else (resp.get("stream_complete") if is_minimax else None)
             ),
             "response_classification": (
                 official_classification if is_minimax_official
                 else resp.get("response_classification")
+                if is_minimax
+                else (
+                    "normal" if str(response_text or "").strip()
+                    else "model_empty"
+                )
             ),
             "response_classifications": (
                 [official_classification] if is_minimax_official
-                else ([resp.get("response_classification")]
-                      if resp.get("response_classification") else [])
+                else (
+                    [resp.get("response_classification")]
+                    if is_minimax and resp.get("response_classification")
+                    else [] if is_minimax
+                    else ["normal" if str(response_text or "").strip()
+                          else "model_empty"]
+                )
             ),
             "transport_attempts": resp.get("_transport_attempts") or transport_attempts,
             "content_block_counts": resp.get("content_block_counts") or {},
@@ -1655,11 +1864,12 @@ class OpenAI_Model:
             "prompt_cache_miss_tokens": prompt_cache_miss,
             "prompt_cache_usage_available": cache_available,
             "input_tokens": (
-                usage.get("prompt_tokens", 0) if is_minimax_official
+                usage.get("prompt_tokens", 0)
+                if (is_minimax_official or not is_minimax)
                 else raw_usage.get("input_tokens")
             ),
             "output_tokens": (
-                completion_tokens if is_minimax_official
+                completion_tokens if (is_minimax_official or not is_minimax)
                 else raw_usage.get("output_tokens")
             ),
             "cache_read_input_tokens": raw_usage.get("cache_read_input_tokens"),

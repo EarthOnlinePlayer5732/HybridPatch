@@ -48,6 +48,25 @@
   保留全部严格校验。确定性并发测试冻结该顺序，且全局 inspection error 仍在终止 worker
   前落 durable stop latch；旧 campaign 保持 `failed_informative`，新提交使用新实验编号。
 
+### `opencode_openai_compatible/1`（DeepSeek V4 Flash OpenCode 线）
+
+- provider：OpenCode Zen；endpoint
+  `https://opencode.ai/zen/v1/chat/completions`；model `deepseek-v4-flash`。
+- 请求：Python OpenAI SDK non-stream，SDK 内建 retry 关闭，由 wrapper 提供最多 3 次可见、
+  有界的 retry；每次 attempt 写入返回 metadata。
+- reasoning：正式 campaign 强制 `reasoning_effort=high`。runner、run metadata、API ledger、
+  raw request 和 result row 全链记录；base URL 或 reasoning 不匹配时在 provider POST 前拒绝。
+- 计费：按 OpenCode Zen 的 USD DeepSeek V4 Flash 费率单独计算，不复用 DeepSeek 官方 CNY
+  路线或 MiniMax 费率。
+- 调度：`deepseek_capacity15` 固定单 Key、15 worker、15 sample、RT2；
+  `deepseek_full234` 使用探针成功的至少两个物理唯一 Key，每 Key 15 worker，稳定 FIFO 即时
+  补位，禁止 wave/batch barrier。
+- 隔离：DeepSeek non-stream 不伪造 MiniMax stream attempt ledger/journal；专用 inspector
+  继续严格检查 campaign identity、worker authorization、raw request、API/result linkage、
+  checkpoint、preservation 和完整性。
+- 首次付费调用前仍需 capacity/full 两份计划的独立审阅、clean commit、unified zero-API
+  preflight、单 Key probe；全量另需 capacity PASS 和全部候选 Key probe。
+
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 
 - 动机：为 FR baseline 忠实翻译上游 DELEGATE-52 的官方非流式 + 盲异常重试语义，与 OpenCode v3 公平性策略分线。

@@ -1,5 +1,6 @@
 """Zero-API regression tests for the OpenCode Go Anthropic transport."""
 
+import argparse
 import copy
 import json
 import os
@@ -1429,6 +1430,28 @@ class IntegrationContractTests(unittest.TestCase):
                 processes[sample] = process
                 return process
 
+            def fake_latest_sample_outcomes(
+                    active_out_dir, *_args, **_kwargs):
+                if "sample-a" not in processes:
+                    return {}
+                active = paired_dispatch._read_json(
+                    paired_dispatch._active_worker_set_path(active_out_dir))
+                worker_id = next(
+                    (
+                        candidate for candidate, payload
+                        in (active.get("workers") or {}).items()
+                        if payload.get("sample") == "sample-a"
+                    ),
+                    None,
+                )
+                return {
+                    "sample-a": {
+                        "status": "infrastructure_incomplete",
+                        "worker_launch_id": worker_id,
+                        "worker_pid": processes["sample-a"].pid,
+                    }
+                }
+
             with mock.patch.object(
                     paired_dispatch, "_validate_campaign_grid"), \
                     mock.patch.object(
@@ -1458,9 +1481,7 @@ class IntegrationContractTests(unittest.TestCase):
                                       "transport_recovery_index": 0}), \
                     mock.patch.object(
                         paired_dispatch, "_latest_sample_outcomes",
-                        return_value={
-                            "sample-a": {
-                                "status": "infrastructure_incomplete"}}), \
+                        side_effect=fake_latest_sample_outcomes), \
                     mock.patch.object(
                         paired_dispatch.subprocess, "Popen",
                         side_effect=fake_popen), \
@@ -9826,6 +9847,278 @@ def _official_client_factory(outcomes, captures):
             self.chat = _Chat()
 
     return _FakeOpenAI
+
+
+class OpenCodeZenDeepSeekTests(unittest.TestCase):
+    def _generate(self, outcomes, captures, **kwargs):
+        env = {
+            "OPENAI_API_KEY": "unit-test-key",
+            "OPENAI_BASE_URL": "https://opencode.ai/zen/v1",
+        }
+        fake_cls = _official_client_factory(list(outcomes), captures)
+        events = []
+        with mock.patch.dict(os.environ, env, clear=False), \
+                mock.patch.object(model_openai, "OpenAI", fake_cls), \
+                mock.patch.object(model_openai.time, "sleep"):
+            wrapper = model_openai.OpenAI_Model()
+            result = wrapper.generate(
+                [{"role": "user", "content": "Hello"}],
+                model="deepseek-v4-flash",
+                max_tokens=20000,
+                reasoning_effort="high",
+                return_metadata=True,
+                _raw_event_sink=events.append,
+                **kwargs,
+            )
+        return result, events
+
+    def test_high_reasoning_is_sent_and_audited(self):
+        captures = []
+        result, events = self._generate(
+            [_official_payload(content="Hello", finish_reason="stop")],
+            captures,
+        )
+        constructor = captures[0]["_ctor"]
+        request = captures[1]
+        self.assertEqual(
+            constructor["base_url"], "https://opencode.ai/zen/v1")
+        self.assertEqual(constructor["max_retries"], 0)
+        self.assertEqual(request["model"], "deepseek-v4-flash")
+        self.assertEqual(request["reasoning_effort"], "high")
+        self.assertEqual(request["max_completion_tokens"], 20000)
+        self.assertEqual(
+            result["_raw_request_body"]["reasoning_effort"], "high")
+        self.assertEqual(result["provider"], "opencode_zen")
+        self.assertEqual(result["transport"], "openai_sdk_nonstream")
+        self.assertEqual(
+            result["transport_revision"], "opencode_openai_compatible/1")
+        self.assertEqual(
+            result["request_url"],
+            "https://opencode.ai/zen/v1/chat/completions")
+        self.assertEqual(result["reasoning_effort"], "high")
+        self.assertEqual(result["http_attempts_used"], 1)
+        self.assertEqual(result["retry_count"], 0)
+        self.assertEqual(result["cost_currency"], "USD")
+        self.assertAlmostEqual(result["total_usd"], 0.00000252)
+        self.assertEqual(result["total_cny"], 0.0)
+        self.assertEqual(
+            [event["record_type"] for event in events],
+            ["attempt_start", "attempt_end"],
+        )
+
+    def test_retryable_failure_is_bounded_and_recorded(self):
+        captures = []
+        result, events = self._generate(
+            [
+                model_openai._HTTPStatusError(429, "busy"),
+                _official_payload(content="Hello", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["http_attempts_used"], 2)
+        self.assertEqual(result["retry_count"], 1)
+        self.assertEqual(result["rate_limit_wait_count"], 1)
+        self.assertEqual(
+            [item["status"] for item in result["transport_attempts"]],
+            ["retryable_error", "success"],
+        )
+        self.assertEqual(
+            [event["record_type"] for event in events],
+            ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
+        )
+
+    def test_runtime_config_and_reasoning_validation(self):
+        with mock.patch.dict(
+            os.environ,
+            {"OPENAI_BASE_URL": "https://opencode.ai/zen/v1"},
+            clear=False,
+        ):
+            config = model_openai.model_runtime_config(
+                "deepseek-v4-flash",
+                max_tokens=20000,
+                reasoning_effort="high",
+            )
+        self.assertEqual(config["provider"], "opencode_zen")
+        self.assertEqual(
+            config["transport_revision"], "opencode_openai_compatible/1")
+        self.assertEqual(config["reasoning_effort"], "high")
+        with self.assertRaises(ValueError):
+            model_openai._effective_reasoning_effort("ultra")
+
+
+class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
+    def test_formal_runner_requires_opencode_zen_and_high(self):
+        with mock.patch.dict(
+                os.environ,
+                {"OPENAI_BASE_URL": "https://opencode.ai/zen/v1"},
+                clear=False):
+            experiment_runner._require_formal_opencode_transport(
+                "deepseek-v4-flash", "high")
+            with self.assertRaises(RuntimeError):
+                experiment_runner._require_formal_opencode_transport(
+                    "deepseek-v4-flash", "medium")
+        with mock.patch.dict(
+                os.environ,
+                {"OPENAI_BASE_URL": "https://api.deepseek.com"},
+                clear=False):
+            with self.assertRaises(RuntimeError):
+                experiment_runner._require_formal_opencode_transport(
+                    "deepseek-v4-flash", "high")
+
+    def test_capacity_manifest_is_one_key_fifteen_slot_rt2(self):
+        args = argparse.Namespace(
+            campaign_role="deepseek_capacity15",
+            num_round_trips=2,
+            seed=42,
+        )
+        samples = list(paired_dispatch.DEEPSEEK_CAPACITY_SAMPLES)
+        assignments = paired_dispatch.build_key_assignments(
+            samples, ["KEY_1"], 15,
+            alternate_within_key=True, allow_queue=True)
+        task_plans = {
+            sample: {
+                "path": f"{sample}.task_plan.json",
+                "sha256": "a" * 64,
+                "forward_state_sequence": ["state"],
+            }
+            for sample in samples
+        }
+        with mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"unit": "test"}):
+            manifest = paired_dispatch.build_manifest(
+                "unused", samples, assignments, task_plans, args)
+        config = manifest["config"]
+        self.assertEqual(config["model"], "deepseek-v4-flash")
+        self.assertEqual(config["reasoning_effort"], "high")
+        self.assertEqual(config["num_round_trips"], 2)
+        self.assertEqual(config["slots_per_key"], 15)
+        self.assertEqual(config["key_count"], 1)
+        self.assertEqual(config["max_worker_count"], 15)
+        self.assertEqual(config["queued_worker_count"], 0)
+        self.assertEqual(
+            config["dispatch_policy"], "per_key_work_conserving_v1")
+
+    def test_full_manifest_is_four_key_work_conserving_queue(self):
+        args = argparse.Namespace(
+            campaign_role="deepseek_full234",
+            num_round_trips=2,
+            seed=42,
+            _full234_scope_record={
+                "schema": "anchorpatch.full234_scope/1",
+                "sample_count": 234,
+                "sample_ids": [f"sample-{index:03d}" for index in range(234)],
+                "sample_json_sha256": "c" * 64,
+            },
+        )
+        samples = list(args._full234_scope_record["sample_ids"])
+        labels = ["KEY_1", "KEY_2", "KEY_3", "KEY_4"]
+        assignments = paired_dispatch.build_key_assignments(
+            samples, labels, 15,
+            alternate_within_key=True, allow_queue=True)
+        task_plans = {
+            sample: {
+                "path": f"{sample}.task_plan.json",
+                "sha256": "a" * 64,
+                "forward_state_sequence": ["state"],
+            }
+            for sample in samples
+        }
+        with mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"unit": "test"}):
+            manifest = paired_dispatch.build_manifest(
+                "unused", samples, assignments, task_plans, args)
+        config = manifest["config"]
+        self.assertEqual(config["key_count"], 4)
+        self.assertEqual(config["slots_per_key"], 15)
+        self.assertEqual(config["max_worker_count"], 60)
+        self.assertEqual(config["queued_worker_count"], 174)
+        self.assertEqual(
+            config["dispatch_policy"], "per_key_work_conserving_v1")
+        queues = manifest["assignment_queues"]
+        self.assertEqual(len(queues), 4)
+        self.assertEqual(
+            sorted(queue["worker_count"] for queue in queues),
+            [58, 58, 59, 59])
+
+    def test_worker_launch_uses_per_key_openai_env_and_high(self):
+        captured = {}
+
+        class FakeProcess:
+            pid = 12345
+
+            @staticmethod
+            def poll():
+                return None
+
+        def fake_popen(command, **kwargs):
+            captured["command"] = list(command)
+            captured["env"] = dict(kwargs["env"])
+            return FakeProcess()
+
+        args = argparse.Namespace(
+            campaign_role="deepseek_capacity15",
+            num_round_trips=2,
+            seed=42,
+            notes="unit",
+            start_timeout=10,
+        )
+        sample = "earncall1"
+        assignment = {
+            "sample": sample,
+            "key_label": "KEY_1",
+            "methods": ["hybridpatch", "fullrewrite"],
+            "console_log": "dispatch_logs/earncall1.log",
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            os.makedirs(os.path.join(out_dir, "dispatch_logs"))
+            plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+            with open(plan_path, "w", encoding="utf-8") as handle:
+                json.dump({"targets": []}, handle)
+            task_plans = {
+                sample: {
+                    "path": os.path.basename(plan_path),
+                    "sha256": "b" * 64,
+                }
+            }
+            manifest = {"run_git_commit": "1" * 40}
+            with mock.patch.object(
+                    paired_dispatch.subprocess, "Popen",
+                    side_effect=fake_popen), mock.patch.object(
+                        paired_dispatch, "_authorize_workers"), mock.patch.object(
+                            paired_dispatch, "_write_active_worker_set"), \
+                    mock.patch.dict(
+                        os.environ,
+                        {
+                            "OPENCODE_API_KEY": "wrong",
+                            "MINIMAX_API_KEY": "wrong",
+                            "MINIMAX_TRANSPORT": "wrong",
+                        },
+                        clear=False):
+                running = {}
+                paired_dispatch._launch_worker_batch(
+                    args, out_dir, manifest, task_plans,
+                    {"KEY_1": "secret-key"}, [assignment], {},
+                    os.path.join(out_dir, "dispatch_log.jsonl"), running)
+                running[sample]["log"].close()
+        command = captured["command"]
+        environment = captured["env"]
+        self.assertIn("deepseek-v4-flash", command)
+        self.assertIn("20000", command)
+        self.assertEqual(
+            command[command.index("--reasoning_effort") + 1], "high")
+        self.assertEqual(environment["OPENAI_API_KEY"], "secret-key")
+        self.assertEqual(
+            environment["OPENAI_BASE_URL"],
+            "https://opencode.ai/zen/v1")
+        self.assertNotIn("OPENCODE_API_KEY", environment)
+        self.assertNotIn("MINIMAX_API_KEY", environment)
+        self.assertNotIn("MINIMAX_TRANSPORT", environment)
 
 
 class MinimaxOfficialTransportTests(unittest.TestCase):

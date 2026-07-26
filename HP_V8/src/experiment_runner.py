@@ -296,8 +296,22 @@ def _real_generate(*a, **k):
     return g(*a, **k)
 
 
-def _require_formal_opencode_transport(model):
-    if not str(model).lower().startswith("minimax-m3"):
+def _require_formal_opencode_transport(model, reasoning_effort=None):
+    model_l = str(model).lower()
+    if model_l.startswith("deepseek-v4-"):
+        base_url = (os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
+        if base_url != "https://opencode.ai/zen/v1":
+            raise RuntimeError(
+                "formal DeepSeek-V4 experiments require OPENAI_BASE_URL="
+                "https://opencode.ai/zen/v1"
+            )
+        if reasoning_effort != "high":
+            raise RuntimeError(
+                "formal OpenCode DeepSeek-V4 experiments require "
+                "reasoning_effort=high"
+            )
+        return
+    if not model_l.startswith("minimax-m3"):
         return
     transport = (os.environ.get("OPENCODE_TRANSPORT") or "anthropic_sdk_v2").strip()
     if transport != "anthropic_sdk_v2":
@@ -524,7 +538,7 @@ def _attempt_hybrid_repair(errors, model=None, max_tokens=None, generate_fn=None
                            previous_envelope=None, editable_context=None,
                            edit_instruction=None, target_filenames=None,
                            readonly_filenames=None, prompt_classification=None,
-                           current_route=None):
+                           current_route=None, reasoning_effort=None):
     # Narrow compatibility for the frozen direct helper test, whose old shape
     # was (raw, errors, model, max_tokens, generate_fn, ...).  The discarded raw
     # value is intentionally never forwarded to the compact V8 repair prompt.
@@ -543,7 +557,9 @@ def _attempt_hybrid_repair(errors, model=None, max_tokens=None, generate_fn=None
     out = generate_fn([{"role": "user", "content": repair_prompt}], model=model,
                       max_tokens=max_tokens, return_metadata=True,
                       timeout=1800, max_retries=LLM_MAX_RETRIES,
-                      thinking_mode="adaptive", call_kind="hybridpatch_repair")
+                      thinking_mode="adaptive",
+                      reasoning_effort=reasoning_effort,
+                      call_kind="hybridpatch_repair")
     rraw = out["message"] if isinstance(out, dict) else str(out)
     return rraw, (out if isinstance(out, dict) else {}), len(repair_prompt)
 
@@ -585,7 +601,8 @@ def _merge_meta(m0, m1):
     for k in ("provider_request_id", "http_status", "finish_reason", "stop_reason",
               "base_url", "request_url", "transport", "transport_revision",
               "anthropic_sdk_version", "temperature", "max_tokens", "timeout",
-              "max_retries", "thinking_mode", "response_classification"):
+              "max_retries", "thinking_mode", "reasoning_effort",
+              "response_classification"):
         if merged.get(k) is None:
             merged[k] = m1.get(k)
     return merged
@@ -596,7 +613,7 @@ def _merge_meta(m0, m1):
 # ---------------------------------------------------------------------------
 def _edit_step(method, domain, sample_id, model, current_context, distractor,
                target_state, edit_instruction, max_tokens, generate_fn,
-               step_direction=None):
+               step_direction=None, reasoning_effort=None):
     """Returns (raw, gen_real, meta, exec_log, method_tag, input_real, v2_info)."""
     input_real = _editable(current_context, distractor)
     target_filenames = list(target_state["context"])
@@ -615,7 +632,9 @@ def _edit_step(method, domain, sample_id, model, current_context, distractor,
         out = generate_fn([{"role": "user", "content": prompt}], model=model,
                           max_tokens=max_tokens, return_metadata=True,
                           timeout=1800, max_retries=LLM_MAX_RETRIES,
-                          thinking_mode="adaptive", call_kind="hybridpatch_primary")
+                          thinking_mode="adaptive",
+                          reasoning_effort=reasoning_effort,
+                          call_kind="hybridpatch_primary")
         raw0 = out["message"] if isinstance(out, dict) else str(out)
         meta = out if isinstance(out, dict) else {}
         a0 = _run_attempt_hybrid(
@@ -652,7 +671,8 @@ def _edit_step(method, domain, sample_id, model, current_context, distractor,
                 edit_instruction=edit_instruction, target_filenames=target_filenames,
                 readonly_filenames=readonly_names,
                 prompt_classification=prompt_classification,
-                current_route=previous_action.get("route"))
+                current_route=previous_action.get("route"),
+                reasoning_effort=reasoning_effort)
             a1 = _run_attempt_hybrid(
                 rraw, input_real, target_filenames, readonly_names,
                 edit_instruction=edit_instruction,
@@ -761,7 +781,9 @@ def _edit_step(method, domain, sample_id, model, current_context, distractor,
         out = generate_fn([{"role": "user", "content": prompt}], model=model,
                           max_tokens=max_tokens, return_metadata=True,
                           timeout=1800, max_retries=LLM_MAX_RETRIES,
-                          thinking_mode="adaptive", call_kind="fullrewrite_primary")
+                          thinking_mode="adaptive",
+                          reasoning_effort=reasoning_effort,
+                          call_kind="fullrewrite_primary")
         raw = out["message"] if isinstance(out, dict) else str(out)
         gen_real, exec_log, method_tag = parse_context_string(raw), None, "full_rewrite"
         meta = out if isinstance(out, dict) else {}
@@ -842,6 +864,7 @@ def _row(method, sample_id, sample_type, model, rid_chain, state_chain, rt_num,
         "response_classification": meta.get("response_classification"),
         "response_classifications": meta.get("response_classifications"),
         "thinking_mode": meta.get("thinking_mode"),
+        "reasoning_effort": meta.get("reasoning_effort"),
         "call_kinds": meta.get("call_kinds"),
         "transport": meta.get("transport"),
         "transport_revision": meta.get("transport_revision"),
@@ -862,8 +885,9 @@ def _row(method, sample_id, sample_type, model, rid_chain, state_chain, rt_num,
 def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor=True,
               out_dir=RESULTS_DIR, model=MODEL_DEFAULT, max_tokens=None,
               generate_fn=None, printing=True, inline_report=False, fr_baseline=None,
-              stop_on_collapse=False, stop_on_preservation_violation=False):
-    _require_formal_opencode_transport(model)
+              stop_on_collapse=False, stop_on_preservation_violation=False,
+              reasoning_effort=None):
+    _require_formal_opencode_transport(model, reasoning_effort)
     if max_tokens is None and not str(model).lower().startswith("minimax-m3"):
         max_tokens = 20000
     random.seed(seed)
@@ -956,7 +980,8 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
             raw, gen_real, meta, elog, tag, in_real, v2i = _edit_step(
                 method, domain, sample_id, model, current_context, distractor,
                 fwd_state, fwd_instr, max_tokens, generate_fn,
-                step_direction="forward")
+                step_direction="forward",
+                reasoning_effort=reasoning_effort)
         except Exception as e:
             if api_recorder and not getattr(e, "_anchorpatch_api_recorded", False):
                 api_recorder.record_runner_exception(e)
@@ -1009,7 +1034,8 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
             raw, gen_real, meta, elog, tag, in_real, v2i = _edit_step(
                 method, domain, sample_id, model, current_context, distractor,
                 initial_state, bwd_instr, max_tokens, generate_fn,
-                step_direction="backward")
+                step_direction="backward",
+                reasoning_effort=reasoning_effort)
         except Exception as e:
             if api_recorder and not getattr(e, "_anchorpatch_api_recorded", False):
                 api_recorder.record_runner_exception(e)
@@ -1231,6 +1257,13 @@ def main():
     ap.add_argument("--skip_distractor", action="store_true")
     ap.add_argument("--out_dir", default=RESULTS_DIR)
     ap.add_argument("--model", default=MODEL_DEFAULT)
+    ap.add_argument(
+        "--reasoning_effort",
+        choices=("low", "medium", "high"),
+        default=None,
+        help="OpenAI-compatible reasoning effort; formal OpenCode DeepSeek-V4 "
+             "campaigns require high.",
+    )
     ap.add_argument("--max_tokens", type=int, default=None,
                     help="MiniMax default/ceiling is 131072; 0 selects that default. "
                          "Other models default to 20000.")
@@ -1262,7 +1295,7 @@ def main():
         args.max_tokens = None  # MiniMax model layer substitutes 131072.
     elif args.max_tokens is None and not str(args.model).lower().startswith("minimax-m3"):
         args.max_tokens = 20000
-    _require_formal_opencode_transport(args.model)
+    _require_formal_opencode_transport(args.model, args.reasoning_effort)
     _require_formal_dispatch_environment(args.out_dir, args.sample)
 
     fr_baseline = None
@@ -1274,6 +1307,7 @@ def main():
         samples=args.sample, methods=args.methods, num_round_trips=args.num_round_trips,
         seed=args.seed, model=args.model, distractor=not args.skip_distractor,
         max_tokens=args.max_tokens, notes=args.notes,
+        reasoning_effort=args.reasoning_effort,
         context_shuffle_seeded=True,
         context_shuffle_seed_version="global_random_seed_v1",
         stop_on_collapse=args.stop_on_collapse,
@@ -1298,6 +1332,7 @@ def main():
                     stop_on_preservation_violation=(
                         args.stop_on_preservation_violation
                     ),
+                    reasoning_effort=args.reasoning_effort,
                 )
         finish_status = "finished"
         if len(args.sample) == 1:

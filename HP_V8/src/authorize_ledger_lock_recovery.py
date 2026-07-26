@@ -337,7 +337,10 @@ def _reconcile_terminal_active_workers(
 def _extend_operator_interrupted_attempt_evidence(
         out_dir, prior_authorization, reconciled_workers):
     """Hash-bind open attempts for explicitly interrupted operator workers."""
-    if not reconciled_workers:
+    prior_interrupted = list(
+        (prior_authorization or {}).get(
+            "operator_pause_reconciled_workers") or [])
+    if not reconciled_workers and not prior_interrupted:
         return {
             "recovered_worker_launch_ids": list(
                 (prior_authorization or {}).get(
@@ -348,10 +351,7 @@ def _extend_operator_interrupted_attempt_evidence(
             "operator_interrupted_attempt_row_count": 0,
         }
     interrupted = {}
-    for item in list(
-            (prior_authorization or {}).get(
-                "operator_pause_reconciled_workers") or []) + list(
-                    reconciled_workers or []):
+    for item in prior_interrupted + list(reconciled_workers or []):
         if (isinstance(item, dict)
                 and item.get("status")
                 == "interrupted_before_audited_resume"):

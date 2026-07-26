@@ -1,6 +1,38 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode capacity15 RT2
+
+- experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2`;
+  plan: `docs/experiment_plans/exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2.md`.
+- scope: fixed 15-sample worst-context cross-type stress set, HybridPatch and FullRewrite,
+  distractor-on, seed42, RT2, one labeled Key, 15 worker slots.
+- runtime: OpenCode Zen `deepseek-v4-flash`, OpenAI-compatible non-stream,
+  `opencode_openai_compatible/1`, max tokens 20,000, audited `reasoning_effort=high`.
+- gate: all 15 workers and every committed step must finish with exact runtime identity,
+  no terminal provider/Key failure, no campaign-integrity error and preservation 0 before
+  any full campaign can start. This is capacity evidence, not a method-quality claim.
+- API status: no provider call made at registration time.
+
+## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode full234 RT2
+
+- experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_full234_rt2`;
+  plan: `docs/experiment_plans/exp_20260726_hybridv8_deepseekv4flash_opencode_full234_rt2.md`.
+- launch gate: capacity15 strict PASS, all four candidate labels probed, at least two physically
+  unique live Keys and a clean commit. The user explicitly waived unified zero-API preflight and
+  dispatcher dry-run after the independent review returned `GO WITH FIXES`.
+- scope: exact sorted 234-sample inventory (dispatcher canonical ID-list SHA-256
+  `a3e4f063f324e201082d7481a6bcd46615fb4d63579fbed3e7def90b1cfb7b6a`;
+  sample.json manifest SHA-256
+  `c4017f9d8062aa3dc96b6c2f28b0ed6f51727b783b973b89e7f32208e665443a`),
+  paired HybridPatch/FullRewrite, distractor-on, seed42, RT2.
+- queue: every live Key receives 15 slots and a stable FIFO under
+  `per_key_work_conserving_v1`; slots refill immediately after a worker exit audit, with no
+  batch/wave barrier.
+- exposure: not provider-unseen or method-unseen; the campaign is supporting compatibility
+  evidence. Missing samples remain null and cannot be renamed into a smaller “full” campaign.
+- API status: no provider call made at registration time.
+
 ## 2026-07-03 - Before No-API Validation: HybridPatch Track Switch
 
 - track: `hybridpatch vs fullrewrite`

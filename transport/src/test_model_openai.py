@@ -1798,6 +1798,103 @@ def _official_client_factory(outcomes, captures):
     return _FakeOpenAI
 
 
+class OpenCodeZenDeepSeekTests(unittest.TestCase):
+    def _generate(self, outcomes, captures, **kwargs):
+        env = {
+            "OPENAI_API_KEY": "unit-test-key",
+            "OPENAI_BASE_URL": "https://opencode.ai/zen/v1",
+        }
+        fake_cls = _official_client_factory(list(outcomes), captures)
+        events = []
+        with mock.patch.dict(os.environ, env, clear=False), \
+                mock.patch.object(model_openai, "OpenAI", fake_cls), \
+                mock.patch.object(model_openai.time, "sleep"):
+            wrapper = model_openai.OpenAI_Model()
+            result = wrapper.generate(
+                [{"role": "user", "content": "Hello"}],
+                model="deepseek-v4-flash",
+                max_tokens=20000,
+                reasoning_effort="high",
+                return_metadata=True,
+                _raw_event_sink=events.append,
+                **kwargs,
+            )
+        return result, events
+
+    def test_high_reasoning_is_sent_and_audited(self):
+        captures = []
+        result, events = self._generate(
+            [_official_payload(content="Hello", finish_reason="stop")],
+            captures,
+        )
+        constructor = captures[0]["_ctor"]
+        request = captures[1]
+        self.assertEqual(constructor["base_url"],
+                         "https://opencode.ai/zen/v1")
+        self.assertEqual(constructor["max_retries"], 0)
+        self.assertEqual(request["model"], "deepseek-v4-flash")
+        self.assertEqual(request["reasoning_effort"], "high")
+        self.assertEqual(request["max_completion_tokens"], 20000)
+        self.assertEqual(
+            result["_raw_request_body"]["reasoning_effort"], "high")
+        self.assertEqual(result["provider"], "opencode_zen")
+        self.assertEqual(result["transport"], "openai_sdk_nonstream")
+        self.assertEqual(
+            result["transport_revision"], "opencode_openai_compatible/1")
+        self.assertEqual(
+            result["request_url"],
+            "https://opencode.ai/zen/v1/chat/completions")
+        self.assertEqual(result["reasoning_effort"], "high")
+        self.assertEqual(result["http_attempts_used"], 1)
+        self.assertEqual(result["retry_count"], 0)
+        self.assertEqual(result["cost_currency"], "USD")
+        self.assertAlmostEqual(result["total_usd"], 0.00000252)
+        self.assertEqual(result["total_cny"], 0.0)
+        self.assertEqual(
+            [event["record_type"] for event in events],
+            ["attempt_start", "attempt_end"],
+        )
+
+    def test_retryable_failure_is_bounded_and_recorded(self):
+        captures = []
+        result, events = self._generate(
+            [
+                model_openai._HTTPStatusError(429, "busy"),
+                _official_payload(content="Hello", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["http_attempts_used"], 2)
+        self.assertEqual(result["retry_count"], 1)
+        self.assertEqual(result["rate_limit_wait_count"], 1)
+        self.assertEqual(
+            [item["status"] for item in result["transport_attempts"]],
+            ["retryable_error", "success"],
+        )
+        self.assertEqual(
+            [event["record_type"] for event in events],
+            ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
+        )
+
+    def test_runtime_config_and_reasoning_validation(self):
+        with mock.patch.dict(
+            os.environ,
+            {"OPENAI_BASE_URL": "https://opencode.ai/zen/v1"},
+            clear=False,
+        ):
+            config = model_openai.model_runtime_config(
+                "deepseek-v4-flash",
+                max_tokens=20000,
+                reasoning_effort="high",
+            )
+        self.assertEqual(config["provider"], "opencode_zen")
+        self.assertEqual(
+            config["transport_revision"], "opencode_openai_compatible/1")
+        self.assertEqual(config["reasoning_effort"], "high")
+        with self.assertRaises(ValueError):
+            model_openai._effective_reasoning_effort("ultra")
+
+
 class MinimaxOfficialTransportTests(unittest.TestCase):
     """MINIMAX_TRANSPORT=official_nonstream: baseline-aligned non-streaming path."""
 

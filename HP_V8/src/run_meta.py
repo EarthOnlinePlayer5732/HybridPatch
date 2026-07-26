@@ -494,7 +494,7 @@ def _sha256_text(text):
 _GENERATE_POSITIONAL_PARAMETERS = (
     "messages", "model", "timeout", "max_retries", "temperature", "is_json",
     "return_metadata", "max_tokens", "variables", "instance",
-    "thinking_mode", "call_kind", "_raw_event_sink",
+    "thinking_mode", "reasoning_effort", "call_kind", "_raw_event_sink",
     "max_response_retries", "max_transient_failures", "_retry_state",
     "_response_commit_sink",
 )
@@ -510,6 +510,7 @@ _GENERATE_PARAMETER_DEFAULTS = {
     "variables": {},
     "instance": None,
     "thinking_mode": "adaptive",
+    "reasoning_effort": None,
     "call_kind": "primary",
     "max_response_retries": 1,
     "max_transient_failures": 3,
@@ -543,6 +544,7 @@ def _semantic_request_fingerprint(args, kwargs, requested_model, call_kind):
         "variables": bound["variables"] or {},
         "instance": bound["instance"],
         "thinking_mode": bound["thinking_mode"],
+        "reasoning_effort": bound["reasoning_effort"],
         "max_response_retries": bound["max_response_retries"],
         "max_transient_failures": bound["max_transient_failures"],
     }
@@ -1702,19 +1704,19 @@ class ApiCallRecorder:
         request_fingerprint = _semantic_request_fingerprint(
             args, kwargs, requested_model, call_kind
         )
-        provider_runtime = {}
-        if str(requested_model).lower().startswith("minimax-m3"):
-            try:
-                from model_openai import minimax_runtime_config
-                provider_runtime = minimax_runtime_config(
-                    max_tokens=kwargs.get("max_tokens"),
-                    thinking_mode=kwargs.get("thinking_mode") or "adaptive",
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    "failed to resolve the frozen MiniMax transport runtime "
-                    "before provider POST"
-                ) from exc
+        try:
+            from model_openai import model_runtime_config
+            provider_runtime = model_runtime_config(
+                requested_model,
+                max_tokens=kwargs.get("max_tokens"),
+                thinking_mode=kwargs.get("thinking_mode") or "adaptive",
+                reasoning_effort=kwargs.get("reasoning_effort"),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to resolve provider transport runtime before provider "
+                "POST"
+            ) from exc
         transport_path = None
         transport_fh = None
         semantic_lock_fh = None
@@ -1726,6 +1728,7 @@ class ApiCallRecorder:
             value for value in (
                 os.environ.get("OPENCODE_API_KEY"),
                 os.environ.get("OPENCODE_GO_API_KEY"),
+                os.environ.get("OPENAI_API_KEY"),
             ) if value
         ]
 
@@ -2163,6 +2166,19 @@ class ApiCallRecorder:
         else:
             replay = None
             retry_state = {}
+            prior_sink = kwargs.get("_raw_event_sink")
+
+            def _openai_compatible_sink(payload):
+                nonlocal provider_post_started
+                if prior_sink is not None:
+                    prior_sink(payload)
+                if payload.get("record_type") == "attempt_start":
+                    enforce_campaign_runtime_guards(
+                        self.out_dir, self.sample_id)
+                    provider_post_started = True
+
+            _openai_compatible_sink._anchorpatch_critical = True
+            kwargs["_raw_event_sink"] = _openai_compatible_sink
 
         def _close_transport():
             if transport_fh is not None and not transport_fh.closed:
@@ -2263,6 +2279,8 @@ class ApiCallRecorder:
                 "anthropic_sdk_version": provider_runtime.get("anthropic_sdk_version"),
                 "max_tokens": provider_runtime.get("effective_max_tokens"),
                 "thinking_mode": provider_runtime.get("thinking_mode"),
+                "reasoning_effort": provider_runtime.get(
+                    "reasoning_effort"),
                 "provider_called": provider_post_started,
                 "response_replayed": False,
                 "replayed_from_call_id": None,
@@ -2401,6 +2419,7 @@ class ApiCallRecorder:
             "temperature": meta.get("temperature"),
             "max_tokens": meta.get("max_tokens"),
             "thinking_mode": meta.get("thinking_mode"),
+            "reasoning_effort": meta.get("reasoning_effort"),
             "content_block_counts": meta.get("content_block_counts") or {},
             "content_block_count": meta.get("content_block_count") or 0,
             "timeout": meta.get("timeout"),
@@ -3521,7 +3540,8 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                         context_shuffle_seeded=False,
                         context_shuffle_seed_version=None,
                         stop_on_collapse=False,
-                        stop_on_preservation_violation=False):
+                        stop_on_preservation_violation=False,
+                        reasoning_effort=None):
     """Register one invocation in a locked V8 campaign metadata ledger.
 
     The first invocation establishes the campaign Git identity and timezone-aware
@@ -3604,12 +3624,13 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
         raise RuntimeError(
             "runner Git identity differs from dispatch manifest"
         )
-    provider_runtime = {}
-    if str(model).lower().startswith("minimax-m3"):
-        from model_openai import minimax_runtime_config
-        provider_runtime = minimax_runtime_config(
-            max_tokens=max_tokens, thinking_mode="adaptive"
-        )
+    from model_openai import model_runtime_config
+    provider_runtime = model_runtime_config(
+        model,
+        max_tokens=max_tokens,
+        thinking_mode="adaptive",
+        reasoning_effort=reasoning_effort,
+    )
     invocation_now = _aware_now()
     invocation_id = uuid.uuid4().hex
     resume_semantic_call_id = os.environ.get(
@@ -3761,7 +3782,7 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                     "the current invocation; use a new --out_dir"
                 )
 
-        if provider_runtime and prior:
+        if provider_runtime.get("transport_revision") is not None and prior:
             current_revision = provider_runtime["transport_revision"]
             previous_revision = _one_prior_value(prior, "transport_revision")
             if previous_revision != current_revision:
@@ -3787,6 +3808,7 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             "model": model,
             "distractor": bool(distractor),
             "max_tokens": max_tokens,
+            "reasoning_effort": reasoning_effort,
             "context_shuffle_seeded": bool(context_shuffle_seeded),
             "context_shuffle_seed_version": (
                 context_shuffle_seed_version if context_shuffle_seeded else None
@@ -3840,6 +3862,7 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             "samples": list(samples), "methods": list(methods),
             "num_round_trips": num_round_trips, "seed": seed, "model": model,
             "distractor": bool(distractor), "max_tokens": max_tokens,
+            "reasoning_effort": reasoning_effort,
             "code_fingerprint": fp, "notes": notes,
             "campaign_config": campaign_config,
             "task_plans": _one_prior_value(prior, "task_plans") or {},

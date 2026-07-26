@@ -681,3 +681,24 @@ fail closed。该路径用于保留已提交 RT，并只重试首个未提交 FR
 attempt_end（或唯一 pre-provider semantic_request）、不存在 `response_committed` 和 response
 journal，并冻结每一行 canonical SHA-256。对应 worker ID 扩展进 recovered scope，使 strict
 inspector 能忽略未提交的旧开放流，同时新语义调用仍使用独立 transport budget。
+
+## 2026-07-26 DeepSeek V4 Flash OpenCode RT2 campaign 准备
+
+本轮只新增 provider/transport 兼容与实验编排，不改变 `hybridpatch/8`、prompt、executor、
+validation gate、partial acceptance、preservation、FullRewrite、domain evaluator 或 scoring。
+
+新增 `opencode_openai_compatible/1`：OpenCode Zen
+`https://opencode.ai/zen/v1/chat/completions`、`deepseek-v4-flash`、OpenAI SDK non-stream、
+max tokens 20,000。SDK 自动 retry 关闭；wrapper 最多 3 次可见 HTTP attempt。正式 runner
+强制 `OPENAI_BASE_URL` 精确匹配且 `reasoning_effort=high`，并在 raw request、API ledger、
+run metadata 和 result row 中交叉审计。
+
+`deepseek_capacity15` 固定 15 个 worst-context 跨类型 sample、单 Key、15 worker、RT2。
+`deepseek_full234` 固定当前精确 234 inventory、RT2，要求至少两个探针成功的物理唯一 Key；
+每 Key 15 worker，稳定 FIFO 即时补位，不设跨 Key batch/wave barrier。DeepSeek non-stream
+使用专用 strict inspector，不伪造 MiniMax stream attempt ledger/journal，但保留 Git/task-plan、
+worker authorization、API/result/checkpoint linkage、reasoning 和 preservation 完整性门。
+
+首次付费 POST 前仍需两份预注册计划的独立只读审阅、clean commit、unified zero-API
+preflight 和单 Key probe；全量另以 capacity15 完整 PASS、全部候选 Key probe 且至少两个
+存活为启动门。

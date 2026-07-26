@@ -60,6 +60,11 @@ from utils_relay_plan import (
 
 SCHEMA = "anchorpatch.paired_campaign_manifest/1"
 TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
+DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/1"
+DEEPSEEK_MODEL = "deepseek-v4-flash"
+DEEPSEEK_BASE_URL = "https://opencode.ai/zen/v1"
+DEEPSEEK_REASONING_EFFORT = "high"
+DEEPSEEK_MAX_TOKENS = 20000
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
@@ -93,6 +98,16 @@ CONFIRMATION_GRID_STEPS = 2720
 FULL234_SAMPLE_COUNT = 234
 FULL234_KEY_COUNT = 13
 FULL234_SLOTS_PER_KEY = 4
+DEEPSEEK_SLOTS_PER_KEY = 15
+DEEPSEEK_CAPACITY_KEY_COUNT = 1
+DEEPSEEK_CAPACITY_SAMPLES = [
+    "earncall1", "latex6", "screenplay4", "dbschema1", "circuit4",
+    "json4", "vector2", "fonteng1", "treebank1", "genealogy6",
+    "jobboard6", "python2", "obj3d4", "mathlean3", "molecule2",
+]
+DEEPSEEK_CAMPAIGN_ROLES = {
+    "deepseek_capacity15", "deepseek_full234",
+}
 REMAINING134_SAMPLE_COUNT = 134
 REMAINING134_EXCLUDED_SAMPLE_COUNT = 100
 REMAINING134_KEY_COUNT = 14
@@ -125,6 +140,31 @@ MIXED_CONFIRMATION_EXPERIMENT_ID = (
 MIXED_CONFIRMATION_CANDIDATE_COUNT = 190
 MIXED_CONFIRMATION_SAMPLE_COUNT = 100
 MIXED_CONFIRMATION_RESERVE_COUNT = 90
+
+
+def _campaign_runtime_config(args):
+    if args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
+        return {
+            "model": DEEPSEEK_MODEL,
+            "max_tokens": DEEPSEEK_MAX_TOKENS,
+            "provider": "opencode_zen",
+            "transport": "openai_sdk_nonstream",
+            "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+            "transport_resume_policy": None,
+            "openai_base_url": DEEPSEEK_BASE_URL,
+            "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
+        }
+    return {
+        "model": "minimax-m3",
+        "max_tokens": 131072,
+        "provider": "opencode_go",
+        "transport": "anthropic_sdk_v2",
+        "transport_revision": TRANSPORT_REVISION,
+        "transport_resume_policy": TRANSPORT_RESUME_POLICY,
+        "opencode_transport": "anthropic_sdk_v2",
+        "minimax_transport": "opencode",
+        "reasoning_effort": None,
+    }
 CONFIRMATION_ANALYSIS_POLICY = {
     "schema": "anchorpatch.confirmation_analysis_policy/1",
     "sensitivity_sets": [["python4"], ["audiosyn1"],
@@ -635,20 +675,45 @@ def _validate_campaign_grid(args):
             raise RuntimeError(
                 "confirmation requires --slots_per_key 4"
             )
-    elif args.campaign_role == "full234":
+    elif args.campaign_role == "deepseek_capacity15":
+        if (list(args.samples) != DEEPSEEK_CAPACITY_SAMPLES
+                or args.num_round_trips != 2):
+            raise RuntimeError(
+                "deepseek_capacity15 requires the fixed 15-sample RT2 grid"
+            )
+        if getattr(args, "smoke_dir", None):
+            raise RuntimeError(
+                "deepseek_capacity15 cannot declare --smoke_dir")
+        if (getattr(args, "slots_per_key", None)
+                != DEEPSEEK_SLOTS_PER_KEY):
+            raise RuntimeError(
+                "deepseek_capacity15 requires --slots_per_key 15")
+    elif args.campaign_role in {"full234", "deepseek_full234"}:
         scope = _argument_value(args, "_full234_scope_record", {}) or {}
+        expected_rt = (
+            2 if args.campaign_role == "deepseek_full234" else 10
+        )
+        expected_slots = (
+            DEEPSEEK_SLOTS_PER_KEY
+            if args.campaign_role == "deepseek_full234"
+            else FULL234_SLOTS_PER_KEY
+        )
         if (scope.get("schema") != "anchorpatch.full234_scope/1"
                 or list(args.samples) != list(scope.get("sample_ids") or [])
                 or len(args.samples) != FULL234_SAMPLE_COUNT
-                or args.num_round_trips != 10):
+                or args.num_round_trips != expected_rt):
             raise RuntimeError(
-                "full234 requires the exact 234-sample inventory at 10 RT"
+                f"{args.campaign_role} requires the exact 234-sample "
+                f"inventory at {expected_rt} RT"
             )
         if getattr(args, "smoke_dir", None):
-            raise RuntimeError("full234 cannot declare --smoke_dir")
+            raise RuntimeError(
+                f"{args.campaign_role} cannot declare --smoke_dir")
         if (getattr(args, "slots_per_key", None)
-                != FULL234_SLOTS_PER_KEY):
-            raise RuntimeError("full234 requires --slots_per_key 4")
+                != expected_slots):
+            raise RuntimeError(
+                f"{args.campaign_role} requires --slots_per_key "
+                f"{expected_slots}")
     elif args.campaign_role == "remaining134":
         scope = _argument_value(args, "_remaining134_scope_record", {}) or {}
         if (scope.get("schema") != "anchorpatch.remaining134_scope/1"
@@ -711,7 +776,8 @@ def _load_full234_scope():
 
 
 def _resolve_full234_scope(args):
-    if _argument_value(args, "campaign_role") != "full234":
+    if _argument_value(args, "campaign_role") not in {
+            "full234", "deepseek_full234"}:
         return None
     cached = _argument_value(args, "_full234_scope_record")
     if cached is None:
@@ -3117,38 +3183,54 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
     commit, tree_state = _git_identity()
     if tree_state != "clean":
         raise RuntimeError("formal campaign requires a clean Git worktree")
+    runtime = _campaign_runtime_config(args)
+    config = {
+        "campaign_role": args.campaign_role,
+        "samples": list(samples),
+        "method_set": ["fullrewrite", "hybridpatch"],
+        "num_round_trips": args.num_round_trips,
+        "seed": args.seed,
+        "model": runtime["model"],
+        "max_tokens": runtime["max_tokens"],
+        "distractor": True,
+        "provider": runtime["provider"],
+        "transport": runtime["transport"],
+        "transport_revision": runtime["transport_revision"],
+        "transport_resume_policy": runtime["transport_resume_policy"],
+        "reasoning_effort": runtime["reasoning_effort"],
+        "stop_on_preservation_violation": True,
+    }
+    for optional in (
+            "openai_base_url", "opencode_transport", "minimax_transport"):
+        if optional in runtime:
+            config[optional] = runtime[optional]
     manifest = {
         "schema": SCHEMA,
         "experiment_id": os.path.basename(os.path.abspath(out_dir)),
         "run_git_commit": commit,
         "git_tree_state": tree_state,
         "code_fingerprint": code_fingerprint(),
-        "config": {
-            "campaign_role": args.campaign_role,
-            "samples": list(samples),
-            "method_set": ["fullrewrite", "hybridpatch"],
-            "num_round_trips": args.num_round_trips,
-            "seed": args.seed,
-            "model": "minimax-m3",
-            "max_tokens": 131072,
-            "distractor": True,
-            "opencode_transport": "anthropic_sdk_v2",
-            "minimax_transport": "opencode",
-            "transport_revision": TRANSPORT_REVISION,
-            "transport_resume_policy": TRANSPORT_RESUME_POLICY,
-            "stop_on_preservation_violation": True,
-        },
+        "config": config,
         "assignments": assignments,
         "task_plans": task_plans,
         "upstream_smoke_gate": upstream_smoke_gate,
     }
-    if args.campaign_role in {"confirmation", "full234", "remaining134"}:
+    queued_roles = {
+        "confirmation", "full234", "remaining134",
+        "deepseek_capacity15", "deepseek_full234",
+    }
+    if args.campaign_role in queued_roles:
         if args.campaign_role == "confirmation":
             slots_per_key = CONFIRMATION_SLOTS_PER_KEY
             key_count = CONFIRMATION_KEY_COUNT
         elif args.campaign_role == "full234":
             slots_per_key = FULL234_SLOTS_PER_KEY
             key_count = FULL234_KEY_COUNT
+        elif args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
+            slots_per_key = DEEPSEEK_SLOTS_PER_KEY
+            key_count = len({
+                item["key_label"] for item in assignments
+            })
         else:
             slots_per_key = REMAINING134_SLOTS_PER_KEY
             key_count = REMAINING134_KEY_COUNT
@@ -3176,7 +3258,7 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
             else CONFIRMATION_ANALYSIS_POLICY
         )
         manifest["analysis_policy"] = copy.deepcopy(analysis_policy)
-    elif args.campaign_role == "full234":
+    elif args.campaign_role in {"full234", "deepseek_full234"}:
         manifest["full234_scope"] = dict(
             _argument_value(args, "_full234_scope_record") or {})
     elif args.campaign_role == "remaining134":
@@ -3259,10 +3341,387 @@ def write_or_verify_manifest(out_dir, manifest, *, resume=False):
     return path, manifest
 
 
+def _inspect_deepseek_campaign(
+        out_dir, manifest, *, require_complete=False,
+        active_samples=None, required_complete_samples=None):
+    """Audit the OpenCode Zen DeepSeek prefix without MiniMax stream ledgers.
+
+    The OpenAI-compatible transport is non-streaming and owns bounded retries
+    inside one semantic call, so the MiniMax attempt-ledger/journal invariants
+    do not apply.  This inspector keeps the shared campaign, worker, result,
+    checkpoint, and preservation invariants, and additionally verifies the
+    exact provider route plus the serialized ``reasoning_effort=high`` request.
+    """
+    config = manifest.get("config") or {}
+    expected_samples = set(config.get("samples") or [])
+    expected_methods = set(config.get("method_set") or [])
+    target_rt = config.get("num_round_trips")
+    active_samples = set(active_samples or [])
+    completion_samples = (
+        expected_samples if require_complete
+        else set(required_complete_samples or [])
+    )
+    errors = []
+    preservation = 0
+    preservation_not_applicable = 0
+
+    expected_runtime = {
+        "model": DEEPSEEK_MODEL,
+        "provider": "opencode_zen",
+        "transport": "openai_sdk_nonstream",
+        "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+        "transport_resume_policy": None,
+        "openai_base_url": DEEPSEEK_BASE_URL,
+        "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
+        "max_tokens": DEEPSEEK_MAX_TOKENS,
+    }
+    for key, expected in expected_runtime.items():
+        if config.get(key) != expected:
+            errors.append(f"DeepSeek manifest {key} mismatch")
+    if (expected_methods != {"fullrewrite", "hybridpatch"}
+            or not _is_exact_int(target_rt) or target_rt != 2):
+        errors.append("DeepSeek campaign grid is invalid")
+
+    try:
+        active_payload = _read_json(_active_worker_set_path(out_dir))
+        if (active_payload.get("schema")
+                != "anchorpatch.active_worker_set/1"
+                or not isinstance(active_payload.get("workers"), dict)):
+            raise RuntimeError("active worker set schema is invalid")
+    except (OSError, ValueError, RuntimeError):
+        if active_samples:
+            errors.append("active worker set is missing or invalid")
+
+    try:
+        stop_records = read_campaign_stop_conditions(out_dir)
+    except RuntimeError as exc:
+        stop_records = []
+        errors.append(str(exc))
+    for record in stop_records:
+        condition = record.get("condition")
+        if (record.get("schema")
+                != "anchorpatch.campaign_stop_condition/1"
+                or not isinstance(condition, str) or not condition):
+            errors.append("invalid campaign stop latch")
+        else:
+            errors.append(f"campaign stop latch={condition}")
+
+    commit, tree_state = _git_identity()
+    if commit != manifest.get("run_git_commit") or tree_state != "clean":
+        errors.append("Git commit/tree state changed during campaign")
+    for sample, plan in (manifest.get("task_plans") or {}).items():
+        plan_path = os.path.join(out_dir, plan.get("path") or "")
+        if not os.path.isfile(plan_path):
+            errors.append(f"task plan missing: {sample}")
+        elif _sha256(plan_path) != plan.get("sha256"):
+            errors.append(f"task-plan hash drift: {sample}")
+
+    dispatch_rows = _read_jsonl(os.path.join(out_dir, "dispatch_log.jsonl"))
+    launches = {}
+    authorizations = {}
+    exits = {}
+    for row in dispatch_rows:
+        event = row.get("event")
+        if event not in {"launch", "worker_authorized", "worker_exit"}:
+            continue
+        worker_id = row.get("worker_launch_id")
+        target = {
+            "launch": launches,
+            "worker_authorized": authorizations,
+            "worker_exit": exits,
+        }[event]
+        if not isinstance(worker_id, str) or not worker_id:
+            errors.append(f"{event} missing worker_launch_id")
+        elif worker_id in target:
+            errors.append(f"duplicate {event} record: {worker_id}")
+        else:
+            target[worker_id] = row
+
+    metadata = read_run_metadata_snapshot(out_dir)
+    metadata_by_worker = {}
+    latest_by_sample = {}
+    for record in metadata:
+        worker_id = record.get("worker_launch_id")
+        if isinstance(worker_id, str) and worker_id:
+            metadata_by_worker.setdefault(worker_id, []).append(record)
+        for sample in record.get("samples") or []:
+            if sample in expected_samples:
+                latest_by_sample[sample] = record
+        if record.get("model") != DEEPSEEK_MODEL:
+            errors.append("run_metadata model mismatch")
+        for key, expected in {
+                "provider": "opencode_zen",
+                "transport": "openai_sdk_nonstream",
+                "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+                "transport_resume_policy": None,
+                "base_url": DEEPSEEK_BASE_URL,
+                "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
+                "max_tokens": DEEPSEEK_MAX_TOKENS,
+        }.items():
+            if record.get(key) != expected:
+                errors.append(f"run_metadata {key} mismatch")
+        campaign_config = record.get("campaign_config") or {}
+        if (campaign_config.get("reasoning_effort")
+                != DEEPSEEK_REASONING_EFFORT):
+            errors.append("run_metadata campaign reasoning effort mismatch")
+        if record.get("status") == "failed":
+            errors.append(
+                f"latest run_metadata invocation failed: "
+                f"{(record.get('samples') or ['unknown'])[0]}")
+
+    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    api_by_id = {}
+    calls_by_step = {}
+    api_rows_by_worker = {}
+    for index, row in enumerate(api_rows, 1):
+        sample = row.get("sample")
+        method = row.get("method")
+        rt = row.get("rt_index")
+        direction = row.get("direction")
+        call_kind = row.get("call_kind")
+        step = (sample, method, rt, direction)
+        allowed_kinds = (
+            {"hybridpatch_primary", "hybridpatch_repair"}
+            if method == "hybridpatch" else {"fullrewrite_primary"}
+        )
+        if (sample not in expected_samples or method not in expected_methods
+                or not _is_exact_int(rt) or not 1 <= rt <= target_rt
+                or direction not in {"forward", "backward"}
+                or call_kind not in allowed_kinds):
+            errors.append(f"unmappable API ledger row {index}")
+            continue
+        request_id = row.get("request_id")
+        if (not isinstance(request_id, str) or not request_id
+                or request_id in api_by_id):
+            errors.append(f"duplicate/invalid API request id at row {index}")
+        else:
+            api_by_id[request_id] = row
+        calls_by_step.setdefault(step, []).append(row)
+        worker_id = row.get("worker_launch_id")
+        api_rows_by_worker.setdefault(worker_id, []).append(row)
+        for key, expected in {
+                "schema": API_CALL_SCHEMA,
+                "model": DEEPSEEK_MODEL,
+                "base_url": DEEPSEEK_BASE_URL,
+                "request_url": (
+                    f"{DEEPSEEK_BASE_URL}/chat/completions"
+                ),
+                "transport": "openai_sdk_nonstream",
+                "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+                "transport_resume_policy": None,
+                "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
+                "max_tokens": DEEPSEEK_MAX_TOKENS,
+                "provider_called": True,
+                "response_replayed": False,
+        }.items():
+            if row.get(key) != expected:
+                errors.append(f"DeepSeek API {key} mismatch at row {index}")
+        if row.get("generation_index") != 0:
+            errors.append(f"DeepSeek API generation mismatch at row {index}")
+        if (row.get("classification") is not None
+                or row.get("stream_complete") is not True
+                or row.get("input_tokens") is None
+                or row.get("output_tokens") is None):
+            errors.append(f"DeepSeek API response incomplete at row {index}")
+        attempts = row.get("transport_attempts")
+        if (not isinstance(attempts, list) or not attempts
+                or len(attempts) > 3
+                or row.get("http_attempts_used") != len(attempts)):
+            errors.append(f"DeepSeek retry evidence invalid at row {index}")
+        request_path = row.get("raw_request_saved_path")
+        try:
+            request_payload = (
+                _read_json(request_path)
+                if isinstance(request_path, str) and request_path else {}
+            )
+        except (OSError, ValueError):
+            request_payload = {}
+        request_body = request_payload.get("request_body")
+        if (not isinstance(request_body, dict)
+                or request_body.get("model") != DEEPSEEK_MODEL
+                or request_body.get("reasoning_effort")
+                != DEEPSEEK_REASONING_EFFORT
+                or request_body.get("max_completion_tokens")
+                != DEEPSEEK_MAX_TOKENS):
+            errors.append(
+                f"DeepSeek raw request reasoning audit failed at row {index}")
+
+        launch = launches.get(worker_id)
+        authorization = authorizations.get(worker_id)
+        worker_metadata = metadata_by_worker.get(worker_id) or []
+        worker_pid = row.get("worker_pid")
+        if (not isinstance(launch, dict)
+                or launch.get("sample") != sample
+                or launch.get("pid") != worker_pid
+                or not isinstance(authorization, dict)
+                or authorization.get("sample") != sample
+                or authorization.get("worker_pid") != worker_pid
+                or len(worker_metadata) != 1
+                or worker_metadata[0].get("worker_pid") != worker_pid
+                or worker_metadata[0].get("samples") != [sample]):
+            errors.append(f"API worker provenance mismatch at row {index}")
+
+    committed_rows = {}
+    for sample in config.get("samples") or []:
+        for method in config.get("method_set") or []:
+            rows = _read_jsonl(
+                os.path.join(out_dir, method, f"{sample}.jsonl"))
+            committed_rows[(sample, method)] = rows
+            seen = set()
+            for row in rows:
+                key = (
+                    row.get("round_trip_num"),
+                    row.get("round_trip_direction"),
+                )
+                if (row.get("sample_id") != sample
+                        or row.get("method") != method
+                        or key in seen
+                        or not _is_exact_int(key[0])
+                        or not 1 <= key[0] <= target_rt
+                        or key[1] not in {"forward", "backward"}):
+                    errors.append(
+                        f"invalid committed row: {method}/{sample}/{key}")
+                    continue
+                seen.add(key)
+                step = (sample, method, key[0], key[1])
+                expected_primary = (
+                    "hybridpatch_primary"
+                    if method == "hybridpatch" else "fullrewrite_primary"
+                )
+                step_calls = calls_by_step.get(step) or []
+                if sum(
+                        item.get("call_kind") == expected_primary
+                        for item in step_calls) != 1:
+                    errors.append(
+                        f"committed row primary call mismatch: "
+                        f"{method}/{sample}/{key}")
+                row_call_ids = row.get("api_call_ids") or []
+                if (not row_call_ids
+                        or any(call_id not in api_by_id
+                               for call_id in row_call_ids)):
+                    errors.append(
+                        f"committed row API linkage mismatch: "
+                        f"{method}/{sample}/{key}")
+                if (row.get("model_name") != DEEPSEEK_MODEL
+                        or row.get("reasoning_effort")
+                        != DEEPSEEK_REASONING_EFFORT):
+                    errors.append(
+                        f"committed row runtime mismatch: "
+                        f"{method}/{sample}/{key}")
+                if method == "hybridpatch":
+                    bdpatch = row.get("bdpatch")
+                    count = (
+                        bdpatch.get("preservation_violations")
+                        if isinstance(bdpatch, dict) else None
+                    )
+                    exec_log = (
+                        bdpatch.get("exec_log")
+                        if isinstance(bdpatch, dict) else None
+                    )
+                    nested_count = (
+                        exec_log.get("preservation_violations")
+                        if isinstance(exec_log, dict) else None
+                    )
+                    telemetry = (
+                        bdpatch.get("hybrid")
+                        if isinstance(bdpatch, dict) else None
+                    )
+                    explicit_na = (
+                        isinstance(bdpatch, dict)
+                        and "preservation_violations" in bdpatch
+                        and count is None and exec_log is None
+                        and bdpatch.get("actual_method")
+                        == "hybridpatch_protocol_failure_kept_context"
+                        and isinstance(telemetry, dict)
+                        and telemetry.get("failed_step_kept_context") is True
+                        and telemetry.get("effective_modification") is False
+                    )
+                    if explicit_na:
+                        preservation_not_applicable += 1
+                    elif (not _is_exact_int(count) or count < 0
+                          or not isinstance(exec_log, dict)
+                          or nested_count != count):
+                        errors.append(
+                            f"invalid preservation telemetry: "
+                            f"{method}/{sample}/{key}")
+                    else:
+                        preservation += count
+            checkpoint_path = os.path.join(
+                out_dir, method, f"{sample}.ckpt.json")
+            checkpoint = (
+                _read_json(checkpoint_path)
+                if os.path.isfile(checkpoint_path) else None
+            )
+            if rows and not isinstance(checkpoint, dict):
+                errors.append(f"missing checkpoint: {method}/{sample}")
+            if sample in completion_samples:
+                completed = (
+                    checkpoint.get("completed_round_trips")
+                    if isinstance(checkpoint, dict) else None
+                )
+                if completed != target_rt or len(rows) != 2 * target_rt:
+                    errors.append(
+                        f"incomplete task: {method}/{sample} "
+                        f"checkpoint={completed}/{target_rt} "
+                        f"rows={len(rows)}/{2 * target_rt}")
+
+    if preservation:
+        errors.append(f"preservation_violations={preservation}")
+    if completion_samples:
+        missing_metadata = completion_samples - set(latest_by_sample)
+        if missing_metadata:
+            errors.append(
+                f"samples missing run_metadata: {sorted(missing_metadata)}")
+        if any(
+                latest_by_sample.get(sample, {}).get("status") != "finished"
+                for sample in completion_samples):
+            errors.append(
+                "not all required latest run_metadata invocations are finished")
+    if require_complete:
+        if any(record.get("finished_at") is None for record in metadata):
+            errors.append("campaign finished_at is incomplete")
+        for worker_id, launch in launches.items():
+            exit_row = exits.get(worker_id)
+            worker_metadata = metadata_by_worker.get(worker_id) or []
+            terminal = worker_metadata[-1] if worker_metadata else {}
+            if (not isinstance(exit_row, dict)
+                    or exit_row.get("sample") != launch.get("sample")
+                    or exit_row.get("pid") != launch.get("pid")
+                    or exit_row.get("returncode") != 0
+                    or exit_row.get("disposition") != "finished"
+                    or terminal.get("status") != "finished"):
+                errors.append(
+                    f"worker exit provenance incomplete: {worker_id}")
+
+    return {
+        "errors": sorted(set(errors)),
+        "preservation_violations": preservation,
+        "latched_preservation_violations": 0,
+        "preservation_not_applicable": preservation_not_applicable,
+        "stop_conditions": stop_records,
+        "api_calls": len(api_rows),
+        "semantic_calls": len({
+            row.get("semantic_call_id") for row in api_rows
+        }),
+        "provider_call_rows": sum(
+            row.get("provider_called") is True for row in api_rows),
+        "local_infrastructure_incident_rows": 0,
+    }
+
+
 def inspect_campaign(out_dir, manifest, *, require_complete=False,
                      active_samples=None, required_complete_samples=None,
                      method_phase=None):
     config = manifest["config"]
+    if config.get("campaign_role") in DEEPSEEK_CAMPAIGN_ROLES:
+        if method_phase is not None:
+            raise RuntimeError(
+                "DeepSeek campaigns do not support phased inspection")
+        return _inspect_deepseek_campaign(
+            out_dir, manifest, require_complete=require_complete,
+            active_samples=active_samples,
+            required_complete_samples=required_complete_samples,
+        )
     declared_phases = config.get("method_phases")
     if method_phase is None and declared_phases is not None:
         if declared_phases != list(REMAINING134_METHOD_PHASES):
@@ -4805,6 +5264,7 @@ def _launch_worker_batch(
         if recovery_authorization
         else inspection_manifest["run_git_commit"]
     )
+    runtime = _campaign_runtime_config(args)
     launch_specs = {}
     for item in assignments:
         sample = item["sample"]
@@ -4833,39 +5293,48 @@ def _launch_worker_batch(
             "--methods", *item["methods"],
             "--num_round_trips", str(args.num_round_trips),
             "--seed", str(args.seed),
-            "--model", "minimax-m3",
-            "--max_tokens", "131072",
+            "--model", runtime["model"],
+            "--max_tokens", str(runtime["max_tokens"]),
             "--out_dir", out_dir,
             "--stop_on_preservation_violation",
             "--notes", f"{args.notes}, key={label}",
         ]
-        environment = dict(
-            os.environ,
-            OPENCODE_API_KEY=keys[label],
-            OPENCODE_TRANSPORT="anthropic_sdk_v2",
-            MINIMAX_TRANSPORT="opencode",
-            MINIMAX_HARD_TIMEOUT="7200",
-            PYTHONUTF8="1",
-            ANCHORPATCH_WORKER_LAUNCH_ID=worker_id,
-            ANCHORPATCH_WORKER_LOCK_PATH=_worker_lease_path(
-                out_dir, sample
-            ),
-            ANCHORPATCH_WORKER_READY_PATH=os.path.abspath(ready_path),
-            ANCHORPATCH_WORKER_ACK_PATH=os.path.abspath(ack_path),
-            ANCHORPATCH_ACTIVE_WORKER_SET_PATH=os.path.abspath(
-                _active_worker_set_path(out_dir)
-            ),
-            ANCHORPATCH_START_BARRIER_TIMEOUT=str(args.start_timeout),
-            ANCHORPATCH_WORKER_CONSOLE_LOG=item["console_log"],
-            ANCHORPATCH_EXPECTED_GIT_COMMIT=runtime_git_commit,
-            ANCHORPATCH_EXPECTED_GIT_TREE_STATE="clean",
-            ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256=(
-                task_plans[sample]["sha256"]
-            ),
-            ANCHORPATCH_EXPECTED_TASK_PLAN_PATH=os.path.abspath(
-                os.path.join(out_dir, task_plans[sample]["path"])
-            ),
-        )
+        if runtime.get("reasoning_effort"):
+            command.extend([
+                "--reasoning_effort", runtime["reasoning_effort"],
+            ])
+        environment = dict(os.environ)
+        environment.update({
+            "PYTHONUTF8": "1",
+            "ANCHORPATCH_WORKER_LAUNCH_ID": worker_id,
+            "ANCHORPATCH_WORKER_LOCK_PATH": _worker_lease_path(
+                out_dir, sample),
+            "ANCHORPATCH_WORKER_READY_PATH": os.path.abspath(ready_path),
+            "ANCHORPATCH_WORKER_ACK_PATH": os.path.abspath(ack_path),
+            "ANCHORPATCH_ACTIVE_WORKER_SET_PATH": os.path.abspath(
+                _active_worker_set_path(out_dir)),
+            "ANCHORPATCH_START_BARRIER_TIMEOUT": str(args.start_timeout),
+            "ANCHORPATCH_WORKER_CONSOLE_LOG": item["console_log"],
+            "ANCHORPATCH_EXPECTED_GIT_COMMIT": runtime_git_commit,
+            "ANCHORPATCH_EXPECTED_GIT_TREE_STATE": "clean",
+            "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256": (
+                task_plans[sample]["sha256"]),
+            "ANCHORPATCH_EXPECTED_TASK_PLAN_PATH": os.path.abspath(
+                os.path.join(out_dir, task_plans[sample]["path"])),
+        })
+        if args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
+            for name in (
+                    "OPENCODE_API_KEY", "OPENCODE_GO_API_KEY",
+                    "OPENCODE_TRANSPORT", "MINIMAX_TRANSPORT",
+                    "MINIMAX_API_KEY"):
+                environment.pop(name, None)
+            environment["OPENAI_API_KEY"] = keys[label]
+            environment["OPENAI_BASE_URL"] = DEEPSEEK_BASE_URL
+        else:
+            environment["OPENCODE_API_KEY"] = keys[label]
+            environment["OPENCODE_TRANSPORT"] = "anthropic_sdk_v2"
+            environment["MINIMAX_TRANSPORT"] = "opencode"
+            environment["MINIMAX_HARD_TIMEOUT"] = "7200"
         item_method_phase = item.get("method_phase")
         if item_method_phase:
             environment["ANCHORPATCH_METHOD_PHASE"] = item_method_phase
@@ -5365,7 +5834,8 @@ def _launch_under_lease(args, out_dir):
     _resolve_full234_scope(args)
     _resolve_remaining134_scope(args)
     _validate_campaign_grid(args)
-    _require_formal_opencode_transport("minimax-m3")
+    if args.campaign_role not in DEEPSEEK_CAMPAIGN_ROLES:
+        _require_formal_opencode_transport("minimax-m3")
     upstream_smoke_gate = None
     if args.campaign_role == "main":
         upstream_smoke_gate = evaluate_smoke_cost_gate(
@@ -5377,7 +5847,9 @@ def _launch_under_lease(args, out_dir):
         if args.campaign_role == "confirmation"
         else FULL234_KEY_COUNT if args.campaign_role == "full234"
         else REMAINING134_KEY_COUNT
-        if args.campaign_role == "remaining134" else None
+        if args.campaign_role == "remaining134"
+        else DEEPSEEK_CAPACITY_KEY_COUNT
+        if args.campaign_role == "deepseek_capacity15" else None
     )
     if (required_key_count is not None
             and len(selected_labels) != required_key_count):
@@ -5388,7 +5860,13 @@ def _launch_under_lease(args, out_dir):
     missing_labels = [label for label in selected_labels if label not in keys]
     if missing_labels:
         raise RuntimeError(f"unknown key labels: {missing_labels}")
-    if args.campaign_role in {"confirmation", "full234", "remaining134"}:
+    if (args.campaign_role == "deepseek_full234"
+            and len(selected_labels) < 2):
+        raise RuntimeError(
+            "deepseek_full234 requires at least two live unique key labels")
+    if args.campaign_role in {
+            "confirmation", "full234", "remaining134",
+            "deepseek_capacity15", "deepseek_full234"}:
         _require_unique_key_values_for_queued_campaign(keys, selected_labels)
     slots_per_key = getattr(args, "slots_per_key", 1)
     if not _is_exact_int(slots_per_key):
@@ -5406,10 +5884,12 @@ def _launch_under_lease(args, out_dir):
         assignment_samples, selected_labels, slots_per_key,
         alternate_within_key=(
             args.campaign_role in {
-                "supplemental", "confirmation", "full234"}
+                "supplemental", "confirmation", "full234",
+                "deepseek_capacity15", "deepseek_full234"}
         ),
         allow_queue=(args.campaign_role in {
-            "confirmation", "full234", "remaining134"}),
+            "confirmation", "full234", "remaining134",
+            "deepseek_capacity15", "deepseek_full234"}),
     )
     if args.campaign_role == "remaining134":
         for item in assignments:
@@ -5502,7 +5982,9 @@ def _launch_under_lease(args, out_dir):
                 out_dir, assignments, resume=args.resume,
                 target_round_trips=args.num_round_trips,
                 allow_pristine_pending=(
-                    args.campaign_role in {"confirmation", "full234"}),
+                    args.campaign_role in {
+                        "confirmation", "full234",
+                        "deepseek_capacity15", "deepseek_full234"}),
             )
         )
         dry_active = {item["sample"] for item in dry_assignments}
@@ -5609,7 +6091,9 @@ def _launch_under_lease(args, out_dir):
                 out_dir, assignments, resume=args.resume,
                 target_round_trips=args.num_round_trips,
                 allow_pristine_pending=(
-                    args.campaign_role in {"confirmation", "full234"}),
+                    args.campaign_role in {
+                        "confirmation", "full234",
+                        "deepseek_capacity15", "deepseek_full234"}),
             )
         )
         latest_outcomes = _latest_sample_outcomes(
@@ -5637,7 +6121,9 @@ def _launch_under_lease(args, out_dir):
                 "skipped_finished_samples": sorted(completed_samples),
                 "transport_authorizations": resume_authorizations,
             }
-            if args.campaign_role in {"confirmation", "full234"}:
+            if args.campaign_role in {
+                    "confirmation", "full234",
+                    "deepseek_capacity15", "deepseek_full234"}:
                 resume_record.update({
                     "launch_pending_samples": [
                         item["sample"] for item in launch_assignments
@@ -5773,7 +6259,7 @@ def main():
         "--campaign_role",
         choices=(
             "smoke", "main", "supplemental", "confirmation", "full234",
-            "remaining134"),
+            "remaining134", "deepseek_capacity15", "deepseek_full234"),
         required=True)
     parser.add_argument(
         "--smoke_dir",
@@ -5818,7 +6304,8 @@ def main():
             _resolve_confirmation_selection(args, out_dir=args.out_dir)
         except RuntimeError as exc:
             parser.error(str(exc))
-    elif args.campaign_role in {"full234", "remaining134"}:
+    elif args.campaign_role in {
+            "full234", "remaining134", "deepseek_full234"}:
         if manual_samples:
             parser.error(
                 f"{args.campaign_role} samples are derived automatically"
@@ -5828,7 +6315,7 @@ def main():
                 "--selection_manifest is only valid for confirmation"
             )
         try:
-            if args.campaign_role == "full234":
+            if args.campaign_role in {"full234", "deepseek_full234"}:
                 _resolve_full234_scope(args)
             else:
                 _resolve_remaining134_scope(args)
@@ -5895,6 +6382,35 @@ def main():
             parser.error("--smoke_dir is not valid for full234")
         if args.slots_per_key != FULL234_SLOTS_PER_KEY:
             parser.error("full234 requires --slots_per_key 4")
+    elif args.campaign_role == "deepseek_capacity15":
+        if (args.samples != DEEPSEEK_CAPACITY_SAMPLES
+                or args.num_round_trips != 2):
+            parser.error(
+                "deepseek_capacity15 requires the fixed 15-sample order "
+                "with 2 round trips")
+        if args.smoke_dir:
+            parser.error(
+                "--smoke_dir is not valid for deepseek_capacity15")
+        if args.slots_per_key != DEEPSEEK_SLOTS_PER_KEY:
+            parser.error(
+                "deepseek_capacity15 requires --slots_per_key 15")
+        if not args.key_labels or len(args.key_labels) != 1:
+            parser.error(
+                "deepseek_capacity15 requires exactly one --key_labels entry")
+    elif args.campaign_role == "deepseek_full234":
+        if (len(args.samples) != FULL234_SAMPLE_COUNT
+                or args.num_round_trips != 2):
+            parser.error(
+                "deepseek_full234 requires the exact 234-sample inventory "
+                "with 2 round trips")
+        if args.smoke_dir:
+            parser.error("--smoke_dir is not valid for deepseek_full234")
+        if args.slots_per_key != DEEPSEEK_SLOTS_PER_KEY:
+            parser.error(
+                "deepseek_full234 requires --slots_per_key 15")
+        if not args.key_labels or len(args.key_labels) < 2:
+            parser.error(
+                "deepseek_full234 requires at least two --key_labels entries")
     else:
         if (len(args.samples) != REMAINING134_SAMPLE_COUNT
                 or args.num_round_trips != 10):
