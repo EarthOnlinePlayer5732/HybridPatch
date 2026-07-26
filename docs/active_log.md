@@ -14,6 +14,27 @@
   any full campaign can start. This is capacity evidence, not a method-quality claim.
 - API status: no provider call made at registration time.
 
+## 2026-07-26 - After Experiment: DeepSeek V4 Flash OpenCode Go capacity15 RT2
+
+- corrected runtime: commit `383b06ce5b97212cb19d6e34fcb79a6998790213`,
+  `opencode_openai_compatible/2`,
+  `https://opencode.ai/zen/go/v1/chat/completions`, audited
+  `reasoning_effort=high`.
+- Key probe: all three labels in the top-level `.env.frkeys` returned HTTP 200 with one
+  attempt and zero retry.
+- capacity observation: all 15 `KEY_1` workers were authorized and occupied 15 slots
+  concurrently. The cohort remained at 15 active workers for about 9 minutes before the
+  first worker completed.
+- terminal result: the provider then returned HTTP 503
+  `Inference is temporarily unavailable` / `failover_exhausted`. Across 47 terminal API
+  rows, 43 were HTTP 200 and 4 exhausted all 3 wrapper attempts with HTTP 503; 16 total
+  failed 503 attempts occurred across 7 retried calls. There were no 429 responses or
+  rate-limit waits, and every API row recorded the Go endpoint and high reasoning.
+- campaign disposition: 1 worker finished, 4 workers reached terminal provider failure,
+  and 10 were interrupted by the dispatcher after the first unsupported worker failure.
+  Active workers returned to zero; preservation remained 0. Capacity15 did not complete,
+  so the full234 campaign was not launched.
+
 ## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode full234 RT2
 
 - experiment: `exp_20260726_hybridv8_deepseekv4flash_opencode_full234_rt2`;

@@ -709,3 +709,11 @@ preflight 和单 Key probe；全量另以 capacity15 完整 PASS、全部候选 
 `https://opencode.ai/zen/go/v1/chat/completions`；当前 revision 升为
 `opencode_openai_compatible/2`，其余 non-stream、retry、`reasoning_effort=high` 与审计语义
 不变。纠正后的正式 Key probe 为 3/3 HTTP 200。
+
+Go 端点 capacity15 实跑中，15 个 `KEY_1` worker 同时授权并保持满槽约 9 分钟。最终
+47 条 terminal API 记录中 43 条 HTTP 200，4 条在各 3 次 attempt 后仍为 HTTP 503；
+provider 正文为 `Inference is temporarily unavailable`、`failover_exhausted`。全程无
+429/rate-limit wait，全部记录均为 Go endpoint 与 `reasoning_effort=high`。调度器在首个
+unsupported provider failure 后停止 cohort：1 worker 完成、4 worker provider-failed、
+10 worker interrupted、active worker 归零、preservation 仍为 0。因此并发 15 未撑完整个
+RT2，未启动 full234。
