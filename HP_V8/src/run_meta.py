@@ -2965,11 +2965,15 @@ def read_campaign_recovery_authorization(out_dir):
                 validated.append((entry, rows[number - 1]))
             return validated
 
-        validated_api = _validate_rows("api_calls.jsonl", api_incidents)
-        validated_attempts = _validate_rows(
-            "api_attempt_ledger.jsonl", attempt_incidents)
         deepseek_server_retry = (
             record.get("deepseek_server_retry_recovery") is True)
+        validated_api = _validate_rows("api_calls.jsonl", api_incidents)
+        validated_attempts = (
+            []
+            if deepseek_server_retry and not attempt_incidents
+            else _validate_rows(
+                "api_attempt_ledger.jsonl", attempt_incidents)
+        )
         if deepseek_server_retry:
             retry_samples = record.get("deepseek_server_retry_samples")
             resume_samples = record.get("deepseek_resume_samples")
