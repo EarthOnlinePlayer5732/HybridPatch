@@ -1,6 +1,36 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-28 - Before Experiment: DeepSeek V4 Flash full234 RT10 stream
+
+- experiment：`exp_20260727_dsv4f_hpfr_full234_rt10_stream_c10`；
+  plan：
+  `docs/experiment_plans/exp_20260727_dsv4f_hpfr_full234_rt10_stream_c10.md`。
+  用户已明确要求开始；目标目录在启动前不存在。
+- fixed comparison：精确 234 sample，HP_V8 `hybridpatch/8` 对 `fullrewrite`，
+  seed42、distractor-on、10RT、共享 task plan。
+- runtime：`deepseek-v4-flash`，OpenCode Zen Go
+  `https://opencode.ai/zen/go/v1/chat/completions`，
+  `opencode_openai_compatible/4`，OpenAI-compatible stream，
+  `stream_options.include_usage=true`，`reasoning_effort=high`，
+  `max_completion_tokens=20000`。
+- queue：`KEY_1 KEY_2 KEY_3` 均从外部 `.env.frkeys` 注入且启动前为非空；
+  每 Key 10 槽、总上限 30，`per_key_work_conserving_v1` FIFO 即时补位。
+- exposure boundary：冻结 FullRewrite evidence 已调用 234/234，因此绝对
+  provider-unseen 为 0。本轮不引入新 sample ID；2026-06-25 registry 是冻结历史
+  快照，plan、manifest 与 ledger 作为只增 exposure overlay，禁止未见集声明。
+- launch evidence：代码提交 `99e1dec` 上 HP 189/189、transport 59/59；
+  两轮独立安全复审无 P0/P1。用户明确免除重复 zero-API preflight 和 dispatcher
+  dry-run；本次不重复 Key probe。启动前 3 个 Key 标签非空、141 GiB 可用磁盘、
+  无既有 dispatcher/worker。
+- monitor：启动后前 10 分钟每 2 分钟只读检查；随后每 10 分钟检查。监控
+  active/per-Key queue、sample outcomes、HP/FR committed rows、API HTTP/retry、
+  502/503 body 与 retry budget、stream/high/Go identity、model_empty、
+  campaign stop 与 preservation。监控不调用 API、不重启、不修改证据。
+- stop policy：有完整证据的 transport exhaustion/evaluator incomplete 保持
+  sample-local；preservation、运行身份/manifest/task-plan 漂移、永久 ledger
+  linkage 损坏、授权屏障损坏或未知 worker fatal 才全局 fail-closed。
+
 ## 2026-07-27 - Correction: next DeepSeek full234 is RT10 stream
 
 - `exp_dsv4f_hpfr_full234_rt2_c10_r3` 是已中止的 RT2、non-stream supporting

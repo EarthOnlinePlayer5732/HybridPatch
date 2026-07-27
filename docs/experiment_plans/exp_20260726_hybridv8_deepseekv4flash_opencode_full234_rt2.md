@@ -2,7 +2,7 @@
 
 > **历史计划，已 superseded。** 本计划真实执行身份是 RT2 non-stream supporting
 > evidence；不得再用于正式 full234 启动或 resume。后续正式计划见
-> `exp_20260727_hybridv8_deepseekv4flash_opencode_full234_rt10_stream.md`。
+> `exp_20260727_dsv4f_hpfr_full234_rt10_stream_c10.md`。
 
 ## 1. 身份与状态
 
