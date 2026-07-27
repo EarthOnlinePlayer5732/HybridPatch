@@ -1045,6 +1045,13 @@ def _is_transport_retry_exhaustion(record, exc):
     attempts = list(getattr(exc, "transport_attempts", None) or [])
     if not attempts or attempts[-1].get("status") != "retryable_error":
         return False
+    retry_budget_index = attempts[-1].get("retry_budget_attempt_index")
+    if (record.get("transport") == "openai_sdk_nonstream"
+            and attempts[-1].get("retry_budget_consumed") is True
+            and isinstance(retry_budget_index, int)
+            and not isinstance(retry_budget_index, bool)
+            and retry_budget_index >= 3):
+        return True
     return bool(
         record.get("response_slots_used")
         == record.get("max_response_slots") == 2
@@ -2288,7 +2295,11 @@ class ApiCallRecorder:
                 "response_slots_used": failure_state.get("response_slots_used"),
                 "max_transient_failures": provider_runtime.get("max_transient_failures"),
                 "transient_failure_count": failure_state.get("transient_failure_count"),
-                "http_attempts_used": failure_state.get("http_attempts_used"),
+                "http_attempts_used": (
+                    failure_state.get("http_attempts_used")
+                    if str(requested_model).lower().startswith("minimax-m3")
+                    else (len(attempts) or None)
+                ),
                 "transport_recovery_index": semantic_context["generation_index"],
                 "generation_index": semantic_context["generation_index"],
                 "semantic_root_id": semantic_context["semantic_root_id"],
@@ -2821,6 +2832,16 @@ def read_campaign_recovery_authorization(out_dir):
                 record.get("provider_access_retry_authorizations"), list)
             and bool(record.get("provider_access_retry_authorizations"))
         )
+        deepseek_server_retry_recovery = (
+            record.get("deepseek_server_retry_recovery") is True
+            and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition")
+            == "dispatcher_integrity_failure"
+            and str(archived_stop.get("error") or "").endswith(
+                "failed without a supported sample-local outcome")
+            and isinstance(record.get("deepseek_server_retry_samples"), list)
+            and bool(record.get("deepseek_server_retry_samples"))
+        )
         stop_valid = (
             (
                 archived_stop.get("schema") == STOP_CONDITION_SCHEMA
@@ -2832,6 +2853,7 @@ def read_campaign_recovery_authorization(out_dir):
             )
             or operator_pause_recovery
             or provider_access_retry_recovery
+            or deepseek_server_retry_recovery
         )
     if not stop_valid:
         raise RuntimeError("campaign recovery stop is not authorized")
@@ -2883,6 +2905,15 @@ def read_campaign_recovery_authorization(out_dir):
     changed_set = set(changed)
     if legacy_git_recovery:
         changed_scope_valid = changed_set == _GIT_IDENTITY_RECOVERY_CHANGED_PATHS
+    elif record.get("deepseek_server_retry_recovery") is True:
+        changed_scope_valid = (
+            changed_set <= _LEDGER_LOCK_RECOVERY_ALLOWED_CHANGED_PATHS
+            and {
+                "HP_V8/src/authorize_ledger_lock_recovery.py",
+                "HP_V8/src/paired_campaign_dispatch.py",
+                "HP_V8/src/run_meta.py",
+            } <= changed_set
+        )
     else:
         changed_scope_valid = (
             changed_set <= _LEDGER_LOCK_RECOVERY_ALLOWED_CHANGED_PATHS
@@ -2937,7 +2968,99 @@ def read_campaign_recovery_authorization(out_dir):
         validated_api = _validate_rows("api_calls.jsonl", api_incidents)
         validated_attempts = _validate_rows(
             "api_attempt_ledger.jsonl", attempt_incidents)
-        if any(
+        deepseek_server_retry = (
+            record.get("deepseek_server_retry_recovery") is True)
+        if deepseek_server_retry:
+            retry_samples = record.get("deepseek_server_retry_samples")
+            resume_samples = record.get("deepseek_resume_samples")
+            pending_samples = record.get("deepseek_pending_samples")
+            recovered_workers = record.get("deepseek_recovered_workers")
+            if (not isinstance(retry_samples, list)
+                    or not retry_samples
+                    or len(retry_samples) != len(set(retry_samples))
+                    or any(not isinstance(item, str) or not item
+                           for item in retry_samples)
+                    or not isinstance(resume_samples, list)
+                    or not resume_samples
+                    or len(resume_samples) != len(set(resume_samples))
+                    or not set(retry_samples) <= set(resume_samples)
+                    or not isinstance(pending_samples, list)
+                    or len(pending_samples) != len(set(pending_samples))
+                    or not set(pending_samples) <= set(resume_samples)
+                    or not isinstance(recovered_workers, list)
+                    or {
+                        item.get("worker_launch_id")
+                        for item in recovered_workers
+                        if isinstance(item, dict)
+                    } != set(worker_ids)
+                    or {
+                        item.get("sample")
+                        for item in recovered_workers
+                        if isinstance(item, dict)
+                    } != set(resume_samples) - set(pending_samples)):
+                raise RuntimeError(
+                    "campaign DeepSeek retry sample scope is invalid")
+
+            committed_call_ids = set()
+            for method in ("hybridpatch", "fullrewrite"):
+                for sample in resume_samples:
+                    result_path = os.path.join(
+                        out_dir, method, f"{sample}.jsonl")
+                    if not os.path.isfile(result_path):
+                        continue
+                    for result_row in _read_jsonl_records_with_retry(
+                            result_path):
+                        committed_call_ids.update(
+                            result_row.get("api_call_ids") or [])
+            observed_retry_samples = set()
+            for entry, row in validated_api:
+                attempts = row.get("transport_attempts")
+                final_attempt = attempts[-1] if isinstance(
+                    attempts, list) and attempts else {}
+                final_budget = final_attempt.get("retry_budget_attempt_index")
+                incident_kind = entry.get("incident_kind")
+                if (row.get("model") != "deepseek-v4-flash"
+                        or row.get("sample") not in set(resume_samples)
+                        or row.get("worker_launch_id") not in worker_ids
+                        or row.get("provider_called") is not True
+                        or row.get("response_replayed") is not False
+                        or row.get("request_id") in committed_call_ids
+                        or incident_kind not in {
+                            "deepseek_server_retry_exhaustion",
+                            "deepseek_interrupted_uncommitted_api",
+                        }):
+                    raise RuntimeError(
+                        "campaign DeepSeek retry API evidence is invalid")
+                if incident_kind == "deepseek_server_retry_exhaustion":
+                    observed_retry_samples.add(row.get("sample"))
+                    if (row.get("classification")
+                            != "provider/API failure"
+                            or row.get("error_type") != "server_error"
+                            or row.get("http_status") not in {502, 503}
+                            or row.get("stream_complete") is not False
+                            or row.get("count_as_method_failure") is not False
+                            or not isinstance(final_budget, int)
+                            or isinstance(final_budget, bool)
+                            or final_budget < 3
+                            or final_attempt.get("status")
+                            != "retryable_error"
+                            or final_attempt.get(
+                                "retry_budget_consumed") is not True):
+                        raise RuntimeError(
+                            "campaign DeepSeek retry API evidence is invalid")
+                elif (row.get("classification") is not None
+                      or row.get("http_status") != 200
+                      or row.get("stream_complete") is not True
+                      or row.get("input_tokens") is None
+                      or row.get("output_tokens") is None
+                      or not isinstance(attempts, list) or not attempts
+                      or attempts[-1].get("status") != "success"):
+                    raise RuntimeError(
+                        "campaign DeepSeek interrupted API evidence is invalid")
+            if observed_retry_samples != set(retry_samples):
+                raise RuntimeError(
+                    "campaign DeepSeek retry API scope is invalid")
+        elif any(
                 row.get("method") != "fullrewrite"
                 or row.get("classification") != "runner_exception"
                 or row.get("error_type") != "AlreadyLocked"
@@ -3145,7 +3268,8 @@ def read_campaign_recovery_authorization(out_dir):
         launches = {
             row.get("worker_launch_id"): row for row in dispatch_rows
             if row.get("event") == "launch"
-            and row.get("method_phase") == "fullrewrite"
+            and (deepseek_server_retry
+                 or row.get("method_phase") == "fullrewrite")
         }
         if not set(worker_ids) <= set(launches):
             raise RuntimeError("campaign recovery worker cohort is not dispatched")

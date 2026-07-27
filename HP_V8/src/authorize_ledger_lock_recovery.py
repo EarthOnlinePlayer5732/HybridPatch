@@ -930,9 +930,272 @@ def _authorize_provider_access_retry(
     }
 
 
+def _deepseek_server_retry_rows(out_dir):
+    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    failures = []
+    for number, row in enumerate(api_rows, 1):
+        attempts = row.get("transport_attempts")
+        final_attempt = attempts[-1] if isinstance(
+            attempts, list) and attempts else {}
+        final_budget = final_attempt.get("retry_budget_attempt_index")
+        if (row.get("model") == "deepseek-v4-flash"
+                and row.get("classification") == "provider/API failure"
+                and row.get("error_type") == "server_error"
+                and row.get("http_status") in {502, 503}
+                and row.get("provider_called") is True
+                and row.get("stream_complete") is False
+                and row.get("response_replayed") is False
+                and row.get("count_as_method_failure") is False
+                and isinstance(final_budget, int)
+                and not isinstance(final_budget, bool)
+                and final_budget >= 3
+                and final_attempt.get("status") == "retryable_error"
+                and final_attempt.get("retry_budget_consumed") is True):
+            failures.append((number, row))
+    return failures
+
+
+def _deepseek_checkpoint_resume_scope(out_dir, manifest):
+    """Return the exact incomplete DeepSeek cohort and uncommitted API rows."""
+    config = manifest.get("config") or {}
+    target = config.get("num_round_trips")
+    samples = config.get("samples") or []
+    methods = config.get("method_set") or []
+    if (not isinstance(target, int) or isinstance(target, bool) or target < 1
+            or set(methods) != {"hybridpatch", "fullrewrite"}):
+        raise RuntimeError("DeepSeek checkpoint scope is invalid")
+
+    progress_by_sample = {}
+    resume_samples = []
+    for sample in samples:
+        progress = _actual_sample_progress(out_dir, sample, methods)
+        progress_by_sample[sample] = progress
+        if any(
+                progress.get(method) != {
+                    "completed_round_trips": target,
+                    "committed_rows": 2 * target,
+                }
+                for method in methods):
+            resume_samples.append(sample)
+
+    latest_metadata = {}
+    for row in read_run_metadata_snapshot(out_dir):
+        for sample in row.get("samples") or []:
+            if sample in resume_samples:
+                latest_metadata[sample] = row
+    dispatch_rows = _read_jsonl(os.path.join(
+        out_dir, "dispatch_log.jsonl"))
+    exits_by_worker = {}
+    for row in dispatch_rows:
+        worker_id = row.get("worker_launch_id")
+        if row.get("event") == "worker_exit" and isinstance(worker_id, str):
+            exits_by_worker.setdefault(worker_id, []).append(row)
+
+    recovered = []
+    pending_samples = []
+    for sample in resume_samples:
+        metadata = latest_metadata.get(sample)
+        if metadata is None:
+            pending_samples.append(sample)
+            continue
+        worker_id = metadata.get("worker_launch_id")
+        worker_pid = metadata.get("worker_pid")
+        exits = exits_by_worker.get(worker_id) or []
+        if (metadata.get("status") not in {
+                "failed", "interrupted_by_dispatcher"}
+                or not isinstance(worker_id, str) or not worker_id
+                or not isinstance(worker_pid, int)
+                or isinstance(worker_pid, bool) or worker_pid <= 0
+                or len(exits) != 1
+                or exits[0].get("sample") != sample
+                or exits[0].get("pid") != worker_pid
+                or exits[0].get("returncode") == 0
+                or exits[0].get("disposition") != "campaign_fatal"):
+            raise RuntimeError(
+                f"DeepSeek interrupted worker evidence is invalid: {sample}")
+        _assert_worker_leases_free(out_dir, [sample])
+        recovered.append({
+            "sample": sample,
+            "status": metadata["status"],
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+            "invocation_id": metadata.get("invocation_id"),
+        })
+
+    recovered_workers = {
+        item["worker_launch_id"] for item in recovered
+    }
+    resume_set = set(resume_samples)
+    incident_rows = []
+    for number, row in enumerate(_read_jsonl(os.path.join(
+            out_dir, "api_calls.jsonl")), 1):
+        sample = row.get("sample")
+        method = row.get("method")
+        rt_index = row.get("rt_index")
+        if (sample not in resume_set
+                or row.get("worker_launch_id") not in recovered_workers
+                or method not in methods
+                or not isinstance(rt_index, int)
+                or isinstance(rt_index, bool)):
+            continue
+        committed_rt = progress_by_sample[sample][
+            method]["completed_round_trips"]
+        if rt_index > committed_rt:
+            incident_rows.append((number, row))
+    if not incident_rows:
+        raise RuntimeError(
+            "DeepSeek checkpoint recovery has no uncommitted API rows")
+    return {
+        "resume_samples": sorted(resume_samples),
+        "pending_samples": sorted(pending_samples),
+        "recovered_workers": sorted(
+            recovered, key=lambda item: item["sample"]),
+        "incident_api_rows": incident_rows,
+    }
+
+
+def _authorize_deepseek_server_retry(
+        out_dir, manifest, stop, stop_path, auth_path, prior_authorization):
+    if (prior_authorization is not None
+            or (manifest.get("config") or {}).get("campaign_role")
+            != "deepseek_full234"
+            or stop.get("condition") != "dispatcher_integrity_failure"
+            or not str(stop.get("error") or "").endswith(
+                "failed without a supported sample-local outcome")):
+        raise RuntimeError("DeepSeek server-retry recovery boundary is invalid")
+    active = _read_json(os.path.join(out_dir, "active_worker_set.json"))
+    if active.get("workers") != {}:
+        raise RuntimeError("workers are still active")
+    samples = (manifest.get("config") or {}).get("samples") or []
+    _assert_worker_leases_free(out_dir, samples)
+
+    current_commit, current_tree = _git_identity()
+    if current_tree != "clean":
+        raise RuntimeError("DeepSeek server-retry recovery requires a clean Git tree")
+    prior_commit = manifest.get("run_git_commit")
+    if current_commit == prior_commit:
+        raise RuntimeError("DeepSeek server-retry recovery code commit has not changed")
+
+    scope = _deepseek_checkpoint_resume_scope(out_dir, manifest)
+    recovered_workers = scope["recovered_workers"]
+    recovered_by_id = {
+        item["worker_launch_id"]: item for item in recovered_workers
+    }
+    failures = _deepseek_server_retry_rows(out_dir)
+    if not failures:
+        raise RuntimeError("no DeepSeek server-retry failure rows found")
+    worker_ids = sorted(recovered_by_id)
+    retry_samples = [row.get("sample") for _number, row in failures]
+    if (len(retry_samples) != len(set(retry_samples))
+            or any(
+                row.get("worker_launch_id") not in recovered_by_id
+                or recovered_by_id[row.get("worker_launch_id")].get("status")
+                != "failed"
+                for _number, row in failures)
+            or any(not isinstance(sample, str) or sample not in samples
+                   for sample in retry_samples)):
+        raise RuntimeError("DeepSeek server-retry worker scope is invalid")
+    failure_hashes = {
+        _canonical_record_sha256(row) for _number, row in failures
+    }
+
+    prior_fingerprint = manifest.get("code_fingerprint")
+    recovery_fingerprint = code_fingerprint()
+    if not isinstance(prior_fingerprint, dict):
+        raise RuntimeError("dispatch manifest code fingerprint is invalid")
+    fingerprint_changes = sorted(
+        key for key in set(prior_fingerprint) | set(recovery_fingerprint)
+        if prior_fingerprint.get(key) != recovery_fingerprint.get(key)
+    )
+    changed_paths = _git_changed_paths(prior_commit, current_commit)
+    required_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/paired_campaign_dispatch.py",
+        "HP_V8/src/run_meta.py",
+    }
+    allowed_paths = required_paths | {
+        "HP_V8/VERSION.md", "docs/active_log.md",
+    }
+    if (fingerprint_changes != ["run_meta.py"]
+            or not required_paths <= set(changed_paths)
+            or not set(changed_paths) <= allowed_paths):
+        raise RuntimeError("DeepSeek server-retry recovery commit scope is invalid")
+
+    authorization_id = (
+        "deepseek-server-retry-" + datetime.now().astimezone().strftime(
+            "%Y%m%dT%H%M%S%z") + "-" + uuid.uuid4().hex[:8]
+    )
+    history_dir = os.path.join(
+        out_dir, "recovery_history", authorization_id)
+    os.makedirs(history_dir, exist_ok=False)
+    archived_stop = os.path.join(history_dir, "campaign_stop.json")
+    os.replace(stop_path, archived_stop)
+
+    record = {
+        "schema": CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2,
+        "authorization_id": authorization_id,
+        "recovery_kind": LEDGER_LOCK_RECOVERY_KIND,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "authorization_basis": (
+            "explicit_user_resume_after_deepseek_server_retry_exhaustion"
+        ),
+        "deepseek_server_retry_recovery": True,
+        "deepseek_server_retry_samples": sorted(retry_samples),
+        "deepseek_resume_samples": scope["resume_samples"],
+        "deepseek_pending_samples": scope["pending_samples"],
+        "deepseek_recovered_workers": recovered_workers,
+        "provider_access_resume_samples": sorted(retry_samples),
+        "provider_access_retry_authorizations": [],
+        "dispatch_manifest_sha256": _sha256_file(os.path.join(
+            out_dir, "dispatch_manifest.json")),
+        "prior_git_commit": prior_commit,
+        "prior_git_tree_state": "clean",
+        "prior_code_fingerprint": prior_fingerprint,
+        "recovery_git_commit": current_commit,
+        "recovery_git_tree_state": "clean",
+        "recovery_code_fingerprint": recovery_fingerprint,
+        "changed_code_fingerprint_keys": fingerprint_changes,
+        "changed_tracked_paths": changed_paths,
+        "archived_stop_path": os.path.relpath(
+            archived_stop, out_dir).replace("\\", "/"),
+        "archived_stop_sha256": _sha256_file(archived_stop),
+        "incident_api_rows": [
+            _incident_entry(
+                number, row,
+                "deepseek_server_retry_exhaustion"
+                if _canonical_record_sha256(row) in failure_hashes
+                else "deepseek_interrupted_uncommitted_api")
+            for number, row in scope["incident_api_rows"]
+        ],
+        "incident_attempt_rows": [],
+        "recovered_worker_launch_ids": sorted(worker_ids),
+        "preauthorization_worker_launch_ids": [],
+        "committed_results_modified": False,
+        "checkpoint_rows_modified": False,
+        "provider_post_replay_scope": "uncommitted_steps_only",
+    }
+    write_json_atomic(auth_path, record)
+    campaign_recovery_incident_evidence.cache_clear()
+    verified = read_campaign_recovery_authorization(out_dir)
+    append_jsonl_locked(os.path.join(out_dir, "dispatch_log.jsonl"), {
+        "event": "user_authorized_deepseek_server_retry_recovery",
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "campaign_recovery_authorization_id": authorization_id,
+        "campaign_recovery_authorization_sha256": verified[
+            "authorization_sha256"],
+        "deepseek_server_retry_samples": sorted(retry_samples),
+    })
+    return {
+        "authorization_id": authorization_id,
+        "authorization_sha256": verified["authorization_sha256"],
+        "deepseek_server_retry_samples": sorted(retry_samples),
+    }
+
+
 def authorize(
         out_dir, *, operator_pause=False, operator_pause_reason=None,
-        operator_interrupted_samples=None, provider_access_retry=False):
+        operator_interrupted_samples=None, provider_access_retry=False,
+        deepseek_server_retry=False):
     out_dir = os.path.abspath(out_dir)
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     stop_path = os.path.join(out_dir, "campaign_stop.json")
@@ -946,6 +1209,14 @@ def authorize(
             != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2):
         raise RuntimeError("cannot supersede a non-V2 recovery authorization")
     manifest = _read_json(manifest_path)
+    if deepseek_server_retry:
+        if operator_pause or operator_interrupted_samples or provider_access_retry:
+            raise RuntimeError(
+                "DeepSeek server retry cannot be combined with other recovery modes")
+        stop = _read_json(stop_path)
+        return _authorize_deepseek_server_retry(
+            out_dir, manifest, stop, stop_path, auth_path,
+            prior_authorization)
     if provider_access_retry:
         if operator_pause or operator_interrupted_samples:
             raise RuntimeError(
@@ -1333,6 +1604,7 @@ def main():
     parser.add_argument(
         "--operator_interrupted_sample", action="append", default=[])
     parser.add_argument("--provider_access_retry", action="store_true")
+    parser.add_argument("--deepseek_server_retry", action="store_true")
     args = parser.parse_args()
     if not args.confirm_workers_stopped:
         parser.error("--confirm_workers_stopped is required")
@@ -1349,6 +1621,7 @@ def main():
         operator_pause_reason=args.operator_pause_reason,
         operator_interrupted_samples=args.operator_interrupted_sample,
         provider_access_retry=args.provider_access_retry,
+        deepseek_server_retry=args.deepseek_server_retry,
     ), sort_keys=True))
 
 
