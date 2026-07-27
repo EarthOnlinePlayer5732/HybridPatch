@@ -3138,8 +3138,12 @@ def read_campaign_recovery_authorization(out_dir):
         retry_parents = set()
         api_rows_all = _read_jsonl_records_with_retry(
             os.path.join(out_dir, "api_calls.jsonl"))
-        attempt_rows_all = _read_jsonl_records_with_retry(
-            os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+        attempt_rows_all = (
+            []
+            if deepseek_server_retry
+            else _read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+        )
         for retry in provider_access_retries:
             if not isinstance(retry, dict):
                 raise RuntimeError(
@@ -3297,11 +3301,15 @@ def read_campaign_recovery_authorization(out_dir):
             for row in _read_jsonl_records_with_retry(
                 os.path.join(out_dir, "api_calls.jsonl"))
         }
-        attempt_workers = {
-            row.get("worker_launch_id")
-            for row in _read_jsonl_records_with_retry(
-                os.path.join(out_dir, "api_attempt_ledger.jsonl"))
-        }
+        attempt_workers = (
+            set()
+            if deepseek_server_retry
+            else {
+                row.get("worker_launch_id")
+                for row in _read_jsonl_records_with_retry(
+                    os.path.join(out_dir, "api_attempt_ledger.jsonl"))
+            }
+        )
         expected_stop_errors = set()
         for worker_id in preauthorization_set:
             launch = launches.get(worker_id) or {}
