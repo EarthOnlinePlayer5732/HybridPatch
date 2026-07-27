@@ -42,7 +42,9 @@ _OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/go/v1"
 _OPENCODE_ZEN_CHAT_COMPLETIONS_URL = (
     _OPENCODE_ZEN_BASE_URL + "/chat/completions"
 )
-_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/3"
+_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/4"
+_OPENCODE_OPENAI_COMPATIBLE_TRANSPORT = "openai_sdk_stream"
+_OPENCODE_MAX_RETRY_AFTER_SECONDS = 300
 _REASONING_EFFORTS = {"low", "medium", "high"}
 # MiniMax official OpenAI-compatible endpoint (docs/Minimax_OPENAI.md), selected
 # ONLY via MINIMAX_TRANSPORT=official_nonstream. Own transport revision with
@@ -141,7 +143,11 @@ class _HTTPStatusError(RuntimeError):
 
 
 class _IncompleteStreamError(RuntimeError):
-    """A HTTP-success stream that ended without the Anthropic terminal events."""
+    """A HTTP-success stream that ended without its required terminal evidence."""
+
+    def __init__(self, message, *, status_code=None):
+        self.status_code = status_code
+        super().__init__(message)
 
 
 class OpenCodeTransportError(RuntimeError):
@@ -150,8 +156,8 @@ class OpenCodeTransportError(RuntimeError):
     def __init__(self, message, *, attempts, last_error):
         super().__init__(message)
         self.transport_attempts = list(attempts)
-        self.last_error = last_error
-        self.status_code = getattr(last_error, "status_code", None)
+        self.last_error = _sanitized_transport_cause(last_error)
+        self.status_code = getattr(self.last_error, "status_code", None)
 
 
 class OpenAICompatibleTransportError(RuntimeError):
@@ -160,8 +166,8 @@ class OpenAICompatibleTransportError(RuntimeError):
     def __init__(self, message, *, attempts, last_error):
         super().__init__(message)
         self.transport_attempts = list(attempts)
-        self.last_error = last_error
-        self.status_code = getattr(last_error, "status_code", None)
+        self.last_error = _sanitized_transport_cause(last_error)
+        self.status_code = getattr(self.last_error, "status_code", None)
 
 
 def _match_pricing(model, pricing):
@@ -302,11 +308,15 @@ def openai_compatible_runtime_config(
     resolved = resolve_model_name(model)
     base_url = _normalized_base_url(os.environ.get("OPENAI_BASE_URL")) or None
     opencode_zen = _is_opencode_zen_runtime(resolved, base_url)
+    _reject_azure_opencode_zen_conflict(base_url)
     return {
         "provider": (
             "opencode_zen" if opencode_zen else "openai_chat_completions"
         ),
-        "transport": "openai_sdk_nonstream",
+        "transport": (
+            _OPENCODE_OPENAI_COMPATIBLE_TRANSPORT
+            if opencode_zen else "openai_sdk_nonstream"
+        ),
         "transport_revision": (
             _OPENCODE_OPENAI_COMPATIBLE_REVISION if opencode_zen else None
         ),
@@ -335,6 +345,20 @@ def model_runtime_config(
     return openai_compatible_runtime_config(
         model, max_tokens=max_tokens, reasoning_effort=reasoning_effort
     )
+
+
+def _reject_azure_opencode_zen_conflict(base_url):
+    """Do not let Azure credentials silently override the audited Zen route."""
+    if (
+            _normalized_base_url(base_url) == _OPENCODE_ZEN_BASE_URL
+            and (
+                os.environ.get("AZURE_OPENAI_API_KEY")
+                or os.environ.get("AZURE_OPENAI_ENDPOINT")
+            )):
+        raise RuntimeError(
+            "OpenCode Zen runtime forbids inherited AZURE_OPENAI_API_KEY/"
+            "AZURE_OPENAI_ENDPOINT"
+        )
 
 
 def _as_plain_dict(value):
@@ -561,6 +585,17 @@ def _transport_status_code(exc):
     return int(match.group(1)) if match else None
 
 
+def _attempt_http_status(exc, prior=None):
+    """Keep the HTTP status that opened a stream when its EOF has no status."""
+    code = _transport_status_code(exc)
+    if code is None and isinstance(prior, dict):
+        code = prior.get("response_started_http_status")
+    try:
+        return int(code) if code is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_generation_delta_type(delta_type):
     """Whether an Anthropic content delta proves generation has started."""
     value = str(delta_type or "")
@@ -659,33 +694,107 @@ def _is_retryable_opencode_error(exc, attempt=None):
     ))
 
 
-def _retry_after_seconds(exc, attempt_index):
-    backoff = min(5 + 2 * attempt_index, 30)
+def _retry_after_seconds(
+        exc, attempt_index, *, exponential_503=False):
+    if exponential_503 and _transport_status_code(exc) == 503:
+        exponent = min(max(int(attempt_index) - 1, 0), 6)
+        base = min(5 * (2 ** exponent), _OPENCODE_MAX_RETRY_AFTER_SECONDS)
+        # Spread worker retries without touching the experiment PRNG.
+        jitter = (
+            ((os.getpid() * 1103515245 + int(attempt_index) * 12345) & 0xFF)
+            / 1280.0
+        )
+        backoff = min(
+            base * (1.0 + jitter),
+            _OPENCODE_MAX_RETRY_AFTER_SECONDS,
+        )
+    else:
+        backoff = min(5 + 2 * attempt_index, 30)
     response = getattr(exc, "response", None)
     headers = getattr(response, "headers", None)
     if headers:
         value = headers.get("retry-after") or headers.get("retry_after")
         try:
-            backoff = max(backoff, min(float(value), 30))
+            backoff = max(
+                backoff, min(float(value), _OPENCODE_MAX_RETRY_AFTER_SECONDS)
+            )
         except (TypeError, ValueError):
             pass
-    match = re.search(r"retry_after['\"]?\s*[:=]\s*(\d+)", str(exc))
+    body = _transport_error_body(exc)
+    body_text = json.dumps(body, ensure_ascii=False, default=str)
+    match = re.search(
+        r"retry[_-]after['\"]?\s*[:=]\s*['\"]?(\d+)",
+        f"{str(exc)}\n{body_text}",
+        flags=re.IGNORECASE,
+    )
     if match:
-        backoff = max(backoff, min(int(match.group(1)), 30))
+        backoff = max(
+            backoff,
+            min(int(match.group(1)), _OPENCODE_MAX_RETRY_AFTER_SECONDS),
+        )
     return backoff
+
+
+def _redact_transport_value(value):
+    try:
+        serialized = json.dumps(
+            value, ensure_ascii=False, default=str, separators=(",", ":")
+        )
+    except Exception:
+        serialized = str(value)
+    for secret in (
+            os.environ.get("OPENAI_API_KEY"),
+            os.environ.get("OPENCODE_API_KEY"),
+            os.environ.get("OPENCODE_GO_API_KEY")):
+        if secret:
+            serialized = serialized.replace(secret, "<redacted-key>")
+    try:
+        return json.loads(serialized)
+    except (TypeError, ValueError):
+        return serialized
+
+
+def _transport_error_body(exc):
+    body = getattr(exc, "body", None)
+    response = getattr(exc, "response", None)
+    if body is None and response is not None:
+        try:
+            body = response.json()
+        except Exception:
+            body = getattr(response, "text", None)
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except (TypeError, ValueError):
+            pass
+    return _redact_transport_value(body) if body is not None else None
+
+
+def _transport_error_message(exc):
+    return _redact_transport_value(str(exc))
+
+
+def _sanitized_transport_cause(exc):
+    """Keep classification fields without retaining a secret-bearing cause."""
+    sanitized = RuntimeError(str(_transport_error_message(exc)))
+    sanitized.status_code = _transport_status_code(exc)
+    if getattr(
+            exc, "_anchorpatch_transport_observability_failure", False):
+        sanitized._anchorpatch_transport_observability_failure = True
+    return sanitized
 
 
 def _attempt_from_exception(exc, attempt_index, elapsed_ms):
     prior = getattr(exc, "_opencode_attempt", None)
-    if prior:
-        return dict(prior)
-    return {
+    record = {
         "attempt_index": attempt_index,
         "status": "retryable_error" if _is_retryable_opencode_error(exc) else "fatal_error",
-        "http_status": _transport_status_code(exc),
+        "http_status": _attempt_http_status(exc, prior),
         "error_type": _transport_error_type(exc),
-        "error_message": str(exc)[:1000],
+        "error_message": _transport_error_message(exc),
+        "error_body": _transport_error_body(exc),
         "elapsed_ms": elapsed_ms,
+        "response_started_http_status": None,
         "stream_complete": False,
         "message_start_seen": False,
         "message_delta_seen": False,
@@ -699,6 +808,180 @@ def _attempt_from_exception(exc, attempt_index, elapsed_ms):
         "content_blocks_stopped": 0,
         "content_blocks_balanced": False,
         "terminal_sequence_valid": False,
+    }
+    if prior:
+        record.update(dict(prior))
+        record["status"] = (
+            "retryable_error"
+            if _is_retryable_opencode_error(exc, record)
+            else "fatal_error"
+        )
+        record["http_status"] = _attempt_http_status(exc, prior)
+        record["error_type"] = _transport_error_type(exc, record)
+        record["error_message"] = _transport_error_message(exc)
+        record["error_body"] = _transport_error_body(exc)
+        record["elapsed_ms"] = elapsed_ms
+    return record
+
+
+def _openai_stream_delta_seen(delta, key):
+    value = delta.get(key)
+    if isinstance(value, str):
+        return bool(value)
+    if isinstance(value, list):
+        return bool(value)
+    return value is not None
+
+
+def _valid_openai_final_usage(value):
+    """Require the complete non-negative Chat Completions token accounting."""
+    usage = value if isinstance(value, dict) else _as_plain_dict(value)
+    if not isinstance(usage, dict):
+        return False
+    counts = [
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+    ]
+    if any(
+            not isinstance(count, int) or isinstance(count, bool) or count < 0
+            for count in counts):
+        return False
+    return counts[2] == counts[0] + counts[1]
+
+
+def _call_openai_compatible_stream(
+        client, request_kwargs, *, raw_event_sink=None, attempt_index=1):
+    """Collect one OpenAI ChatCompletion stream without accepting a partial EOF."""
+    raw_chunks = []
+    content_parts = []
+    response_id = None
+    response_model = None
+    finish_reason = None
+    usage = None
+    state = {
+        "stream_complete": False,
+        "message_start_seen": False,
+        "message_delta_seen": False,
+        "message_stop_seen": False,
+        "final_usage_seen": False,
+        "response_started_http_status": None,
+        "generation_delta_seen": False,
+        "thinking_delta_seen": False,
+        "text_delta_seen": False,
+        "tool_delta_seen": False,
+        "content_blocks_started": 0,
+        "content_blocks_stopped": 0,
+        "content_blocks_balanced": True,
+        "terminal_sequence_valid": False,
+    }
+    terminal_sequence_valid = True
+
+    try:
+        stream = client.chat.completions.create(
+            **request_kwargs,
+            stream=True,
+            stream_options={"include_usage": True},
+        )
+        # The SDK returns the stream iterator only after the HTTP response has
+        # opened successfully. Preserve that 200 if a later EOF/connection
+        # exception carries no status of its own.
+        state["response_started_http_status"] = 200
+        for chunk in stream:
+            plain = _as_plain_dict(chunk)
+            raw_chunks.append(plain)
+            state["message_start_seen"] = True
+            if state["final_usage_seen"]:
+                terminal_sequence_valid = False
+            _emit_transport_event(raw_event_sink, {
+                "record_type": "sdk_stream_event",
+                "attempt_index": attempt_index,
+                "event": plain,
+            })
+            response_id = plain.get("id") or response_id
+            response_model = plain.get("model") or response_model
+            choices = plain.get("choices") or []
+            if choices:
+                if len(choices) != 1 or state["message_stop_seen"]:
+                    terminal_sequence_valid = False
+                choice0 = choices[0] if isinstance(choices[0], dict) else {}
+                delta = choice0.get("delta") or {}
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if content is not None:
+                        text = _content_to_text(content)
+                        if text:
+                            content_parts.append(text)
+                            state["generation_delta_seen"] = True
+                            state["text_delta_seen"] = True
+                    if any(_openai_stream_delta_seen(delta, key) for key in (
+                            "reasoning", "reasoning_content",
+                            "reasoning_details")):
+                        state["generation_delta_seen"] = True
+                        state["thinking_delta_seen"] = True
+                    if _openai_stream_delta_seen(delta, "tool_calls"):
+                        state["generation_delta_seen"] = True
+                        state["tool_delta_seen"] = True
+                current_finish = choice0.get("finish_reason")
+                if current_finish:
+                    if state["message_stop_seen"]:
+                        terminal_sequence_valid = False
+                    finish_reason = current_finish
+                    state["message_delta_seen"] = True
+                    state["message_stop_seen"] = True
+            usage_value = plain.get("usage")
+            if usage_value is not None:
+                if (
+                        state["message_stop_seen"]
+                        and not choices
+                        and not state["final_usage_seen"]
+                        and _valid_openai_final_usage(usage_value)):
+                    usage = usage_value
+                    state["final_usage_seen"] = True
+                else:
+                    terminal_sequence_valid = False
+    except Exception as exc:
+        state["terminal_sequence_valid"] = False
+        exc._opencode_attempt = dict(state)
+        raise
+
+    state["terminal_sequence_valid"] = bool(
+        terminal_sequence_valid
+        and state["message_stop_seen"]
+        and state["final_usage_seen"]
+    )
+    if not state["terminal_sequence_valid"]:
+        missing = []
+        if not state["message_stop_seen"]:
+            missing.append("finish_reason")
+        if not state["final_usage_seen"]:
+            missing.append("final_usage")
+        if not terminal_sequence_valid:
+            missing.append("valid_terminal_sequence")
+        exc = _IncompleteStreamError(
+            "OpenAI-compatible stream ended without " + " and ".join(missing),
+            status_code=state["response_started_http_status"],
+        )
+        exc._opencode_attempt = dict(state)
+        raise exc
+
+    state["stream_complete"] = True
+    return {
+        "id": response_id,
+        "model": response_model,
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": "".join(content_parts),
+            },
+            "finish_reason": finish_reason,
+        }],
+        "usage": usage or {},
+        "http_status": 200,
+        "stream_complete": True,
+        "_raw_stream_events": raw_chunks,
+        "_stream_attempt_state": state,
     }
 
 
@@ -1212,6 +1495,8 @@ class OpenAI_Model:
         self.client = None
 
     def _default_client(self):
+        base_url = os.environ.get("OPENAI_BASE_URL") or None
+        _reject_azure_opencode_zen_conflict(base_url)
         if self.client is not None:
             return self.client
         azure_key = os.environ.get("AZURE_OPENAI_API_KEY")
@@ -1227,7 +1512,6 @@ class OpenAI_Model:
             assert openai_key, (
                 "Set OPENAI_API_KEY (or AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT)"
             )
-            base_url = os.environ.get("OPENAI_BASE_URL") or None
             client_args = {"api_key": openai_key, "base_url": base_url}
             if _normalized_base_url(base_url) == _OPENCODE_ZEN_BASE_URL:
                 # generate() owns retries so every OpenCode attempt is visible.
@@ -1519,10 +1803,11 @@ class OpenAI_Model:
                     rec["budget_class"] = "fatal"
                     transport_attempts.append(rec)
                     raise OpenCodeTransportError(
-                        f"OpenCode MiniMax-M3 failed with a non-retryable error: {last_err}",
+                        "OpenCode MiniMax-M3 failed with a non-retryable "
+                        f"error: {_transport_error_message(last_err)}",
                         attempts=transport_attempts,
                         last_error=last_err,
-                    ) from last_err
+                    ) from None
 
                 if rec.get("generation_delta_seen"):
                     response_slots_used += 1
@@ -1551,13 +1836,13 @@ class OpenAI_Model:
                         "OpenCode MiniMax-M3 response retry exhausted after an incomplete stream",
                         attempts=transport_attempts,
                         last_error=last_err,
-                    ) from last_err
+                    ) from None
                 if transient_failure_count >= effective_max_transient_failures:
                     raise OpenCodeTransportError(
                         "OpenCode MiniMax-M3 transient infrastructure failures exhausted",
                         attempts=transport_attempts,
                         last_error=last_err,
-                    ) from last_err
+                    ) from None
                 time.sleep(_retry_after_seconds(last_err, attempt_index))
             attempt = max(response_slots_used - 1, 0)
         else:
@@ -1566,6 +1851,9 @@ class OpenAI_Model:
             retry_budget_attempt_index = 0
             while True:
                 http_attempt_index = attempt_index + 1
+                attempt_started = time.time()
+                terminal_error = None
+                retry_delay = None
                 if not is_minimax_official:
                     _emit_transport_event(_raw_event_sink, {
                         "record_type": "attempt_start",
@@ -1599,13 +1887,28 @@ class OpenAI_Model:
                         "temperature": effective_temperature,
                         **extra,
                     }
-                    response = client.chat.completions.create(
-                        model=request_model,
-                        messages=messages,
-                        timeout=eff_timeout,
-                        temperature=effective_temperature,
+                    request_kwargs = {
+                        "model": request_model,
+                        "messages": messages,
+                        "timeout": eff_timeout,
+                        "temperature": effective_temperature,
                         **extra,
-                    )
+                    }
+                    if is_opencode_zen:
+                        raw_request_body.update({
+                            "stream": True,
+                            "stream_options": {"include_usage": True},
+                        })
+                        response = _call_openai_compatible_stream(
+                            client,
+                            request_kwargs,
+                            raw_event_sink=_raw_event_sink,
+                            attempt_index=http_attempt_index,
+                        )
+                    else:
+                        response = client.chat.completions.create(
+                            **request_kwargs
+                        )
                     if not is_minimax_official:
                         success_record = {
                             "attempt_index": http_attempt_index,
@@ -1614,6 +1917,10 @@ class OpenAI_Model:
                             "http_status": 200,
                             "stream_complete": True,
                         }
+                        if is_opencode_zen:
+                            success_record.update(
+                                response.pop("_stream_attempt_state", {})
+                            )
                         transport_attempts.append(success_record)
                         _emit_transport_event(_raw_event_sink, {
                             "record_type": "attempt_end",
@@ -1636,54 +1943,77 @@ class OpenAI_Model:
                         continue
                     attempt_index += 1
                     last_err = exc
-                    last_error_type = type(exc).__name__
+                    last_error_type = _transport_error_type(exc)
                     attempt = attempt_index
                     if is_minimax_official:
                         if attempt_index >= max_attempts:
-                            raise RuntimeError(
-                                f"Failed after {max_attempts} attempt(s): {last_err}"
-                            ) from last_err
-                        time.sleep(4)
-                        continue
-                    retryable = _is_retryable_opencode_error(exc)
-                    free_opencode_503 = (
-                        is_opencode_zen
-                        and _transport_status_code(exc) == 503
-                    )
-                    if not free_opencode_503:
-                        retry_budget_attempt_index += 1
-                    attempt_record = {
-                        "attempt_index": http_attempt_index,
-                        "status": (
-                            "retryable_error" if retryable else "fatal_error"
-                        ),
-                        "error_type": _transport_error_type(exc),
-                        "http_status": _transport_status_code(exc),
-                        "stream_complete": False,
-                        "retry_budget_consumed": not free_opencode_503,
-                        "retry_budget_attempt_index": retry_budget_attempt_index,
-                    }
-                    transport_attempts.append(attempt_record)
-                    _emit_transport_event(_raw_event_sink, {
-                        "record_type": "attempt_end",
-                        "attempt_index": http_attempt_index,
-                        "attempt": attempt_record,
-                    })
-                    if not retryable or (
-                        not free_opencode_503
-                        and retry_budget_attempt_index >= max_attempts
-                    ):
-                        raise OpenAICompatibleTransportError(
-                            "OpenAI-compatible provider failed after "
-                            f"{attempt_index} attempt(s)",
-                            attempts=transport_attempts,
-                            last_error=last_err,
-                        ) from last_err
-                    if attempt_record["error_type"] == "rate_limit":
-                        quota_waits += 1
+                            terminal_error = RuntimeError(
+                                f"Failed after {max_attempts} attempt(s): "
+                                f"{_transport_error_message(last_err)}"
+                        )
+                        else:
+                            retry_delay = 4
                     else:
-                        transient_waits += 1
-                    time.sleep(_retry_after_seconds(last_err, attempt_index))
+                        attempt_record = _attempt_from_exception(
+                            exc, http_attempt_index,
+                            int((time.time() - attempt_started) * 1000),
+                        )
+                        retryable = attempt_record["status"] == "retryable_error"
+                        free_opencode_503 = (
+                            is_opencode_zen
+                            and _transport_status_code(exc) == 503
+                            and not attempt_record.get("generation_delta_seen")
+                        )
+                        if not free_opencode_503:
+                            retry_budget_attempt_index += 1
+                        attempt_record["retry_budget_consumed"] = (
+                            not free_opencode_503
+                        )
+                        attempt_record["retry_budget_attempt_index"] = (
+                            retry_budget_attempt_index
+                        )
+                        attempt_record["retry_after_seconds"] = (
+                            _retry_after_seconds(
+                                exc, attempt_index,
+                                exponential_503=is_opencode_zen,
+                            )
+                        )
+                        transport_attempts.append(attempt_record)
+                        _emit_transport_event(_raw_event_sink, {
+                            "record_type": "attempt_end",
+                            "attempt_index": http_attempt_index,
+                            "attempt": attempt_record,
+                        })
+                        if not retryable or (
+                            not free_opencode_503
+                            and retry_budget_attempt_index >= max_attempts
+                        ):
+                            terminal_error = OpenAICompatibleTransportError(
+                                "OpenAI-compatible provider failed after "
+                                f"{attempt_index} attempt(s)",
+                                attempts=transport_attempts,
+                                last_error=last_err,
+                            )
+                        else:
+                            if attempt_record["error_type"] == "rate_limit":
+                                quota_waits += 1
+                            else:
+                                transient_waits += 1
+                            retry_delay = attempt_record["retry_after_seconds"]
+                    if terminal_error is not None:
+                        # The wrapper already owns a sanitized copy. Replace the
+                        # raw SDK exception retained by this generator frame so
+                        # crash reporters that capture frame locals cannot
+                        # recover a provider body or credential.
+                        last_err = _sanitized_transport_cause(last_err)
+                # Raise only after leaving the provider exception handler.  A
+                # ``raise ... from None`` inside ``except`` suppresses display
+                # of the raw SDK exception but still retains it in
+                # ``__context__`` for crash-reporting/introspection code.
+                if terminal_error is not None:
+                    raise terminal_error
+                if retry_delay is not None:
+                    time.sleep(retry_delay)
             if not is_minimax_official:
                 attempt = max(len(transport_attempts) - 1, 0)
 
@@ -1839,8 +2169,10 @@ class OpenAI_Model:
             "finish_reason": finish_reason,
             "stop_reason": resp.get("stop_reason") or finish_reason,
             "stream_complete": (
-                True if (is_minimax_official or not is_minimax)
-                else (resp.get("stream_complete") if is_minimax else None)
+                True if is_minimax_official
+                else resp.get("stream_complete")
+                if (is_minimax or is_opencode_zen)
+                else True
             ),
             "response_classification": (
                 official_classification if is_minimax_official

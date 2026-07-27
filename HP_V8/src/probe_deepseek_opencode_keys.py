@@ -33,6 +33,7 @@ _PROBE_SOURCE = (
     "and r.get('input_tokens') is not None and r.get('output_tokens') is not None),"
     "'text_ok':bool(text),"
     "'provider':r.get('provider'),"
+    "'transport':r.get('transport'),"
     "'transport_revision':r.get('transport_revision'),"
     "'base_url':r.get('base_url'),"
     "'reasoning_effort':r.get('reasoning_effort'),"
@@ -57,7 +58,8 @@ def probe_key(label, value, timeout, max_tokens=512):
     env = dict(os.environ)
     for name in (
             "OPENCODE_API_KEY", "OPENCODE_GO_API_KEY",
-            "OPENCODE_TRANSPORT", "MINIMAX_API_KEY", "MINIMAX_TRANSPORT"):
+            "OPENCODE_TRANSPORT", "MINIMAX_API_KEY", "MINIMAX_TRANSPORT",
+            "AZURE_OPENAI_API_KEY", "AZURE_OPENAI_ENDPOINT"):
         env.pop(name, None)
     env.update({
         "OPENAI_API_KEY": value,
@@ -102,8 +104,9 @@ def probe_key(label, value, timeout, max_tokens=512):
             usage[field] = int(result.get(field) or 0)
         identity_ok = (
             result.get("provider") == "opencode_zen"
+            and result.get("transport") == "openai_sdk_stream"
             and result.get("transport_revision")
-            == "opencode_openai_compatible/3"
+            == "opencode_openai_compatible/4"
             and result.get("base_url") == _BASE_URL
             and result.get("reasoning_effort") == "high"
         )

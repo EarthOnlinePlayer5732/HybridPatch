@@ -21,6 +21,7 @@ import re
 import random
 import fnmatch
 import time
+import threading
 
 import portalocker
 
@@ -46,6 +47,7 @@ from run_meta import (RunLogger, dump_step_docs, append_run_metadata,
                       enforce_campaign_runtime_guards,
                       read_campaign_stop_conditions,
                       record_campaign_stop_condition,
+                      record_emergency_campaign_stop_condition,
                       record_sample_outcome)
 from hybrid_prompt import (build_hybrid_prompt, build_hybrid_repair_prompt,
                            classify_operation_family, extract_hybrid_json)
@@ -62,6 +64,86 @@ SAMPLES_ROOT = os.path.join(_ROOT, "data", "samples_delegate52")
 RESULTS_DIR = os.path.join(_HERE, "experiment_results")
 DEFAULT_SAMPLES = ["accounting1", "accounting2", "accounting3", "accounting4",
                    "accounting5", "accounting6", "calendar1", "calendar5"]
+
+
+def _record_dispatcher_parent_loss(out_dir, dispatcher_pid, instance_id):
+    """Write lock-independent stop evidence before an orphan exits."""
+    try:
+        record_emergency_campaign_stop_condition(
+            out_dir,
+            "dispatcher_process_lost",
+            dispatcher_pid=dispatcher_pid,
+            dispatcher_instance_id=instance_id,
+        )
+    except BaseException:
+        # Parent loss must still terminate the paid worker if the filesystem
+        # itself can no longer accept durable evidence.
+        pass
+
+
+def _start_dispatcher_parent_watchdog(out_dir):
+    """Stop a paid worker if its owning dispatcher process disappears."""
+    raw_pid = os.environ.get("ANCHORPATCH_DISPATCHER_PID")
+    instance_id = os.environ.get("ANCHORPATCH_DISPATCHER_INSTANCE_ID")
+    if raw_pid is None and instance_id is None:
+        return None
+    try:
+        dispatcher_pid = int(raw_pid or "")
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("dispatcher parent watchdog identity is invalid") from exc
+    if dispatcher_pid <= 0 or not instance_id:
+        raise RuntimeError("dispatcher parent watchdog identity is invalid")
+
+    if os.name == "nt":
+        import ctypes
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = ctypes.c_void_p
+        handle = kernel32.OpenProcess(0x00100000, False, dispatcher_pid)
+        if not handle:
+            _record_dispatcher_parent_loss(
+                out_dir, dispatcher_pid, instance_id)
+            raise RuntimeError("dispatcher process exited before worker start")
+
+        def _watch():
+            try:
+                result = kernel32.WaitForSingleObject(
+                    ctypes.c_void_p(handle), 0xFFFFFFFF)
+                if result in (0, 0xFFFFFFFF):
+                    _record_dispatcher_parent_loss(
+                        out_dir, dispatcher_pid, instance_id)
+                    os._exit(97)
+            finally:
+                kernel32.CloseHandle(ctypes.c_void_p(handle))
+    else:
+        try:
+            os.kill(dispatcher_pid, 0)
+        except OSError as exc:
+            _record_dispatcher_parent_loss(
+                out_dir, dispatcher_pid, instance_id)
+            raise RuntimeError(
+                "dispatcher process exited before worker start") from exc
+
+        def _watch():
+            while True:
+                if os.getppid() != dispatcher_pid:
+                    _record_dispatcher_parent_loss(
+                        out_dir, dispatcher_pid, instance_id)
+                    os._exit(97)
+                try:
+                    os.kill(dispatcher_pid, 0)
+                except OSError:
+                    _record_dispatcher_parent_loss(
+                        out_dir, dispatcher_pid, instance_id)
+                    os._exit(97)
+                time.sleep(1)
+
+    thread = threading.Thread(
+        target=_watch,
+        name=f"dispatcher-watchdog-{dispatcher_pid}",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 class EvaluatorIncompleteError(RuntimeError):
@@ -167,6 +249,31 @@ def _record_preservation_stop(out_dir, method, sample_id, rt_num,
     return True
 
 
+def _record_preservation_stop_from_step(
+        out_dir, method, sample_id, rt_num, direction, exec_log, meta):
+    """Latch a violation before evaluator code can obscure it."""
+    count = getattr(exec_log, "preservation_violations", None)
+    if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+        return False
+    call_ids = []
+    if isinstance(meta, dict):
+        call_ids = list(meta.get("api_call_ids") or [])
+        if not call_ids and meta.get("api_call_id"):
+            call_ids = [meta["api_call_id"]]
+    record_campaign_stop_condition(
+        out_dir,
+        "preservation_violation",
+        method=method,
+        sample=sample_id,
+        round_trip_num=rt_num,
+        direction=direction,
+        preservation_violations=count,
+        result_committed=False,
+        api_call_ids=call_ids,
+    )
+    return True
+
+
 def _enforce_post_call_campaign_guard(out_dir, sample_id):
     """Prevent an in-flight response from committing after a global stop.
 
@@ -178,11 +285,21 @@ def _enforce_post_call_campaign_guard(out_dir, sample_id):
     enforce_campaign_runtime_guards(out_dir, sample_id)
 
 
-def _require_formal_dispatch_environment(out_dir, samples):
+def _require_formal_dispatch_environment(out_dir, samples, model=None):
     """Prevent an unleased standalone runner from joining a paired campaign."""
     manifest_path = os.path.join(
         os.path.abspath(out_dir), "dispatch_manifest.json")
     if not os.path.isfile(manifest_path):
+        if model is not None:
+            from model_openai import resolve_model_name
+            if (
+                    resolve_model_name(str(model)).lower().startswith(
+                        "deepseek-v4-")
+                    and len(samples) > 1):
+                raise RuntimeError(
+                    "multi-sample DeepSeek-V4 experiments require the paired "
+                    "dispatcher manifest"
+                )
         return
     required = [
         "ANCHORPATCH_WORKER_LAUNCH_ID",
@@ -297,7 +414,9 @@ def _real_generate(*a, **k):
 
 
 def _require_formal_opencode_transport(model, reasoning_effort=None):
-    model_l = str(model).lower()
+    from model_openai import model_runtime_config, resolve_model_name
+    resolved_model = resolve_model_name(str(model))
+    model_l = resolved_model.lower()
     if model_l.startswith("deepseek-v4-"):
         base_url = (os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
         if base_url != "https://opencode.ai/zen/go/v1":
@@ -309,6 +428,16 @@ def _require_formal_opencode_transport(model, reasoning_effort=None):
             raise RuntimeError(
                 "formal OpenCode DeepSeek-V4 experiments require "
                 "reasoning_effort=high"
+            )
+        runtime = model_runtime_config(
+            resolved_model, max_tokens=20000,
+            reasoning_effort=reasoning_effort)
+        if (runtime.get("transport") != "openai_sdk_stream"
+                or runtime.get("transport_revision")
+                != "opencode_openai_compatible/4"):
+            raise RuntimeError(
+                "formal OpenCode DeepSeek-V4 experiments require "
+                "opencode_openai_compatible/4 streaming transport"
             )
         return
     if not model_l.startswith("minimax-m3"):
@@ -992,6 +1121,15 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
         except Exception:
             log.close()
             raise
+        if (stop_on_preservation_violation
+                and _record_preservation_stop_from_step(
+                    out_dir, method, sample_id, rt_num, "forward",
+                    elog, meta)):
+            log.close()
+            raise RuntimeError(
+                f"preservation_violations>0 at "
+                f"{method}/{sample_id}/RT{rt_num}/forward"
+            )
         fwd_changed = (gen_real != in_real)
         with log.capture("eval"):
             evaluation = _evaluate(
@@ -1046,6 +1184,15 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
         except Exception:
             log.close()
             raise
+        if (stop_on_preservation_violation
+                and _record_preservation_stop_from_step(
+                    out_dir, method, sample_id, rt_num, "backward",
+                    elog, meta)):
+            log.close()
+            raise RuntimeError(
+                f"preservation_violations>0 at "
+                f"{method}/{sample_id}/RT{rt_num}/backward"
+            )
         bwd_changed = (gen_real != in_real)
         with log.capture("eval"):
             evaluation = _evaluate(
@@ -1283,6 +1430,7 @@ def main():
              "preservation violation",
     )
     args = ap.parse_args()
+    _start_dispatcher_parent_watchdog(args.out_dir)
     method_phase = os.environ.get("ANCHORPATCH_METHOD_PHASE")
     if method_phase and args.methods != [method_phase]:
         raise RuntimeError(
@@ -1296,7 +1444,8 @@ def main():
     elif args.max_tokens is None and not str(args.model).lower().startswith("minimax-m3"):
         args.max_tokens = 20000
     _require_formal_opencode_transport(args.model, args.reasoning_effort)
-    _require_formal_dispatch_environment(args.out_dir, args.sample)
+    _require_formal_dispatch_environment(
+        args.out_dir, args.sample, args.model)
 
     fr_baseline = None
     if args.fr_baseline and os.path.exists(args.fr_baseline):
@@ -1395,6 +1544,22 @@ def main():
                 },
                 **outcome_phase,
             )
+        else:
+            # Unknown worker failures are campaign-wide by default.  Latch
+            # immediately so sibling pre-call guards stop before the
+            # dispatcher reaches its next polling cycle.
+            try:
+                record_campaign_stop_condition(
+                    args.out_dir,
+                    "worker_fatal_error",
+                    sample=(args.sample[0] if len(args.sample) == 1 else None),
+                    methods=list(args.methods),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                    invocation_id=run_metadata["invocation_id"],
+                )
+            except BaseException:
+                pass
         raise
     finally:
         finish_run_metadata(

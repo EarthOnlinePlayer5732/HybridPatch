@@ -1,6 +1,47 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-27 - Correction: next DeepSeek full234 is RT10 stream
+
+- `exp_dsv4f_hpfr_full234_rt2_c10_r3` 是已中止的 RT2、non-stream supporting
+  experiment；原目录与证据保持原样，不原地扩展为 RT10。
+- 下一次正式 `deepseek_full234` 使用新 `out_dir`，固定 234 sample、HP_V8
+  `hybridpatch/8` 对 `fullrewrite`、RT10、3 个 Key、每 Key 10 槽、
+  work-conserving FIFO。
+- runtime 升为 `opencode_openai_compatible/4`：
+  `https://opencode.ai/zen/go/v1/chat/completions`、OpenAI-compatible stream、
+  `stream_options.include_usage=true`、`reasoning_effort=high`。只有非空 finish
+  reason 后出现 token 计数完整一致的 usage-only terminal chunk 才可提交；
+  partial、乱序或空 usage stream 丢弃并全量重发。
+- 旧档共观察到 1,975 个 503 attempt（357 个 call）和 17 个 502 attempt
+  （11 个 call）；约 2,000 是 HTTP attempt 数，不是 2,000 个 sample 或 terminal
+  failure。旧 ledger 未保存 503 body，因此不能追溯判定每次 503 的具体来源。
+- 三个 terminal 502 console 均保留 Cloudflare `origin_bad_gateway` 结构化 body：
+  `inference.opencode.ai` origin 返回无效或不完整响应，建议至少等待 60 秒。`/4`
+  保留所有 502/503 脱敏 body/message，并正确执行 provider `Retry-After`；终端异常
+  不再通过 traceback chain、exception context 或 frame locals 保留原始 provider body。
+- Dispatcher hardening：result/API snapshot 继续按发布逆序读取；异常 reconciliation
+  检查完整 sample lease scope，不能把仍活的 orphan 撤权；worker 监控 dispatcher
+  parent，parent 丢失即快速退出；preservation 在 evaluator 前锁存；未分类 worker
+  fatal 在 worker 侧立即锁存；Windows atomic JSON/JSONL 读写的短暂 sharing
+  violation 先做有界重试，只有持续不可读或结构损坏才 fail-closed。尚未启动新的
+  正式实验。
+- parent-loss recovery 使用独立 dispatcher lease 与 pending transaction，完整绑定
+  canonical/emergency stop cohort、active/metadata/dispatch/API/attempt/stream
+  sidecar。支持 active-only、intent-only、launch 未落盘、metadata 未落盘、调用中
+  断开与连续 parent loss；首个 worker 仅登记未启动且无 stop 时，只有 dispatcher
+  lease 与全部 sample lease 空闲、零 execution/API evidence 才合成专用 stop。不同
+  worker 的 emergency stop 不再互相覆盖。恢复中途失败可无重复重试，已提交 RT
+  不改写；迟到旧 worker 不会重新锁存已恢复 campaign，本次已 terminal 的 sample
+  也会从累计 resume scope 删除。emergency stop 发布与 parent-loss
+  snapshot→pending→archive 事务使用独立 publication lock 串行化。
+- bounded live diagnostic：同一 `KEY_1` 的短提示 stream 分别跑单轮 c10 与 c15；
+  25/25 调用均为完整 HTTP 200、`opencode_openai_compatible/4`、high reasoning、
+  terminal usage 完整，合计 3,790 tokens，0 retry、0 个 502/503。证据位于
+  `HP_V8/exp_dsv4f_stream_c10_error_diag_20260727` 与
+  `HP_V8/exp_dsv4f_stream_c15_error_diag_20260727`。本轮没有复现 5xx，因此不把
+  capacity15 历史 503 body 冒充为错误 RT2 full234 档的 exact body，也不继续压测。
+
 ## 2026-07-26 - Before Experiment: DeepSeek V4 Flash OpenCode full234 RT2 c10 503-free retry
 
 - experiment:

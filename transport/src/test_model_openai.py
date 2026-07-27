@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tempfile
+import traceback
 import unittest
 from unittest import mock
 
@@ -1776,6 +1777,52 @@ def _official_payload(content="Hello", finish_reason="stop"):
     }
 
 
+def _stream_chunks_from_payload(payload):
+    choice = (payload.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    common = {
+        "id": payload.get("id"),
+        "model": "deepseek-v4-flash",
+    }
+    chunks = [{
+        **common,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "reasoning_details": message.get("reasoning_details") or [],
+            },
+            "finish_reason": None,
+        }],
+        "usage": None,
+    }]
+    if message.get("content") is not None:
+        chunks.append({
+            **common,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": message.get("content")},
+                "finish_reason": None,
+            }],
+            "usage": None,
+        })
+    chunks.append({
+        **common,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": choice.get("finish_reason"),
+        }],
+        "usage": None,
+    })
+    chunks.append({
+        **common,
+        "choices": [],
+        "usage": payload.get("usage"),
+    })
+    return chunks
+
+
 def _official_client_factory(outcomes, captures):
     """outcomes: list of payload dicts or Exceptions, consumed per call."""
 
@@ -1785,6 +1832,19 @@ def _official_client_factory(outcomes, captures):
             outcome = outcomes.pop(0)
             if isinstance(outcome, Exception):
                 raise outcome
+            if kwargs.get("stream"):
+                chunks = (
+                    outcome if isinstance(outcome, list)
+                    else _stream_chunks_from_payload(outcome)
+                )
+
+                def _iter_chunks():
+                    for chunk in chunks:
+                        if isinstance(chunk, Exception):
+                            raise chunk
+                        yield chunk
+
+                return _iter_chunks()
             return _FakeOfficialResponse(outcome)
 
     class _Chat:
@@ -1803,6 +1863,8 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         env = {
             "OPENAI_API_KEY": "unit-test-key",
             "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "AZURE_OPENAI_API_KEY": "",
+            "AZURE_OPENAI_ENDPOINT": "",
         }
         fake_cls = _official_client_factory(list(outcomes), captures)
         events = []
@@ -1835,24 +1897,32 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(request["model"], "deepseek-v4-flash")
         self.assertEqual(request["reasoning_effort"], "high")
         self.assertEqual(request["max_completion_tokens"], 20000)
+        self.assertIs(request["stream"], True)
+        self.assertEqual(
+            request["stream_options"], {"include_usage": True})
         self.assertEqual(
             result["_raw_request_body"]["reasoning_effort"], "high")
         self.assertEqual(result["provider"], "opencode_zen")
-        self.assertEqual(result["transport"], "openai_sdk_nonstream")
+        self.assertEqual(result["transport"], "openai_sdk_stream")
         self.assertEqual(
-            result["transport_revision"], "opencode_openai_compatible/3")
+            result["transport_revision"], "opencode_openai_compatible/4")
         self.assertEqual(
             result["request_url"],
             "https://opencode.ai/zen/go/v1/chat/completions")
         self.assertEqual(result["reasoning_effort"], "high")
+        self.assertIs(result["stream_complete"], True)
+        self.assertEqual(len(result["_raw_stream_events"]), 4)
         self.assertEqual(result["http_attempts_used"], 1)
         self.assertEqual(result["retry_count"], 0)
         self.assertEqual(result["cost_currency"], "USD")
         self.assertAlmostEqual(result["total_usd"], 0.00000252)
         self.assertEqual(result["total_cny"], 0.0)
+        self.assertEqual(events[0]["record_type"], "attempt_start")
+        self.assertEqual(events[-1]["record_type"], "attempt_end")
         self.assertEqual(
-            [event["record_type"] for event in events],
-            ["attempt_start", "attempt_end"],
+            sum(event["record_type"] == "sdk_stream_event"
+                for event in events),
+            4,
         )
 
     def test_retryable_failure_is_bounded_and_recorded(self):
@@ -1872,15 +1942,22 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             ["retryable_error", "success"],
         )
         self.assertEqual(
-            [event["record_type"] for event in events],
+            [event["record_type"] for event in events
+             if event["record_type"] != "sdk_stream_event"],
             ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
         )
 
     def test_503_retries_do_not_consume_retry_budget(self):
         captures = []
+        body = {
+            "error_name": "failover_exhausted",
+            "detail": "Inference is temporarily unavailable",
+            "retry_after": 12,
+        }
         result, _events = self._generate(
             [
-                model_openai._HTTPStatusError(503, "unavailable"),
+                model_openai._HTTPStatusError(
+                    503, json.dumps(body, ensure_ascii=False)),
                 model_openai._HTTPStatusError(503, "unavailable"),
                 model_openai._HTTPStatusError(503, "unavailable"),
                 _official_payload(content="Hello", finish_reason="stop"),
@@ -1898,6 +1975,196 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertTrue(all(
             item["retry_budget_attempt_index"] == 0 for item in failed
         ))
+        self.assertEqual(failed[0]["error_body"], body)
+        self.assertEqual(failed[0]["retry_after_seconds"], 12)
+        self.assertGreaterEqual(failed[1]["retry_after_seconds"], 10)
+        self.assertGreater(
+            failed[2]["retry_after_seconds"],
+            failed[1]["retry_after_seconds"],
+        )
+        self.assertLessEqual(failed[2]["retry_after_seconds"], 300)
+
+    def test_partial_stream_is_discarded_and_retried(self):
+        captures = []
+        partial = [{
+            "id": "partial",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "must-not-leak"},
+                "finish_reason": None,
+            }],
+            "usage": None,
+        }]
+        result, _events = self._generate(
+            [partial, _official_payload(content="complete")],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        self.assertEqual(result["failed_attempt_count"], 1)
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(first["http_status"], 200)
+        self.assertEqual(first["response_started_http_status"], 200)
+        self.assertTrue(first["generation_delta_seen"])
+        self.assertTrue(first["retry_budget_consumed"])
+        self.assertNotIn("must-not-leak", result["message"])
+
+    def test_503_after_generation_delta_consumes_stream_retry_budget(self):
+        captures = []
+        partial = [
+            {
+                "id": "partial-503",
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "must-not-leak"},
+                    "finish_reason": None,
+                }],
+                "usage": None,
+            },
+            model_openai._HTTPStatusError(
+                503,
+                json.dumps({
+                    "error_name": "failover_exhausted",
+                    "detail": "Inference is temporarily unavailable",
+                })),
+        ]
+        result, _events = self._generate(
+            [partial, _official_payload(content="complete")],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["http_status"], 503)
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertTrue(first["generation_delta_seen"])
+        self.assertTrue(first["retry_budget_consumed"])
+        self.assertEqual(first["retry_budget_attempt_index"], 1)
+        self.assertEqual(result["message"], "complete")
+
+    def test_usage_before_finish_is_not_terminal_usage(self):
+        captures = []
+        malformed = [{
+            "id": "early-usage",
+            "model": "deepseek-v4-flash",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+            },
+        }, *_stream_chunks_from_payload(_official_payload(content="bad"))]
+        result, _events = self._generate(
+            [malformed, _official_payload(content="complete")],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertFalse(first["terminal_sequence_valid"])
+        self.assertEqual(first["http_status"], 200)
+        self.assertEqual(result["message"], "complete")
+
+    def test_empty_terminal_usage_is_incomplete(self):
+        captures = []
+        malformed = _stream_chunks_from_payload(
+            _official_payload(content="bad"))
+        malformed[-1] = {**malformed[-1], "usage": {}}
+        result, _events = self._generate(
+            [malformed, _official_payload(content="complete")],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertFalse(first["final_usage_seen"])
+        self.assertEqual(first["http_status"], 200)
+        self.assertEqual(result["message"], "complete")
+
+    def test_reasoning_only_stream_is_complete_model_empty(self):
+        captures = []
+        payload = _official_payload(content="", finish_reason="stop")
+        result, _events = self._generate([payload], captures)
+        self.assertEqual(result["message"], "")
+        self.assertTrue(result["stream_complete"])
+        self.assertEqual(result["response_classification"], "model_empty")
+        attempt = result["transport_attempts"][-1]
+        self.assertTrue(attempt["thinking_delta_seen"])
+        self.assertTrue(attempt["final_usage_seen"])
+        self.assertTrue(attempt["terminal_sequence_valid"])
+
+    def test_502_body_is_preserved_redacted_and_retry_after_is_honored(self):
+        captures = []
+        body = {
+            "error_name": "origin_bad_gateway",
+            "retry_after": 60,
+            "detail": "unit-test-key",
+        }
+        result, _events = self._generate(
+            [
+                model_openai._HTTPStatusError(
+                    502, json.dumps(body, ensure_ascii=False)),
+                _official_payload(),
+            ],
+            captures,
+        )
+        attempt = result["transport_attempts"][0]
+        self.assertEqual(attempt["http_status"], 502)
+        self.assertEqual(attempt["error_body"], {
+            "error_name": "origin_bad_gateway",
+            "retry_after": 60,
+            "detail": "<redacted-key>",
+        })
+        self.assertEqual(attempt["retry_after_seconds"], 60)
+        self.assertTrue(attempt["retry_budget_consumed"])
+
+    def test_terminal_5xx_traceback_does_not_retain_provider_secret(self):
+        captures = []
+        secret = "unit-test-key"
+        body = json.dumps({
+            "error_name": "origin_bad_gateway",
+            "detail": secret,
+        })
+        fake_cls = _official_client_factory(
+            [model_openai._HTTPStatusError(502, body)], captures)
+        events = []
+        with mock.patch.dict(os.environ, {
+                "OPENAI_API_KEY": secret,
+                "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+                "AZURE_OPENAI_API_KEY": "",
+                "AZURE_OPENAI_ENDPOINT": "",
+        }, clear=False), mock.patch.object(
+                model_openai, "OpenAI", fake_cls), mock.patch.object(
+                    model_openai.time, "sleep"):
+            with self.assertRaises(
+                    model_openai.OpenAICompatibleTransportError) as caught:
+                model_openai.OpenAI_Model().generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="deepseek-v4-flash",
+                    max_tokens=20000,
+                    max_retries=1,
+                    reasoning_effort="high",
+                    return_metadata=True,
+                    _raw_event_sink=events.append,
+                )
+
+        rendered = "".join(traceback.format_exception(
+            caught.exception))
+        attempts = json.dumps(
+            caught.exception.transport_attempts, ensure_ascii=False)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn(secret, str(caught.exception.last_error))
+        self.assertNotIn(secret, attempts)
+        self.assertIn("<redacted-key>", attempts)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+        frame_last_errors = []
+        trace = caught.exception.__traceback__
+        while trace is not None:
+            if trace.tb_frame.f_code.co_filename == model_openai.__file__:
+                retained = trace.tb_frame.f_locals.get("last_err")
+                if retained is not None:
+                    frame_last_errors.append(retained)
+            trace = trace.tb_next
+        self.assertNotIn(secret, repr(frame_last_errors))
 
     def test_runtime_config_and_reasoning_validation(self):
         with mock.patch.dict(
@@ -1912,10 +2179,29 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             )
         self.assertEqual(config["provider"], "opencode_zen")
         self.assertEqual(
-            config["transport_revision"], "opencode_openai_compatible/3")
+            config["transport_revision"], "opencode_openai_compatible/4")
+        self.assertEqual(config["transport"], "openai_sdk_stream")
         self.assertEqual(config["reasoning_effort"], "high")
         with self.assertRaises(ValueError):
             model_openai._effective_reasoning_effort("ultra")
+
+    def test_opencode_zen_rejects_inherited_azure_client_environment(self):
+        with mock.patch.dict(os.environ, {
+            "OPENAI_API_KEY": "unit-test-key",
+            "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "AZURE_OPENAI_API_KEY": "azure-key",
+            "AZURE_OPENAI_ENDPOINT": "https://azure.invalid",
+        }, clear=False), mock.patch.object(
+                model_openai, "AzureOpenAI") as azure_client:
+            with self.assertRaisesRegex(RuntimeError, "forbids inherited"):
+                model_openai.model_runtime_config(
+                    "deepseek-v4-flash",
+                    max_tokens=20000,
+                    reasoning_effort="high",
+                )
+            with self.assertRaisesRegex(RuntimeError, "forbids inherited"):
+                model_openai.OpenAI_Model()._default_client()
+        azure_client.assert_not_called()
 
 
 class MinimaxOfficialTransportTests(unittest.TestCase):

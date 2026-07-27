@@ -36,6 +36,7 @@ for _path in (_ROOT, _HERE):
 from experiment_runner import _require_formal_opencode_transport
 from fr_baseline_dispatch import read_keys
 from run_meta import (
+    DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
     _canonical_record_sha256,
     _git_identity,
     _validated_transport_ledger_state,
@@ -60,11 +61,15 @@ from utils_relay_plan import (
 
 SCHEMA = "anchorpatch.paired_campaign_manifest/1"
 TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
-DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/3"
+DEEPSEEK_TRANSPORT = "openai_sdk_stream"
+DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/4"
+DEEPSEEK_LEGACY_TRANSPORT = "openai_sdk_nonstream"
+DEEPSEEK_LEGACY_TRANSPORT_REVISION = "opencode_openai_compatible/3"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEEPSEEK_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEEPSEEK_REASONING_EFFORT = "high"
 DEEPSEEK_MAX_TOKENS = 20000
+DEEPSEEK_FULL234_ROUND_TRIPS = 10
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
@@ -101,6 +106,7 @@ FULL234_SLOTS_PER_KEY = 4
 DEEPSEEK_CAPACITY_SLOTS_PER_KEY = 15
 DEEPSEEK_FULL_SLOTS_PER_KEY = 10
 DEEPSEEK_CAPACITY_KEY_COUNT = 1
+DEEPSEEK_FULL_KEY_COUNT = 3
 DEEPSEEK_CAPACITY_SAMPLES = [
     "earncall1", "latex6", "screenplay4", "dbschema1", "circuit4",
     "json4", "vector2", "fonteng1", "treebank1", "genealogy6",
@@ -149,7 +155,7 @@ def _campaign_runtime_config(args):
             "model": DEEPSEEK_MODEL,
             "max_tokens": DEEPSEEK_MAX_TOKENS,
             "provider": "opencode_zen",
-            "transport": "openai_sdk_nonstream",
+            "transport": DEEPSEEK_TRANSPORT,
             "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
             "transport_resume_policy": None,
             "openai_base_url": DEEPSEEK_BASE_URL,
@@ -692,7 +698,8 @@ def _validate_campaign_grid(args):
     elif args.campaign_role in {"full234", "deepseek_full234"}:
         scope = _argument_value(args, "_full234_scope_record", {}) or {}
         expected_rt = (
-            2 if args.campaign_role == "deepseek_full234" else 10
+            DEEPSEEK_FULL234_ROUND_TRIPS
+            if args.campaign_role == "deepseek_full234" else 10
         )
         expected_slots = (
             DEEPSEEK_FULL_SLOTS_PER_KEY
@@ -740,8 +747,17 @@ def _sha256(path):
 
 
 def _read_json(path):
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+        except FileNotFoundError:
+            raise
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _canonical_json_bytes(value):
@@ -1629,41 +1645,56 @@ def _resolve_confirmation_selection(args, out_dir=None):
 
 
 def _read_jsonl(path):
-    records = []
     if not os.path.exists(path):
-        return records
-    with open(path, encoding="utf-8") as handle:
-        # Writers use an exclusive portalocker lock for each complete append.
-        # A shared read lock prevents the monitor from mistaking a live tail
-        # fragment (large raw responses included) for permanent corruption.
-        portalocker.lock(handle, portalocker.LOCK_SH)
+        return []
+    deadline = time.monotonic() + 60.0
+    while True:
         try:
-            for line_number, line in enumerate(
-                    handle.read().splitlines(), 1):
-                if not line.strip():
-                    continue
+            records = []
+            with open(path, encoding="utf-8") as handle:
+                # Writers use an exclusive lock for each complete append.
+                # Wait through ordinary live-writer contention instead of
+                # turning one Windows sharing failure into a campaign stop.
+                portalocker.lock(handle, portalocker.LOCK_SH)
                 try:
-                    record = json.loads(line)
-                except ValueError as exc:
-                    raise RuntimeError(
-                        f"invalid JSONL record at {path}:{line_number}"
-                    ) from exc
-                if not isinstance(record, dict):
-                    raise RuntimeError(
-                        f"non-object JSONL record at {path}:{line_number}"
-                    )
-                records.append(record)
-        finally:
-            portalocker.unlock(handle)
-    return records
+                    for line_number, line in enumerate(
+                            handle.read().splitlines(), 1):
+                        if not line.strip():
+                            continue
+                        try:
+                            record = json.loads(line)
+                        except ValueError as exc:
+                            raise RuntimeError(
+                                f"invalid JSONL record at "
+                                f"{path}:{line_number}"
+                            ) from exc
+                        if not isinstance(record, dict):
+                            raise RuntimeError(
+                                f"non-object JSONL record at "
+                                f"{path}:{line_number}"
+                            )
+                        records.append(record)
+                finally:
+                    portalocker.unlock(handle)
+            return records
+        except FileNotFoundError:
+            return []
+        except (OSError, portalocker.exceptions.LockException):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 def _latest_sample_outcomes(
-        out_dir, expected_samples=None, *, method_phase=None):
+        out_dir, expected_samples=None, *, method_phase=None,
+        records=None):
     latest = {}
     latest_by_phase = {}
     expected = set(expected_samples or [])
-    for index, record in enumerate(read_sample_outcomes(out_dir), 1):
+    outcome_records = (
+        read_sample_outcomes(out_dir) if records is None else records
+    )
+    for index, record in enumerate(outcome_records, 1):
         sample = record.get("sample")
         status = record.get("status")
         record_phase = record.get("method_phase")
@@ -1951,40 +1982,130 @@ def _verify_queued_pending_samples(
             )
 
 
-def _deepseek_failed_retry_row(row):
+def _valid_deepseek_failed_retry_evidence(row):
+    """Validate the complete attempt chain for one exhausted DeepSeek call."""
     attempts = row.get("transport_attempts")
-    final_attempt = attempts[-1] if isinstance(
-        attempts, list) and attempts else {}
-    final_budget = final_attempt.get("retry_budget_attempt_index")
+    runtime_identity = (
+        row.get("transport"), row.get("transport_revision"))
+    is_current_stream = runtime_identity == (
+        DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION)
+    is_frozen_legacy = runtime_identity == (
+        DEEPSEEK_LEGACY_TRANSPORT,
+        DEEPSEEK_LEGACY_TRANSPORT_REVISION,
+    )
+    http_attempts_used = row.get("http_attempts_used")
+    if (not (is_current_stream or is_frozen_legacy)
+            or not isinstance(attempts, list) or not attempts
+            or (
+                http_attempts_used != len(attempts)
+                and not (
+                    is_frozen_legacy and http_attempts_used is None
+                )
+            )
+            or row.get("retry_count") != len(attempts) - 1
+            or row.get("failed_attempt_count") != len(attempts)):
+        return False
+
+    max_attempts = row.get("max_retries")
+    if is_frozen_legacy and max_attempts is None:
+        # Frozen /3 failure rows predate persistence of the request-side
+        # max_retries field; the formal runner was fixed at three.
+        max_attempts = 3
+    if (not _is_exact_int(max_attempts) or max_attempts < 1):
+        return False
+
+    budget_attempt_index = 0
+    for expected_index, attempt in enumerate(attempts, 1):
+        if (not isinstance(attempt, dict)
+                or attempt.get("attempt_index") != expected_index
+                or attempt.get("status") != "retryable_error"
+                or not isinstance(attempt.get("error_type"), str)
+                or not attempt.get("error_type")):
+            return False
+        if (is_current_stream
+                and not isinstance(
+                    attempt.get("generation_delta_seen"), bool)):
+            return False
+        free_503 = (
+            attempt.get("http_status") == 503
+            and (
+                attempt.get("generation_delta_seen") is False
+                if is_current_stream
+                else not attempt.get("generation_delta_seen")
+            )
+        )
+        if attempt.get("retry_budget_consumed") is not (not free_503):
+            return False
+        if not free_503:
+            budget_attempt_index += 1
+        if attempt.get(
+                "retry_budget_attempt_index") != budget_attempt_index:
+            return False
+
+    final_attempt = attempts[-1]
+    return (
+        budget_attempt_index == max_attempts
+        and final_attempt.get("retry_budget_consumed") is True
+        and row.get("http_status") == final_attempt.get("http_status")
+        and row.get("error_type") == final_attempt.get("error_type")
+    )
+
+
+def _deepseek_failed_retry_row(row):
     return (
         row.get("model") == DEEPSEEK_MODEL
         and row.get("classification") == "provider/API failure"
-        and row.get("error_type") == "server_error"
-        and row.get("http_status") in {502, 503}
+        and isinstance(row.get("error_type"), str)
         and row.get("provider_called") is True
         and row.get("stream_complete") is False
         and row.get("response_replayed") is False
         and row.get("count_as_method_failure") is False
-        and isinstance(final_budget, int)
-        and not isinstance(final_budget, bool)
-        and final_budget >= 3
-        and final_attempt.get("status") == "retryable_error"
-        and final_attempt.get("retry_budget_consumed") is True
+        and _valid_deepseek_failed_retry_evidence(row)
     )
+
+
+def _deepseek_campaign_runtime_identity(out_dir):
+    manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+    if not os.path.isfile(manifest_path):
+        return None
+    manifest = _read_json(manifest_path)
+    config = manifest.get("config") if isinstance(manifest, dict) else None
+    identity = (
+        (config or {}).get("transport"),
+        (config or {}).get("transport_revision"),
+    )
+    if ((config or {}).get("model") != DEEPSEEK_MODEL
+            or identity not in {
+                (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+                (
+                    DEEPSEEK_LEGACY_TRANSPORT,
+                    DEEPSEEK_LEGACY_TRANSPORT_REVISION,
+                ),
+            }):
+        return None
+    return identity
 
 
 def _verified_deepseek_resume_missing_samples(out_dir, assignments):
     """Allow DeepSeek queued, interrupted, or server-retry-exhausted samples."""
     samples = [item["sample"] for item in assignments]
     sample_set = set(samples)
-    recovered_worker_ids = campaign_recovery_incident_evidence(
-        out_dir)["worker_launch_ids"]
+    recovery_incidents = campaign_recovery_incident_evidence(out_dir)
+    recovered_worker_ids = recovery_incidents["worker_launch_ids"]
+    parent_loss_workers = recovery_incidents[
+        "dispatcher_parent_loss_workers"
+    ]
     latest_metadata = {}
-    for record in read_run_metadata_snapshot(out_dir):
+    metadata_rows = read_run_metadata_snapshot(out_dir)
+    for record in metadata_rows:
         for sample in record.get("samples") or []:
             if sample in sample_set:
                 latest_metadata[sample] = record
     dispatch_rows = _read_jsonl(os.path.join(out_dir, "dispatch_log.jsonl"))
+    launches_by_worker = {
+        row.get("worker_launch_id"): row for row in dispatch_rows
+        if row.get("event") == "launch"
+    }
     exits_by_worker = {
         row.get("worker_launch_id"): row for row in dispatch_rows
         if row.get("event") == "worker_exit"
@@ -2000,6 +2121,42 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
         evidence = _queued_pending_evidence(
             out_dir, sample, item.get("methods") or [])
         if not evidence:
+            allowed.add(sample)
+            continue
+        parent_worker = parent_loss_workers.get(sample)
+        if isinstance(parent_worker, dict) and parent_worker.get(
+                "status") in {"preauthorization", "registered_prelaunch"}:
+            parent_worker_id = parent_worker.get("worker_launch_id")
+            parent_status = parent_worker.get("status")
+            parent_exit = exits_by_worker.get(parent_worker_id)
+            parent_launch = launches_by_worker.get(parent_worker_id)
+            parent_metadata = [
+                row for row in metadata_rows
+                if row.get("worker_launch_id") == parent_worker_id
+            ]
+            preauthorization_valid = (
+                parent_status == "preauthorization"
+                and isinstance(parent_launch, dict)
+                and parent_launch.get("sample") == sample
+                and isinstance(parent_exit, dict)
+                and parent_exit.get("sample") == sample
+                and parent_exit.get("pid") == parent_launch.get("pid")
+                and parent_exit.get("returncode") == 97
+                and parent_exit.get("disposition") == "campaign_fatal"
+            )
+            registered_valid = (
+                parent_status == "registered_prelaunch"
+                and parent_launch is None
+                and parent_exit is None
+            )
+            if (parent_worker_id not in recovered_worker_ids
+                    or _worker_lease_is_held(out_dir, sample)
+                    or parent_metadata
+                    or api_rows_by_worker.get(parent_worker_id)
+                    or not (preauthorization_valid or registered_valid)):
+                raise RuntimeError(
+                    "queued resume parent-loss preauthorization evidence "
+                    f"is invalid: {sample}")
             allowed.add(sample)
             continue
         metadata = latest_metadata.get(sample)
@@ -2275,8 +2432,14 @@ def _verified_interrupted_phase_resume(
 
 
 def _verified_deepseek_infrastructure_incomplete(
-        out_dir, sample, item, outcome):
+        out_dir, sample, item, outcome, *, require_current_progress=True,
+        metadata_snapshot=None, api_snapshot=None,
+        allow_active_running_metadata=False):
     """Verify one bounded OpenAI-compatible retry exhaustion."""
+    runtime_identity = _deepseek_campaign_runtime_identity(out_dir)
+    if runtime_identity is None:
+        raise RuntimeError(
+            f"worker {sample} DeepSeek campaign runtime is invalid")
     worker_id = item["worker_launch_id"]
     process = item.get("process")
     worker_pid = (
@@ -2299,10 +2462,18 @@ def _verified_deepseek_infrastructure_incomplete(
         raise RuntimeError(
             f"worker {sample} DeepSeek failure identity is invalid")
 
-    actual_progress = _actual_sample_progress(out_dir, sample, methods)
-    if outcome.get("checkpoint_progress") != actual_progress:
+    recorded_progress = outcome.get("checkpoint_progress")
+    if require_current_progress:
+        actual_progress = _actual_sample_progress(out_dir, sample, methods)
+        if recorded_progress != actual_progress:
+            raise RuntimeError(
+                f"worker {sample} DeepSeek checkpoint evidence drift")
+    else:
+        actual_progress = recorded_progress
+    if (not isinstance(actual_progress, dict)
+            or set(actual_progress) != set(methods)):
         raise RuntimeError(
-            f"worker {sample} DeepSeek checkpoint evidence drift")
+            f"worker {sample} DeepSeek checkpoint evidence is invalid")
     if _is_exact_int(target_round_trips):
         failure_index = methods.index(failure_method)
         for index, method in enumerate(methods):
@@ -2316,21 +2487,31 @@ def _verified_deepseek_infrastructure_incomplete(
                 raise RuntimeError(
                     f"worker {sample} DeepSeek method-order mismatch")
 
+    metadata_records = (
+        read_run_metadata_snapshot(out_dir)
+        if metadata_snapshot is None else metadata_snapshot
+    )
     metadata = [
-        record for record in read_run_metadata_snapshot(out_dir)
+        record for record in metadata_records
         if record.get("invocation_id") == invocation_id
     ]
+    allowed_metadata_statuses = {"infrastructure_incomplete"}
+    if allow_active_running_metadata:
+        allowed_metadata_statuses.add("running")
     if (len(metadata) != 1
-            or metadata[0].get("status") != "infrastructure_incomplete"
+            or metadata[0].get("status") not in allowed_metadata_statuses
             or metadata[0].get("worker_launch_id") != worker_id
             or metadata[0].get("worker_pid") != worker_pid
             or metadata[0].get("samples") != [sample]):
         raise RuntimeError(
             f"worker {sample} DeepSeek run metadata mismatch")
 
+    api_records = (
+        _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+        if api_snapshot is None else api_snapshot
+    )
     api_matches = [
-        (index, row) for index, row in enumerate(_read_jsonl(os.path.join(
-            out_dir, "api_calls.jsonl")), 1)
+        (index, row) for index, row in enumerate(api_records, 1)
         if row.get("request_id") == request_id
     ]
     if len(api_matches) != 1:
@@ -2344,24 +2525,232 @@ def _verified_deepseek_infrastructure_incomplete(
             or api_row.get("rt_index") != failure_rt
             or api_row.get("direction") != direction
             or api_row.get("call_kind") != outcome.get("call_kind")
+            or api_row.get("error_type") != outcome.get("error_type")
             or api_row.get("worker_launch_id") != worker_id
             or api_row.get("worker_pid") != worker_pid
-            or api_row.get("transport_revision")
-            != DEEPSEEK_TRANSPORT_REVISION
+            or (
+                api_row.get("transport"),
+                api_row.get("transport_revision"),
+            ) != runtime_identity
             or not isinstance(attempts, list) or not attempts
             or api_row.get("http_attempts_used") != len(attempts)
             or outcome.get("http_attempts_used") != len(attempts)
-            or outcome.get("next_attempt_index") != len(attempts) + 1):
+            or outcome.get("next_attempt_index") != len(attempts) + 1
+            or not _valid_deepseek_transport_sidecar(out_dir, api_row)):
         raise RuntimeError(
             f"worker {sample} DeepSeek retry evidence mismatch")
     return {
         "sample_outcome_created_at": outcome.get("created_at"),
         "invocation_id": invocation_id,
         "request_id": request_id,
+        "worker_launch_id": worker_id,
+        "worker_pid": worker_pid,
         "api_row": api_index,
         "http_attempts_used": len(attempts),
         "checkpoint_progress": actual_progress,
     }
+
+
+def _verified_deepseek_uncommitted_incident_request_ids(
+        out_dir, outcome, evidence, api_records, committed_call_ids):
+    """Return every uncommitted API row from the failed RT invocation."""
+    worker_id = evidence["worker_launch_id"]
+    worker_pid = evidence["worker_pid"]
+    sample = outcome["sample"]
+    failure_method = outcome["method"]
+    failure_rt = outcome["rt_index"]
+    failure_direction = outcome["direction"]
+    failure_kind = outcome["call_kind"]
+    terminal_request_id = evidence["request_id"]
+    runtime_identity = _deepseek_campaign_runtime_identity(out_dir)
+    if runtime_identity is None:
+        raise RuntimeError(
+            f"worker {sample} DeepSeek incident runtime is invalid")
+
+    worker_rows = [
+        (index, row) for index, row in enumerate(api_records, 1)
+        if row.get("worker_launch_id") == worker_id
+    ]
+    if (not worker_rows
+            or worker_rows[-1][1].get("request_id")
+            != terminal_request_id):
+        raise RuntimeError(
+            f"worker {sample} DeepSeek terminal call is not last")
+    cohort = [
+        (index, row) for index, row in worker_rows
+        if row.get("request_id") not in committed_call_ids
+    ]
+    if (not cohort
+            or cohort[-1][1].get("request_id")
+            != terminal_request_id):
+        raise RuntimeError(
+            f"worker {sample} DeepSeek incident cohort is invalid")
+
+    direction_rank = {"forward": 0, "backward": 1}
+    allowed_kinds = (
+        {"hybridpatch_primary": 0, "hybridpatch_repair": 1}
+        if failure_method == "hybridpatch"
+        else {"fullrewrite_primary": 0}
+    )
+    failure_position = (
+        direction_rank[failure_direction],
+        allowed_kinds.get(failure_kind),
+    )
+    if failure_position[1] is None:
+        raise RuntimeError(
+            f"worker {sample} DeepSeek failure call kind is invalid")
+
+    request_ids = set()
+    positions = []
+    for api_index, row in cohort:
+        request_id = row.get("request_id")
+        direction = row.get("direction")
+        call_kind = row.get("call_kind")
+        position = (
+            direction_rank.get(direction),
+            allowed_kinds.get(call_kind),
+        )
+        if (not isinstance(request_id, str) or not request_id
+                or request_id in request_ids
+                or position[0] is None or position[1] is None
+                or position > failure_position
+                or row.get("sample") != sample
+                or row.get("method") != failure_method
+                or row.get("rt_index") != failure_rt
+                or row.get("worker_pid") != worker_pid
+                or row.get("model") != DEEPSEEK_MODEL
+                or (
+                    row.get("transport"),
+                    row.get("transport_revision"),
+                ) != runtime_identity
+                or row.get("provider_called") is not True
+                or row.get("response_replayed") is not False
+                or row.get("generation_index") != 0
+                or not _valid_deepseek_transport_sidecar(out_dir, row)):
+            raise RuntimeError(
+                f"worker {sample} DeepSeek incident row {api_index} "
+                "is invalid")
+        if request_id == terminal_request_id:
+            valid_terminal = _deepseek_failed_retry_row(row)
+            valid_success = False
+        else:
+            valid_terminal = False
+            valid_success = (
+                row.get("classification") in {
+                    None, "transport-valid but model-empty"}
+                and row.get("stream_complete") is True
+                and row.get("input_tokens") is not None
+                and row.get("output_tokens") is not None
+                and _valid_deepseek_retry_evidence(row)
+            )
+        if not (valid_terminal or valid_success):
+            raise RuntimeError(
+                f"worker {sample} DeepSeek incident row {api_index} "
+                "has invalid terminal state")
+        request_ids.add(request_id)
+        positions.append(position)
+
+    if (positions != sorted(positions)
+            or len(positions) != len(set(positions))
+            or positions[-1] != failure_position
+            or (0, 0) not in positions
+            or (
+                failure_direction == "backward"
+                and (1, 0) not in positions
+            )
+            or (
+                failure_kind.endswith("_repair")
+                and (direction_rank[failure_direction], 0)
+                not in positions
+            )):
+        raise RuntimeError(
+            f"worker {sample} DeepSeek incident call sequence is invalid")
+    return request_ids
+
+
+def _verified_deepseek_infrastructure_request_ids(
+        out_dir, config, *, metadata_snapshot=None, api_snapshot=None,
+        committed_call_ids=None, outcome_snapshot=None,
+        active_samples=None, active_worker_rows=None,
+        launch_snapshot=None):
+    """Audit every historical sample-local retry exhaustion, not only latest."""
+    expected_samples = set(config.get("samples") or [])
+    outcome_records = (
+        read_sample_outcomes(out_dir)
+        if outcome_snapshot is None else outcome_snapshot
+    )
+    # This validates ordering, status, timestamps, and campaign membership for
+    # the whole append-only outcome ledger before any historical exemption is
+    # granted to an API row.
+    _latest_sample_outcomes(
+        out_dir, expected_samples, records=outcome_records)
+    api_records = (
+        _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+        if api_snapshot is None else api_snapshot
+    )
+    if committed_call_ids is None:
+        committed_call_ids = set()
+        for sample in expected_samples:
+            for method in config.get("method_set") or []:
+                for row in _read_jsonl(os.path.join(
+                        out_dir, method, f"{sample}.jsonl")):
+                    committed_call_ids.update(row.get("api_call_ids") or [])
+    else:
+        committed_call_ids = set(committed_call_ids)
+    request_ids = set()
+    active_samples = set(active_samples or [])
+    active_worker_rows = active_worker_rows or {}
+    launch_snapshot = launch_snapshot or {}
+    for index, outcome in enumerate(outcome_records, 1):
+        if outcome.get("status") != "infrastructure_incomplete":
+            continue
+        sample = outcome.get("sample")
+        methods = outcome.get("methods")
+        worker_id = outcome.get("worker_launch_id")
+        worker_pid = outcome.get("worker_pid")
+        if (sample not in expected_samples
+                or not isinstance(methods, list) or not methods
+                or len(methods) != len(set(methods))
+                or set(methods) != set(config.get("method_set") or [])
+                or not isinstance(worker_id, str) or not worker_id
+                or not _is_exact_int(worker_pid) or worker_pid <= 0
+                or outcome.get("classification")
+                != "provider/API failure"
+                or outcome.get("method_phase") is not None):
+            raise RuntimeError(
+                f"invalid DeepSeek infrastructure outcome row {index}")
+        evidence = _verified_deepseek_infrastructure_incomplete(
+            out_dir,
+            sample,
+            {
+                "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
+                "methods": methods,
+                "target_round_trips": config.get("num_round_trips"),
+            },
+            outcome,
+            require_current_progress=False,
+            metadata_snapshot=metadata_snapshot,
+            api_snapshot=api_records,
+            allow_active_running_metadata=(
+                sample in active_samples
+                and isinstance(active_worker_rows.get(worker_id), dict)
+                and active_worker_rows[worker_id].get("sample") == sample
+                and isinstance(launch_snapshot.get(worker_id), dict)
+                and launch_snapshot[worker_id].get("sample") == sample
+                and launch_snapshot[worker_id].get("pid") == worker_pid
+            ),
+        )
+        incident_request_ids = (
+            _verified_deepseek_uncommitted_incident_request_ids(
+                out_dir, outcome, evidence, api_records,
+                committed_call_ids)
+        )
+        if request_ids & incident_request_ids:
+            raise RuntimeError(
+                "duplicate DeepSeek infrastructure incident request IDs")
+        request_ids.update(incident_request_ids)
+    return request_ids
 
 
 def _verified_infrastructure_incomplete(out_dir, sample, item):
@@ -2396,8 +2785,7 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
     if _worker_lease_is_held(out_dir, sample):
         raise RuntimeError(
             f"worker {sample} lease remains held after infrastructure exit")
-    if (outcome.get("classification") == "provider/API failure"
-            and outcome.get("error_type") == "server_error"):
+    if _deepseek_campaign_runtime_identity(out_dir) is not None:
         return _verified_deepseek_infrastructure_incomplete(
             out_dir, sample, item, outcome)
     semantic_call_id = outcome.get("semantic_call_id")
@@ -2660,9 +3048,11 @@ def _verified_infrastructure_incomplete(out_dir, sample, item):
     }
 
 
-def _verified_evaluator_incomplete(out_dir, sample, item):
+def _verified_evaluator_incomplete(
+        out_dir, sample, item, *, allow_campaign_stop=False,
+        allow_active_running_metadata=False):
     """Verify a sample-local evaluator exception without accepting score rows."""
-    if read_campaign_stop_conditions(out_dir):
+    if not allow_campaign_stop and read_campaign_stop_conditions(out_dir):
         raise RuntimeError(
             "campaign-wide stop latch forbids sample-local isolation")
     method_phase = item.get("method_phase")
@@ -2730,8 +3120,11 @@ def _verified_evaluator_incomplete(out_dir, sample, item):
         record for record in read_run_metadata_snapshot(out_dir)
         if record.get("invocation_id") == invocation_id
     ]
+    allowed_metadata_statuses = {"evaluator_incomplete"}
+    if allow_active_running_metadata:
+        allowed_metadata_statuses.add("running")
     if (len(metadata) != 1
-            or metadata[0].get("status") != "evaluator_incomplete"
+            or metadata[0].get("status") not in allowed_metadata_statuses
             or metadata[0].get("worker_launch_id") != worker_id
             or metadata[0].get("worker_pid") != worker_pid
             or metadata[0].get("samples") != [sample]):
@@ -2821,7 +3214,13 @@ def _select_invocation_assignments(
     # The authorization is bound to a newer failed worker than any stale
     # retry-exhaustion outcome retained for the same sample.
     for sample in recovery_incidents["provider_access_resume_samples"]:
-        latest.pop(sample, None)
+        stale = latest.get(sample)
+        if (isinstance(stale, dict)
+                and stale.get("status") not in {
+                    "finished", "evaluator_incomplete"}
+                and stale.get("worker_launch_id")
+                in recovery_incidents["worker_launch_ids"]):
+            latest.pop(sample, None)
     missing_assignments = [
         item for item in assignments if item["sample"] not in latest
     ]
@@ -3094,9 +3493,33 @@ def _active_worker_set_path(out_dir):
 
 
 def _write_active_worker_set(out_dir, manifest, workers):
+    workers = list(workers)
+    dispatcher_identities = {
+        (
+            item.get("dispatcher_pid"),
+            item.get("dispatcher_instance_id"),
+        )
+        for item in workers
+        if (item.get("dispatcher_pid") is not None
+            or item.get("dispatcher_instance_id") is not None)
+    }
+    if len(dispatcher_identities) > 1:
+        raise RuntimeError(
+            "active workers span multiple dispatcher instances")
+    dispatcher_pid, dispatcher_instance_id = (
+        next(iter(dispatcher_identities))
+        if dispatcher_identities else (None, None)
+    )
+    if dispatcher_identities and (
+            not _is_exact_int(dispatcher_pid) or dispatcher_pid <= 0
+            or not isinstance(dispatcher_instance_id, str)
+            or not dispatcher_instance_id):
+        raise RuntimeError("active dispatcher identity is invalid")
     record = {
         "schema": "anchorpatch.active_worker_set/1",
         "run_git_commit": manifest["run_git_commit"],
+        "dispatcher_pid": dispatcher_pid,
+        "dispatcher_instance_id": dispatcher_instance_id,
         "workers": {
             item["worker_launch_id"]: {"sample": item["sample"]}
             for item in workers
@@ -3254,6 +3677,9 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                     "resume_authorization"),
                 "interrupted_resume_evidence": item.get(
                     "interrupted_resume_evidence"),
+                "dispatcher_pid": item.get("dispatcher_pid"),
+                "dispatcher_instance_id": item.get(
+                    "dispatcher_instance_id"),
                 **ack,
             },
         )
@@ -3429,9 +3855,13 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
             })
         elif args.campaign_role == "deepseek_full234":
             slots_per_key = DEEPSEEK_FULL_SLOTS_PER_KEY
-            key_count = len({
+            actual_key_count = len({
                 item["key_label"] for item in assignments
             })
+            if actual_key_count != DEEPSEEK_FULL_KEY_COUNT:
+                raise RuntimeError(
+                    "deepseek_full234 manifest requires exactly three keys")
+            key_count = DEEPSEEK_FULL_KEY_COUNT
         else:
             slots_per_key = REMAINING134_SLOTS_PER_KEY
             key_count = REMAINING134_KEY_COUNT
@@ -3562,12 +3992,27 @@ def _read_relay_publication_snapshot(out_dir, samples, methods):
 
 def _valid_deepseek_retry_evidence(row):
     attempts = row.get("transport_attempts")
+    runtime_identity = (
+        row.get("transport"), row.get("transport_revision"))
+    is_current_stream = runtime_identity == (
+        DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION)
     if (not isinstance(attempts, list) or not attempts
             or row.get("http_attempts_used") != len(attempts)
             or row.get("retry_count") != len(attempts) - 1
             or row.get("failed_attempt_count") != len(attempts) - 1):
         return False
-    if attempts[-1].get("status") != "success":
+    terminal = attempts[-1]
+    if (terminal.get("status") != "success"
+            or terminal.get("http_status") != 200
+            or terminal.get("stream_complete") is not True):
+        return False
+    if (is_current_stream
+            and (
+                terminal.get("message_start_seen") is not True
+                or terminal.get("message_stop_seen") is not True
+                or terminal.get("final_usage_seen") is not True
+                or terminal.get("terminal_sequence_valid") is not True
+            )):
         return False
 
     budget_attempt_index = 0
@@ -3578,7 +4023,18 @@ def _valid_deepseek_retry_evidence(row):
             continue
         if attempt.get("status") != "retryable_error":
             return False
-        free_503 = attempt.get("http_status") == 503
+        if (is_current_stream
+                and not isinstance(
+                    attempt.get("generation_delta_seen"), bool)):
+            return False
+        free_503 = (
+            attempt.get("http_status") == 503
+            and (
+                attempt.get("generation_delta_seen") is False
+                if is_current_stream
+                else not attempt.get("generation_delta_seen")
+            )
+        )
         if attempt.get("retry_budget_consumed") is not (not free_503):
             return False
         if not free_503:
@@ -3594,18 +4050,68 @@ def _valid_deepseek_retry_evidence(row):
     )
 
 
+def _valid_deepseek_transport_sidecar(out_dir, row):
+    """Require current stream attempts to match the durable linear sidecar."""
+    runtime_identity = (
+        row.get("transport"), row.get("transport_revision"))
+    if runtime_identity == (
+            DEEPSEEK_LEGACY_TRANSPORT,
+            DEEPSEEK_LEGACY_TRANSPORT_REVISION):
+        return True
+    if runtime_identity != (
+            DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION):
+        return False
+    path = row.get("raw_sse_saved_path")
+    if not isinstance(path, str) or not path or not os.path.isfile(path):
+        return False
+    try:
+        if os.path.commonpath((
+                os.path.abspath(out_dir), os.path.abspath(path)
+        )) != os.path.abspath(out_dir):
+            return False
+        events = _read_jsonl(path)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    attempts = row.get("transport_attempts")
+    starts = [
+        event for event in events
+        if event.get("record_type") == "attempt_start"
+    ]
+    ends = [
+        event.get("attempt") for event in events
+        if event.get("record_type") == "attempt_end"
+        and isinstance(event.get("attempt"), dict)
+    ]
+    if (not isinstance(attempts, list) or not attempts
+            or len(starts) != len(attempts)
+            or len(ends) != len(attempts)):
+        return False
+    for expected_index, (attempt, start, end) in enumerate(
+            zip(attempts, starts, ends), 1):
+        if (start.get("attempt_index") != expected_index
+                or end.get("attempt_index") != expected_index):
+            return False
+        if end != attempt:
+            return False
+        stream_events = [
+            event for event in events
+            if (
+                event.get("record_type") == "sdk_stream_event"
+                and event.get("attempt_index") == expected_index
+            )
+        ]
+        if (
+                attempt.get("status") == "success"
+                or attempt.get("message_start_seen") is True
+        ) and not stream_events:
+            return False
+    return True
+
+
 def _inspect_deepseek_campaign(
         out_dir, manifest, *, require_complete=False,
         active_samples=None, required_complete_samples=None):
-    """Audit the OpenCode Zen DeepSeek prefix without MiniMax stream ledgers.
-
-    The OpenAI-compatible transport is non-streaming and owns bounded retries
-    inside one semantic call, except that OpenCode Go HTTP 503 retries do not
-    consume that finite budget.  The MiniMax attempt-ledger/journal invariants
-    do not apply.  This inspector keeps the shared campaign, worker, result,
-    checkpoint, and preservation invariants, and additionally verifies the
-    exact provider route plus the serialized ``reasoning_effort=high`` request.
-    """
+    """Audit a DeepSeek prefix, including frozen /3 and current stream /4."""
     config = manifest.get("config") or {}
     expected_samples = set(config.get("samples") or [])
     expected_methods = set(config.get("method_set") or [])
@@ -3619,11 +4125,21 @@ def _inspect_deepseek_campaign(
     preservation = 0
     preservation_not_applicable = 0
 
+    runtime_identity = (
+        config.get("transport"), config.get("transport_revision")
+    )
+    supported_runtime_identities = {
+        (DEEPSEEK_LEGACY_TRANSPORT, DEEPSEEK_LEGACY_TRANSPORT_REVISION),
+        (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+    }
+    if runtime_identity not in supported_runtime_identities:
+        errors.append("DeepSeek manifest transport identity mismatch")
+    expected_transport, expected_transport_revision = runtime_identity
     expected_runtime = {
         "model": DEEPSEEK_MODEL,
         "provider": "opencode_zen",
-        "transport": "openai_sdk_nonstream",
-        "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+        "transport": expected_transport,
+        "transport_revision": expected_transport_revision,
         "transport_resume_policy": None,
         "openai_base_url": DEEPSEEK_BASE_URL,
         "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
@@ -3632,16 +4148,41 @@ def _inspect_deepseek_campaign(
     for key, expected in expected_runtime.items():
         if config.get(key) != expected:
             errors.append(f"DeepSeek manifest {key} mismatch")
+    expected_rt = (
+        2 if config.get("campaign_role") == "deepseek_capacity15"
+        else 2 if runtime_identity == (
+            DEEPSEEK_LEGACY_TRANSPORT,
+            DEEPSEEK_LEGACY_TRANSPORT_REVISION,
+        )
+        else DEEPSEEK_FULL234_ROUND_TRIPS
+    )
     if (expected_methods != {"fullrewrite", "hybridpatch"}
-            or not _is_exact_int(target_rt) or target_rt != 2):
+            or not _is_exact_int(target_rt) or target_rt != expected_rt):
         errors.append("DeepSeek campaign grid is invalid")
+    expected_key_count = (
+        DEEPSEEK_CAPACITY_KEY_COUNT
+        if config.get("campaign_role") == "deepseek_capacity15"
+        else DEEPSEEK_FULL_KEY_COUNT
+    )
+    expected_slots_per_key = (
+        DEEPSEEK_CAPACITY_SLOTS_PER_KEY
+        if config.get("campaign_role") == "deepseek_capacity15"
+        else DEEPSEEK_FULL_SLOTS_PER_KEY
+    )
+    if (config.get("key_count") != expected_key_count
+            or config.get("slots_per_key") != expected_slots_per_key
+            or config.get("max_worker_count")
+            != expected_key_count * expected_slots_per_key):
+        errors.append("DeepSeek campaign key/concurrency grid is invalid")
 
+    active_worker_rows = {}
     try:
         active_payload = _read_json(_active_worker_set_path(out_dir))
         if (active_payload.get("schema")
                 != "anchorpatch.active_worker_set/1"
                 or not isinstance(active_payload.get("workers"), dict)):
             raise RuntimeError("active worker set schema is invalid")
+        active_worker_rows = active_payload["workers"]
     except (OSError, ValueError, RuntimeError):
         if active_samples:
             errors.append("active worker set is missing or invalid")
@@ -3664,6 +4205,9 @@ def _inspect_deepseek_campaign(
     recovery_incidents = campaign_recovery_incident_evidence(out_dir)
     authorized_api_incident_hashes = recovery_incidents["api_row_hashes"]
     recovered_worker_ids = recovery_incidents["worker_launch_ids"]
+    recovered_preauthorization_worker_ids = recovery_incidents[
+        "preauthorization_worker_launch_ids"
+    ]
     expected_commit = (
         recovery_authorization.get("recovery_git_commit")
         if recovery_authorization else manifest.get("run_git_commit")
@@ -3713,8 +4257,8 @@ def _inspect_deepseek_campaign(
             errors.append("run_metadata model mismatch")
         for key, expected in {
                 "provider": "opencode_zen",
-                "transport": "openai_sdk_nonstream",
-                "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+                "transport": expected_transport,
+                "transport_revision": expected_transport_revision,
                 "transport_resume_policy": None,
                 "base_url": DEEPSEEK_BASE_URL,
                 "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
@@ -3733,17 +4277,34 @@ def _inspect_deepseek_campaign(
                 f"latest run_metadata invocation failed: "
                 f"{(record_samples or ['unknown'])[0]}")
 
+    # Terminal publication order is API -> sample outcome -> run metadata.
+    # Read the three append-only ledgers in reverse order so a live inspection
+    # always observes a causal prefix rather than a newer outcome paired with
+    # an older API snapshot.
+    outcome_snapshot = read_sample_outcomes(out_dir)
     committed_rows, api_rows = _read_relay_publication_snapshot(
         out_dir, config.get("samples") or [],
         config.get("method_set") or [],
     )
-    infrastructure_request_ids = {
-        outcome.get("request_id")
-        for outcome in _latest_sample_outcomes(out_dir).values()
-        if outcome.get("status") == "infrastructure_incomplete"
-        and isinstance(outcome.get("request_id"), str)
-        and outcome.get("request_id")
+    committed_call_ids = {
+        call_id
+        for rows in committed_rows.values()
+        for row in rows
+        for call_id in (row.get("api_call_ids") or [])
     }
+    infrastructure_request_ids = (
+        _verified_deepseek_infrastructure_request_ids(
+            out_dir, config,
+            metadata_snapshot=metadata,
+            api_snapshot=api_rows,
+            committed_call_ids=committed_call_ids,
+            outcome_snapshot=outcome_snapshot,
+            active_samples=active_samples,
+            active_worker_rows=active_worker_rows,
+            launch_snapshot=launches,
+        )
+    )
+    provisional_active_failure_request_ids = set()
     api_by_id = {}
     calls_by_step = {}
     api_rows_by_worker = {}
@@ -3770,6 +4331,7 @@ def _inspect_deepseek_campaign(
             errors.append(f"duplicate/invalid API request id at row {index}")
         else:
             api_by_id[request_id] = row
+        worker_id = row.get("worker_launch_id")
         authorized_incident = (
             _canonical_record_sha256(row)
             in authorized_api_incident_hashes
@@ -3777,9 +4339,24 @@ def _inspect_deepseek_campaign(
         local_infrastructure_incident = (
             request_id in infrastructure_request_ids
         )
-        if not authorized_incident and not local_infrastructure_incident:
+        sidecar_valid = _valid_deepseek_transport_sidecar(out_dir, row)
+        provisional_active_failure = (
+            not authorized_incident
+            and not local_infrastructure_incident
+            and sample in active_samples
+            and isinstance(worker_id, str)
+            and isinstance(active_worker_rows.get(worker_id), dict)
+            and active_worker_rows[worker_id].get("sample") == sample
+            and _deepseek_failed_retry_row(row)
+            and sidecar_valid
+        )
+        if provisional_active_failure:
+            provisional_active_failure_request_ids.add(request_id)
+        if not (
+                authorized_incident
+                or local_infrastructure_incident
+                or provisional_active_failure):
             calls_by_step.setdefault(step, []).append(row)
-        worker_id = row.get("worker_launch_id")
         api_rows_by_worker.setdefault(worker_id, []).append(row)
         for key, expected in {
                 "schema": API_CALL_SCHEMA,
@@ -3788,8 +4365,8 @@ def _inspect_deepseek_campaign(
                 "request_url": (
                     f"{DEEPSEEK_BASE_URL}/chat/completions"
                 ),
-                "transport": "openai_sdk_nonstream",
-                "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+                "transport": expected_transport,
+                "transport_revision": expected_transport_revision,
                 "transport_resume_policy": None,
                 "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
                 "max_tokens": DEEPSEEK_MAX_TOKENS,
@@ -3811,7 +4388,11 @@ def _inspect_deepseek_campaign(
             and row.get("http_status") == 200
         )
         auditable_failed_retry = (
-            (authorized_incident or local_infrastructure_incident)
+            (
+                authorized_incident
+                or local_infrastructure_incident
+                or provisional_active_failure
+            )
             and _deepseek_failed_retry_row(row))
         if ((classification is not None
              and not auditable_model_empty
@@ -3826,24 +4407,40 @@ def _inspect_deepseek_campaign(
         if (not auditable_failed_retry
                 and not _valid_deepseek_retry_evidence(row)):
             errors.append(f"DeepSeek retry evidence invalid at row {index}")
+        if not sidecar_valid:
+            errors.append(
+                f"DeepSeek transport sidecar invalid at row {index}")
         request_path = row.get("raw_request_saved_path")
         try:
             request_payload = (
                 _read_json(request_path)
                 if isinstance(request_path, str) and request_path else {}
             )
-        except (OSError, ValueError):
+        except (OSError, ValueError, RuntimeError):
             request_payload = {}
         request_body = request_payload.get("request_body")
+        stream_request_valid = (
+            runtime_identity == (
+                DEEPSEEK_LEGACY_TRANSPORT,
+                DEEPSEEK_LEGACY_TRANSPORT_REVISION,
+            )
+            or (
+                isinstance(request_body, dict)
+                and request_body.get("stream") is True
+                and request_body.get("stream_options")
+                == {"include_usage": True}
+            )
+        )
         if (not auditable_failed_retry
                 and (not isinstance(request_body, dict)
                 or request_body.get("model") != DEEPSEEK_MODEL
                 or request_body.get("reasoning_effort")
                 != DEEPSEEK_REASONING_EFFORT
                 or request_body.get("max_completion_tokens")
-                != DEEPSEEK_MAX_TOKENS)):
+                != DEEPSEEK_MAX_TOKENS
+                or not stream_request_valid)):
             errors.append(
-                f"DeepSeek raw request reasoning audit failed at row {index}")
+                f"DeepSeek raw request transport audit failed at row {index}")
 
         launch = launches.get(worker_id)
         authorization = authorizations.get(worker_id)
@@ -3990,7 +4587,19 @@ def _inspect_deepseek_campaign(
                 and terminal.get("status") in {
                     "failed", "interrupted_by_dispatcher"}
             )
-            if (not recovered_terminal and (
+            recovered_preauthorization = (
+                worker_id in recovered_preauthorization_worker_ids
+                and isinstance(exit_row, dict)
+                and exit_row.get("sample") == launch.get("sample")
+                and exit_row.get("pid") == launch.get("pid")
+                and exit_row.get("returncode") != 0
+                and exit_row.get("disposition") == "campaign_fatal"
+                and not worker_metadata
+                and worker_id not in authorizations
+                and worker_id not in api_rows_by_worker
+            )
+            if (not recovered_terminal
+                    and not recovered_preauthorization and (
                     not isinstance(exit_row, dict)
                     or exit_row.get("sample") != launch.get("sample")
                     or exit_row.get("pid") != launch.get("pid")
@@ -4014,7 +4623,8 @@ def _inspect_deepseek_campaign(
             row.get("provider_called") is True for row in api_rows),
         "local_infrastructure_incident_rows": len(
             authorized_api_incident_hashes) + len(
-                infrastructure_request_ids),
+                infrastructure_request_ids)
+            + len(provisional_active_failure_request_ids),
     }
 
 
@@ -5459,19 +6069,24 @@ def _append_worker_exit(sample, item, returncode, dispatch_log, *,
     item["exit_recorded"] = True
 
 
-def _stop_and_reconcile_workers(out_dir, running, dispatch_log=None):
+def _stop_and_reconcile_workers(
+        out_dir, running, dispatch_log=None, *, lease_scope=None):
     """Best-effort stop, then close metadata only after leases are free."""
+    samples_to_verify = sorted(
+        set(lease_scope or ()) | set(running)
+    )
     result = {
         "termination_error": None,
         "lease_error": None,
         "closed_invocations": [],
+        "lease_scope": samples_to_verify,
     }
     try:
         _terminate_workers(running)
     except BaseException as exc:
         result["termination_error"] = str(exc)
     try:
-        _assert_worker_leases_free(out_dir, running)
+        _assert_worker_leases_free(out_dir, samples_to_verify)
     except BaseException as exc:
         result["lease_error"] = str(exc)
         return result
@@ -5550,6 +6165,12 @@ def _launch_worker_batch(
         args, out_dir, inspection_manifest, task_plans, keys, assignments,
         resume_authorizations, dispatch_log, running):
     """Launch and authorize one refill batch while existing workers continue."""
+    if (not isinstance(
+            getattr(args, "_dispatcher_instance_id", None), str)
+            or not args._dispatcher_instance_id):
+        args._dispatcher_instance_id = (
+            f"dispatcher-{os.getpid()}-{uuid.uuid4().hex}"
+        )
     phases = {item.get("method_phase") for item in assignments}
     if len(phases) > 1:
         raise RuntimeError("one launch batch cannot mix method phases")
@@ -5573,6 +6194,8 @@ def _launch_worker_batch(
             "worker_launch_id": worker_id,
             "ready_path": ready_path,
             "ack_path": ack_path,
+            "dispatcher_pid": os.getpid(),
+            "dispatcher_instance_id": args._dispatcher_instance_id,
         }
     _write_active_worker_set(
         out_dir, inspection_manifest,
@@ -5604,6 +6227,9 @@ def _launch_worker_batch(
         environment = dict(os.environ)
         environment.update({
             "PYTHONUTF8": "1",
+            "ANCHORPATCH_DISPATCHER_PID": str(os.getpid()),
+            "ANCHORPATCH_DISPATCHER_INSTANCE_ID": (
+                args._dispatcher_instance_id),
             "ANCHORPATCH_WORKER_LAUNCH_ID": worker_id,
             "ANCHORPATCH_WORKER_LOCK_PATH": _worker_lease_path(
                 out_dir, sample),
@@ -5624,7 +6250,8 @@ def _launch_worker_batch(
             for name in (
                     "OPENCODE_API_KEY", "OPENCODE_GO_API_KEY",
                     "OPENCODE_TRANSPORT", "MINIMAX_TRANSPORT",
-                    "MINIMAX_API_KEY"):
+                    "MINIMAX_API_KEY", "AZURE_OPENAI_API_KEY",
+                    "AZURE_OPENAI_ENDPOINT"):
                 environment.pop(name, None)
             environment["OPENAI_API_KEY"] = keys[label]
             environment["OPENAI_BASE_URL"] = DEEPSEEK_BASE_URL
@@ -5683,17 +6310,15 @@ def _launch_worker_batch(
                 "console_log": item["console_log"],
                 "method_phase": item_method_phase,
                 "interrupted_resume_evidence": interrupted_resume,
+                "dispatcher_pid": os.getpid(),
+                "dispatcher_instance_id": args._dispatcher_instance_id,
             },
         )
         log_path = os.path.join(out_dir, item["console_log"])
         log_handle = open(log_path, "a", encoding="utf-8")
-        process = subprocess.Popen(
-            command, cwd=_ROOT, env=environment,
-            stdout=log_handle, stderr=subprocess.STDOUT,
-        )
-        running[sample] = {
+        worker_state = {
             "sample": sample,
-            "process": process,
+            "process": None,
             "log": log_handle,
             "key_label": label,
             "methods": list(item["methods"]),
@@ -5704,8 +6329,28 @@ def _launch_worker_batch(
             "interrupted_resume_evidence": interrupted_resume,
             "ready_path": ready_path,
             "ack_path": ack_path,
+            "dispatcher_pid": os.getpid(),
+            "dispatcher_instance_id": args._dispatcher_instance_id,
             "exit_recorded": False,
         }
+        process = None
+        try:
+            process = subprocess.Popen(
+                command, cwd=_ROOT, env=environment,
+                stdout=log_handle, stderr=subprocess.STDOUT,
+            )
+            worker_state["process"] = process
+            running[sample] = worker_state
+        except BaseException:
+            # If CreateProcess returned but a Python-level interruption landed
+            # before normal registration, keep the child in the reconciliation
+            # set.  A spawned worker must never become invisible to cleanup.
+            if process is not None:
+                worker_state["process"] = process
+                running[sample] = worker_state
+            else:
+                log_handle.close()
+            raise
         batch_running[sample] = running[sample]
         append_jsonl_locked(
             dispatch_log,
@@ -5715,6 +6360,8 @@ def _launch_worker_batch(
                 "pid": process.pid, "worker_launch_id": worker_id,
                 "console_log": item["console_log"],
                 "method_phase": item_method_phase,
+                "dispatcher_pid": os.getpid(),
+                "dispatcher_instance_id": args._dispatcher_instance_id,
             },
         )
 
@@ -6128,6 +6775,17 @@ def _run_remaining134_campaign(
 
 
 def _launch_under_lease(args, out_dir):
+    args._dispatcher_instance_id = (
+        f"dispatcher-{os.getpid()}-{uuid.uuid4().hex}"
+    )
+    pending_recovery = os.path.join(
+        out_dir, DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
+    if os.path.isfile(pending_recovery):
+        raise RuntimeError(
+            "dispatcher parent-loss recovery transaction is pending; "
+            "rerun authorize_ledger_lock_recovery.py "
+            "--dispatcher_process_lost before resume"
+        )
     _resolve_confirmation_selection(args, out_dir=out_dir)
     _resolve_full234_scope(args)
     _resolve_remaining134_scope(args)
@@ -6147,7 +6805,9 @@ def _launch_under_lease(args, out_dir):
         else REMAINING134_KEY_COUNT
         if args.campaign_role == "remaining134"
         else DEEPSEEK_CAPACITY_KEY_COUNT
-        if args.campaign_role == "deepseek_capacity15" else None
+        if args.campaign_role == "deepseek_capacity15"
+        else DEEPSEEK_FULL_KEY_COUNT
+        if args.campaign_role == "deepseek_full234" else None
     )
     if (required_key_count is not None
             and len(selected_labels) != required_key_count):
@@ -6158,10 +6818,6 @@ def _launch_under_lease(args, out_dir):
     missing_labels = [label for label in selected_labels if label not in keys]
     if missing_labels:
         raise RuntimeError(f"unknown key labels: {missing_labels}")
-    if (args.campaign_role == "deepseek_full234"
-            and len(selected_labels) < 2):
-        raise RuntimeError(
-            "deepseek_full234 requires at least two live unique key labels")
     if args.campaign_role in {
             "confirmation", "full234", "remaining134",
             "deepseek_capacity15", "deepseek_full234"}:
@@ -6501,7 +7157,7 @@ def _launch_under_lease(args, out_dir):
         except BaseException:
             pass
         reconciliation = _stop_and_reconcile_workers(
-            out_dir, running, dispatch_log)
+            out_dir, running, dispatch_log, lease_scope=args.samples)
         safe_to_revoke = (
             reconciliation.get("lease_error") is None
             and reconciliation.get("metadata_error") is None
@@ -6517,7 +7173,9 @@ def _launch_under_lease(args, out_dir):
             # authorization until an audited later reconciliation proves it
             # stopped.  Revoking it here would create artificial provenance
             # drift while an in-flight call is still unwinding.
-            reconciliation["active_set_retained"] = sorted(running)
+            reconciliation["active_set_retained"] = (
+                reconciliation.get("lease_scope") or sorted(running)
+            )
         append_jsonl_locked(
             dispatch_log,
             {
@@ -6703,18 +7361,21 @@ def main():
                 "deepseek_capacity15 requires exactly one --key_labels entry")
     elif args.campaign_role == "deepseek_full234":
         if (len(args.samples) != FULL234_SAMPLE_COUNT
-                or args.num_round_trips != 2):
+                or args.num_round_trips
+                != DEEPSEEK_FULL234_ROUND_TRIPS):
             parser.error(
                 "deepseek_full234 requires the exact 234-sample inventory "
-                "with 2 round trips")
+                f"with {DEEPSEEK_FULL234_ROUND_TRIPS} round trips")
         if args.smoke_dir:
             parser.error("--smoke_dir is not valid for deepseek_full234")
         if args.slots_per_key != DEEPSEEK_FULL_SLOTS_PER_KEY:
             parser.error(
                 "deepseek_full234 requires --slots_per_key 10")
-        if not args.key_labels or len(args.key_labels) < 2:
+        if (not args.key_labels
+                or len(args.key_labels) != DEEPSEEK_FULL_KEY_COUNT):
             parser.error(
-                "deepseek_full234 requires at least two --key_labels entries")
+                "deepseek_full234 requires exactly three "
+                "--key_labels entries")
     else:
         if (len(args.samples) != REMAINING134_SAMPLE_COUNT
                 or args.num_round_trips != 10):

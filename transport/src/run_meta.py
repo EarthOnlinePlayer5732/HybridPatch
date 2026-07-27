@@ -88,7 +88,16 @@ def write_json_atomic(path, record):
             json.dump(record, f, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                os.replace(tmp, path)
+                break
+            except OSError as exc:
+                if (getattr(exc, "winerror", None) not in {5, 32, 33}
+                        or time.monotonic() >= deadline):
+                    raise
+                time.sleep(0.05)
     finally:
         try:
             if os.path.exists(tmp):
@@ -182,7 +191,7 @@ def _read_jsonl_records_with_retry(path, attempts=30, sleep_s=0.1):
                     return records
                 finally:
                     portalocker.unlock(f)
-        except PermissionError:
+        except (OSError, portalocker.exceptions.LockException):
             if attempt == attempts - 1:
                 raise RuntimeError(f"cannot read locked JSONL ledger: {path}")
             time.sleep(sleep_s)
@@ -200,7 +209,7 @@ def _sha256_text(text):
 _GENERATE_POSITIONAL_PARAMETERS = (
     "messages", "model", "timeout", "max_retries", "temperature", "is_json",
     "return_metadata", "max_tokens", "variables", "instance",
-    "thinking_mode", "call_kind", "_raw_event_sink",
+    "thinking_mode", "reasoning_effort", "call_kind", "_raw_event_sink",
     "max_response_retries", "max_transient_failures", "_retry_state",
     "_response_commit_sink",
 )
@@ -216,6 +225,7 @@ _GENERATE_PARAMETER_DEFAULTS = {
     "variables": {},
     "instance": None,
     "thinking_mode": "adaptive",
+    "reasoning_effort": None,
     "call_kind": "primary",
     "max_response_retries": 1,
     "max_transient_failures": 3,
@@ -249,6 +259,7 @@ def _semantic_request_fingerprint(args, kwargs, requested_model, call_kind):
         "variables": bound["variables"] or {},
         "instance": bound["instance"],
         "thinking_mode": bound["thinking_mode"],
+        "reasoning_effort": bound["reasoning_effort"],
         "max_response_retries": bound["max_response_retries"],
         "max_transient_failures": bound["max_transient_failures"],
     }
@@ -749,6 +760,14 @@ def _is_transport_retry_exhaustion(record, exc):
     attempts = list(getattr(exc, "transport_attempts", None) or [])
     if not attempts or attempts[-1].get("status") != "retryable_error":
         return False
+    retry_budget_index = attempts[-1].get("retry_budget_attempt_index")
+    if (record.get("transport") in {
+            "openai_sdk_nonstream", "openai_sdk_stream"}
+            and attempts[-1].get("retry_budget_consumed") is True
+            and isinstance(retry_budget_index, int)
+            and not isinstance(retry_budget_index, bool)
+            and retry_budget_index >= 3):
+        return True
     return bool(
         record.get("response_slots_used")
         == record.get("max_response_slots") == 2
@@ -1386,19 +1405,19 @@ class ApiCallRecorder:
         request_fingerprint = _semantic_request_fingerprint(
             args, kwargs, requested_model, call_kind
         )
-        provider_runtime = {}
-        if str(requested_model).lower().startswith("minimax-m3"):
-            try:
-                from model_openai import minimax_runtime_config
-                provider_runtime = minimax_runtime_config(
-                    max_tokens=kwargs.get("max_tokens"),
-                    thinking_mode=kwargs.get("thinking_mode") or "adaptive",
-                )
-            except Exception as exc:
-                raise RuntimeError(
-                    "failed to resolve the frozen MiniMax transport runtime "
-                    "before provider POST"
-                ) from exc
+        try:
+            from model_openai import model_runtime_config
+            provider_runtime = model_runtime_config(
+                requested_model,
+                max_tokens=kwargs.get("max_tokens"),
+                thinking_mode=kwargs.get("thinking_mode") or "adaptive",
+                reasoning_effort=kwargs.get("reasoning_effort"),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "failed to resolve provider transport runtime before provider "
+                "POST"
+            ) from exc
         transport_path = None
         transport_fh = None
         semantic_lock_fh = None
@@ -1410,6 +1429,7 @@ class ApiCallRecorder:
             value for value in (
                 os.environ.get("OPENCODE_API_KEY"),
                 os.environ.get("OPENCODE_GO_API_KEY"),
+                os.environ.get("OPENAI_API_KEY"),
             ) if value
         ]
 
@@ -1806,6 +1826,44 @@ class ApiCallRecorder:
         else:
             replay = None
             retry_state = {}
+            prior_sink = kwargs.get("_raw_event_sink")
+            if provider_runtime.get("provider") == "opencode_zen":
+                transport_path = self._raw_path(
+                    call_id, "transport.jsonl")
+                transport_fh = open(
+                    transport_path, "w", encoding="utf-8", newline="")
+
+            def _openai_compatible_sink(payload):
+                nonlocal provider_post_started
+                if prior_sink is not None:
+                    prior_sink(payload)
+                if transport_fh is not None:
+                    payload = dict(payload)
+                    payload.update({
+                        "transport_event_schema":
+                        "anchorpatch.transport_event/1",
+                        "worker_launch_id": self.worker_launch_id,
+                        "worker_pid": os.getpid(),
+                        "sample": self.sample_id,
+                        "method": self.method,
+                        "rt_index": self.rt_index,
+                        "direction": self.direction,
+                        "call_id": call_id,
+                    })
+                    line = json.dumps(
+                        payload, ensure_ascii=False, default=str)
+                    for secret in secrets:
+                        line = line.replace(secret, "<redacted-key>")
+                    with transport_lock:
+                        transport_fh.write(line + "\n")
+                        transport_fh.flush()
+                        if payload.get("record_type") == "attempt_end":
+                            os.fsync(transport_fh.fileno())
+                if payload.get("record_type") == "attempt_start":
+                    provider_post_started = True
+
+            _openai_compatible_sink._anchorpatch_critical = True
+            kwargs["_raw_event_sink"] = _openai_compatible_sink
 
         def _close_transport():
             if transport_fh is not None and not transport_fh.closed:
@@ -1900,6 +1958,8 @@ class ApiCallRecorder:
                 "anthropic_sdk_version": provider_runtime.get("anthropic_sdk_version"),
                 "max_tokens": provider_runtime.get("effective_max_tokens"),
                 "thinking_mode": provider_runtime.get("thinking_mode"),
+                "reasoning_effort": provider_runtime.get(
+                    "reasoning_effort"),
                 "provider_called": provider_post_started,
                 "response_replayed": False,
                 "replayed_from_call_id": None,
@@ -1907,7 +1967,12 @@ class ApiCallRecorder:
                 "response_slots_used": failure_state.get("response_slots_used"),
                 "max_transient_failures": provider_runtime.get("max_transient_failures"),
                 "transient_failure_count": failure_state.get("transient_failure_count"),
-                "http_attempts_used": failure_state.get("http_attempts_used"),
+                "http_attempts_used": (
+                    failure_state.get("http_attempts_used")
+                    if str(requested_model).lower().startswith("minimax-m3")
+                    else (len(attempts) or None)
+                ),
+                "max_retries": bound_arguments.get("max_retries"),
                 "transport_recovery_index": semantic_context["generation_index"],
                 "generation_index": semantic_context["generation_index"],
                 "semantic_root_id": semantic_context["semantic_root_id"],
@@ -2027,6 +2092,7 @@ class ApiCallRecorder:
             "temperature": meta.get("temperature"),
             "max_tokens": meta.get("max_tokens"),
             "thinking_mode": meta.get("thinking_mode"),
+            "reasoning_effort": meta.get("reasoning_effort"),
             "content_block_counts": meta.get("content_block_counts") or {},
             "content_block_count": meta.get("content_block_count") or 0,
             "timeout": meta.get("timeout"),

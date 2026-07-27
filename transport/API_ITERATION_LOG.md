@@ -84,6 +84,31 @@
 - 每次 503 仍保留实际 attempt、状态码与等待记录，并标记
   `retry_budget_consumed=false`；其他错误仍遵循原有重试额度。
 
+### `opencode_openai_compatible/4`（DeepSeek stream 与完整错误证据）
+
+- 请求改为 OpenAI Chat Completions stream，并发送
+  `stream_options={"include_usage": true}`。只有非空 `finish_reason` 后出现
+  usage-only terminal chunk，且三项 token 计数为一致的非负整数，才设
+  `stream_complete=true`；EOF、SDK 断流、乱序/空 usage 或缺任一终结证据均分类为
+  `incomplete_stream`，丢弃 partial output 后全量重发。
+- 每个 chunk 以线性 `sdk_stream_event` 保存；content、reasoning 与 tool delta
+  分别标记。reasoning-only 的完整响应仍是可审计 `model_empty`，不是 transport
+  truncation。
+- HTTP/SDK exception 的脱敏完整 body 与 message 写入 attempt metadata；formal
+  recorder 另写每 call 的 `transport.jsonl` sidecar。终端 API row 保留同一
+  `transport_attempts`，sidecar 写失败不丢失终端错误内容。
+- 生成前 503 仍标记 `retry_budget_consumed=false`，并使用带 per-worker spread
+  的指数退避；一旦流已产生 generation delta，后续 503/断流按
+  `incomplete_stream` 消耗有限预算，禁止把部分生成当免费 retry。
+  502 与其他 retryable 5xx 消耗有限预算。
+- `Retry-After` 同时从 header、结构化 body 和 message 提取，最多接受 300 秒；
+  不再把 provider 明示的 60 秒截成 30 秒。
+- 正式 `deepseek_full234` 的配置语义同时修正为 RT10；`/3` RT2 non-stream
+  campaign 仅按历史身份审计，不能与 `/4` 混目录或原地 resume。
+- 单 Key 短提示 bounded diagnostic：c10 与 c15 两轮合计 25/25 完整 HTTP 200，
+  `/4`、high reasoning 与 terminal usage 全部一致，0 retry、0 个 502/503；这验证
+  stream 请求形状和完成链，不代表长 HP/FR 请求的 sustained-load 结论。
+
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 
 - 动机：为 FR baseline 忠实翻译上游 DELEGATE-52 的官方非流式 + 盲异常重试语义，与 OpenCode v3 公平性策略分线。

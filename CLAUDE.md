@@ -124,9 +124,15 @@ python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch ful
 - 默认模型 `deepseek-v4-flash` 仍可使用显式配置的 OpenAI 兼容端点；正式 OpenCode
   DeepSeek-V4-Flash campaign 固定走 OpenCode Zen
   `https://opencode.ai/zen/go/v1/chat/completions`（USD），revision
-  `opencode_openai_compatible/3`，non-stream，`reasoning_effort=high`，OpenCode Go HTTP 503
-  重试不消耗有限重试额度，并从 raw request
-  到 result row 全链审计。`minimax-m3` 固定走 OpenCode Go
+  `opencode_openai_compatible/4`，stream，`reasoning_effort=high`。正式
+  `deepseek_full234` 固定 RT10；历史 `/3` RT2 non-stream 目录只作冻结 supporting
+  evidence，不得原地 resume 成 `/4` RT10。流必须在非空 `finish_reason` 后出现
+  token 计数完整一致的 usage-only 终结 chunk 才能提交；partial、乱序或空 usage
+  stream 全量重发且不得提交部分正文。
+  生成前 HTTP 503 重试不消耗有限重试额度，使用带 worker spread 的指数退避；
+  502 与生成后失败消耗额度；provider `Retry-After` 最多按 300 秒执行，所有失败
+  attempt 的脱敏 body/message 同时写入 API terminal row 与 transport sidecar。
+  `minimax-m3` 固定走 OpenCode Go
   `https://opencode.ai/zen/go/v1/messages`（USD），Python 使用 Anthropic SDK，所有调用均为
   adaptive thinking，默认/硬上限 `max_tokens=131072`。
 - MiniMax OpenCode 新实验遵循 `transport/docs/API_TRANSPORT_V4.md`：完整终止链才提交；HTTP 200 `Streaming response failed`、缺 `message_stop`/终结 usage 或 block 未正常闭合先分类为 retryable `incomplete_stream`；每个 exact semantic call 最多 2 个 response slot（首次 + 1 次全量重发），另有 3 次生成前 transient failure，禁止 partial continuation。冻结 transport-v3 归档仍只按 `API_TRANSPORT_FROZEN_V3.md` 解释。

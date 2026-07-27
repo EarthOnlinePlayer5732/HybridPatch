@@ -53,6 +53,7 @@ _FINGERPRINT_FILES = [
 
 METADATA_SCHEMA = "anchorpatch.run_metadata/3"
 STOP_CONDITION_SCHEMA = "anchorpatch.campaign_stop_condition/1"
+EMERGENCY_STOP_DIRECTORY = "campaign_stop_emergency"
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
@@ -67,6 +68,10 @@ CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME = (
     "campaign_recovery_authorization.json"
 )
 LEDGER_LOCK_RECOVERY_KIND = "ledger_lock_contention"
+DISPATCHER_PROCESS_LOST_RECOVERY_KIND = "dispatcher_process_lost"
+DISPATCHER_PARENT_LOSS_PENDING_FILENAME = (
+    "dispatcher_parent_loss_recovery_pending.json"
+)
 _GIT_IDENTITY_RECOVERY_CHANGED_PATHS = {
     ".gitignore",
     "HP_V8/VERSION.md",
@@ -136,23 +141,62 @@ def _canonical_record_sha256(record):
     return hashlib.sha256(payload).hexdigest()
 
 
-def _read_campaign_stop_unlocked(out_dir):
-    path = os.path.join(out_dir, "campaign_stop.json")
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, encoding="utf-8") as handle:
-            record = json.load(handle)
-    except (OSError, ValueError) as exc:
+def _read_stop_record(path):
+    deadline = time.monotonic() + 1.0
+    while True:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                record = json.load(handle)
+            break
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    f"invalid campaign stop latch: {path}"
+                )
+            time.sleep(0.05)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"invalid campaign stop latch: {path}"
+            ) from exc
+    if record is None:
         raise RuntimeError(
             f"invalid campaign stop latch: {path}"
-        ) from exc
+        )
     if (not isinstance(record, dict)
             or record.get("schema") != STOP_CONDITION_SCHEMA
             or not isinstance(record.get("condition"), str)
             or not record.get("condition")):
         raise RuntimeError(f"invalid campaign stop latch: {path}")
-    return [record]
+    return record
+
+
+def _read_campaign_stop_unlocked(out_dir):
+    records = []
+    record_hashes = set()
+    path = os.path.join(out_dir, "campaign_stop.json")
+    if os.path.exists(path):
+        record = _read_stop_record(path)
+        records.append(record)
+        record_hashes.add(_canonical_record_sha256(record))
+    emergency_dir = os.path.join(out_dir, EMERGENCY_STOP_DIRECTORY)
+    if os.path.isdir(emergency_dir):
+        try:
+            names = sorted(
+                name for name in os.listdir(emergency_dir)
+                if name.endswith(".json"))
+        except OSError as exc:
+            raise RuntimeError(
+                f"invalid emergency campaign stop directory: "
+                f"{emergency_dir}"
+            ) from exc
+        for name in names:
+            record = _read_stop_record(os.path.join(
+                emergency_dir, name))
+            digest = _canonical_record_sha256(record)
+            if digest not in record_hashes:
+                records.append(record)
+                record_hashes.add(digest)
+    return records
 
 
 def read_campaign_stop_conditions(out_dir):
@@ -197,6 +241,206 @@ def record_campaign_stop_condition(out_dir, condition, **details):
             return existing[0]
         write_json_atomic(path, record)
         return record
+
+
+@contextmanager
+def _campaign_stop_publication_lock(out_dir):
+    """Serialize emergency stop publication with parent-loss recovery."""
+    os.makedirs(out_dir, exist_ok=True)
+    with portalocker.Lock(
+        os.path.join(out_dir, ".campaign_stop_publication.lock"),
+        mode="a+",
+        timeout=60,
+        check_interval=0.05,
+        flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+        encoding="utf-8",
+    ):
+        yield
+
+
+def _serialize_campaign_stop_publication(function):
+    @functools.wraps(function)
+    def wrapped(out_dir, *args, **kwargs):
+        with _campaign_stop_publication_lock(os.path.abspath(out_dir)):
+            return function(out_dir, *args, **kwargs)
+    return wrapped
+
+
+@_serialize_campaign_stop_publication
+def record_emergency_campaign_stop_condition(
+        out_dir, condition, **details):
+    """Publish parent-loss evidence without the shared metadata lock."""
+    if not isinstance(condition, str) or not condition:
+        raise ValueError("campaign stop condition must be a non-empty string")
+    reserved = {
+        "schema", "created_at", "condition", "worker_launch_id",
+        "worker_pid",
+    }
+    overlap = reserved & set(details)
+    if overlap:
+        raise ValueError(
+            f"campaign stop details override reserved fields: "
+            f"{sorted(overlap)}"
+        )
+    record = {
+        "schema": STOP_CONDITION_SCHEMA,
+        "created_at": _iso_with_timezone(_aware_now()),
+        "condition": condition,
+        "worker_launch_id": os.environ.get(
+            "ANCHORPATCH_WORKER_LAUNCH_ID"),
+        "worker_pid": os.getpid(),
+    }
+    record.update(details)
+    active_path = os.path.join(
+        os.path.abspath(out_dir), "active_worker_set.json")
+
+    def _worker_no_longer_active():
+        if condition != "dispatcher_process_lost":
+            return False
+        try:
+            with open(active_path, encoding="utf-8") as handle:
+                active = json.load(handle)
+        except (OSError, ValueError):
+            return False
+        if not isinstance(active, dict):
+            return False
+        workers = active.get("workers")
+        if (active.get("schema") != "anchorpatch.active_worker_set/1"
+                or not isinstance(workers, dict)):
+            return False
+        return not (
+            active.get("dispatcher_pid") == record.get("dispatcher_pid")
+            and active.get("dispatcher_instance_id")
+            == record.get("dispatcher_instance_id")
+            and record.get("worker_launch_id") in workers
+        )
+
+    if _worker_no_longer_active():
+        return record
+    directory = os.path.join(
+        os.path.abspath(out_dir), EMERGENCY_STOP_DIRECTORY)
+    os.makedirs(directory, exist_ok=True)
+    stem = (
+        f"{condition}.{os.getpid()}."
+        f"{uuid.uuid4().hex}"
+    )
+    final_path = os.path.join(directory, stem + ".json")
+    temp_path = os.path.join(directory, stem + ".tmp")
+    try:
+        with open(
+                temp_path, "x", encoding="utf-8", newline="") as handle:
+            json.dump(record, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        deadline = time.monotonic() + 0.4
+        while True:
+            try:
+                os.replace(temp_path, final_path)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+        # Make the ordinary monitor/recovery path visible without taking or
+        # waiting on the shared metadata lock. A hard link is atomic and never
+        # overwrites a prior first-writer stop condition.
+        canonical_path = os.path.join(
+            os.path.abspath(out_dir), "campaign_stop.json")
+        canonical_published = False
+
+        def _canonical_covers_this_record():
+            try:
+                return (
+                    _canonical_record_sha256(
+                        _read_stop_record(canonical_path))
+                    == _canonical_record_sha256(record)
+                )
+            except (OSError, RuntimeError):
+                return False
+
+        def _canonical_prelaunch_stop_covers_this_worker():
+            try:
+                canonical = _read_stop_record(canonical_path)
+            except (OSError, RuntimeError):
+                return False
+            return (
+                canonical.get("condition") == "dispatcher_process_lost"
+                and canonical.get("registered_prelaunch_only") is True
+                and canonical.get("dispatcher_pid")
+                == record.get("dispatcher_pid")
+                and canonical.get("dispatcher_instance_id")
+                == record.get("dispatcher_instance_id")
+                and record.get("worker_launch_id")
+                in (
+                    canonical.get("registered_worker_launch_ids") or [])
+            )
+
+        if _worker_no_longer_active():
+            try:
+                os.unlink(final_path)
+            except FileNotFoundError:
+                pass
+            return record
+        try:
+            os.link(final_path, canonical_path)
+            canonical_published = True
+        except FileExistsError:
+            canonical_published = (
+                _canonical_covers_this_record()
+                or _canonical_prelaunch_stop_covers_this_worker()
+            )
+        except OSError:
+            # Fallback for filesystems without hard links. ``x`` preserves the
+            # first-writer rule; a concurrent writer either owns the canonical
+            # path or observes FileExistsError.
+            try:
+                with open(
+                        canonical_path, "x",
+                        encoding="utf-8", newline="") as handle:
+                    json.dump(record, handle, ensure_ascii=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                canonical_published = True
+            except FileExistsError:
+                canonical_published = (
+                    _canonical_covers_this_record()
+                    or _canonical_prelaunch_stop_covers_this_worker()
+                )
+        if (_worker_no_longer_active()
+                and _canonical_covers_this_record()):
+            deadline = time.monotonic() + 0.4
+            while True:
+                try:
+                    os.unlink(canonical_path)
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.02)
+        if canonical_published:
+            # Existing recovery tools archive campaign_stop.json. Do not leave
+            # a second active name that would re-latch the authorized resume.
+            deadline = time.monotonic() + 1.0
+            while True:
+                try:
+                    os.unlink(final_path)
+                    break
+                except FileNotFoundError:
+                    break
+                except OSError as exc:
+                    if (getattr(exc, "winerror", None) not in {5, 32, 33}
+                            or time.monotonic() >= deadline):
+                        break
+                    time.sleep(0.02)
+    finally:
+        try:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except OSError:
+            pass
+    return record
 
 
 def record_sample_outcome(out_dir, sample, status, **details):
@@ -257,8 +501,20 @@ def enforce_active_worker_authorization(out_dir, sample_id):
     try:
         if not worker_id or not active_path:
             raise RuntimeError("active worker authorization is incomplete")
-        with open(active_path, encoding="utf-8") as handle:
-            active = json.load(handle)
+        deadline = time.monotonic() + 1.0
+        while True:
+            try:
+                with open(active_path, encoding="utf-8") as handle:
+                    active = json.load(handle)
+                break
+            except OSError:
+                # Windows scanners/readers can briefly deny access even
+                # though writers publish by atomic replace.  A single sharing
+                # failure is not authorization drift; retry briefly, then
+                # retain fail-closed behavior.
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.05)
         authorized = (
             isinstance(active, dict)
             and active.get("schema") == "anchorpatch.active_worker_set/1"
@@ -334,7 +590,16 @@ def write_json_atomic(path, record):
             json.dump(record, f, ensure_ascii=False)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                os.replace(tmp, path)
+                break
+            except OSError as exc:
+                if (getattr(exc, "winerror", None) not in {5, 32, 33}
+                        or time.monotonic() >= deadline):
+                    raise
+                time.sleep(0.05)
     finally:
         try:
             if os.path.exists(tmp):
@@ -476,7 +741,7 @@ def _read_jsonl_records_with_retry(path, attempts=30, sleep_s=0.1):
                     return records
                 finally:
                     portalocker.unlock(f)
-        except PermissionError:
+        except (OSError, portalocker.exceptions.LockException):
             if attempt == attempts - 1:
                 raise RuntimeError(f"cannot read locked JSONL ledger: {path}")
             time.sleep(sleep_s)
@@ -1046,7 +1311,8 @@ def _is_transport_retry_exhaustion(record, exc):
     if not attempts or attempts[-1].get("status") != "retryable_error":
         return False
     retry_budget_index = attempts[-1].get("retry_budget_attempt_index")
-    if (record.get("transport") == "openai_sdk_nonstream"
+    if (record.get("transport") in {
+            "openai_sdk_nonstream", "openai_sdk_stream"}
             and attempts[-1].get("retry_budget_consumed") is True
             and isinstance(retry_budget_index, int)
             and not isinstance(retry_budget_index, bool)
@@ -2174,6 +2440,11 @@ class ApiCallRecorder:
             replay = None
             retry_state = {}
             prior_sink = kwargs.get("_raw_event_sink")
+            if provider_runtime.get("provider") == "opencode_zen":
+                transport_path = self._raw_path(
+                    call_id, "transport.jsonl")
+                transport_fh = open(
+                    transport_path, "w", encoding="utf-8", newline="")
 
             def _openai_compatible_sink(payload):
                 nonlocal provider_post_started
@@ -2182,6 +2453,29 @@ class ApiCallRecorder:
                 if payload.get("record_type") == "attempt_start":
                     enforce_campaign_runtime_guards(
                         self.out_dir, self.sample_id)
+                if transport_fh is not None:
+                    payload = dict(payload)
+                    payload.update({
+                        "transport_event_schema":
+                        "anchorpatch.transport_event/1",
+                        "worker_launch_id": self.worker_launch_id,
+                        "worker_pid": os.getpid(),
+                        "sample": self.sample_id,
+                        "method": self.method,
+                        "rt_index": self.rt_index,
+                        "direction": self.direction,
+                        "call_id": call_id,
+                    })
+                    line = json.dumps(
+                        payload, ensure_ascii=False, default=str)
+                    for secret in secrets:
+                        line = line.replace(secret, "<redacted-key>")
+                    with transport_lock:
+                        transport_fh.write(line + "\n")
+                        transport_fh.flush()
+                        if payload.get("record_type") == "attempt_end":
+                            os.fsync(transport_fh.fileno())
+                if payload.get("record_type") == "attempt_start":
                     provider_post_started = True
 
             _openai_compatible_sink._anchorpatch_critical = True
@@ -2300,6 +2594,7 @@ class ApiCallRecorder:
                     if str(requested_model).lower().startswith("minimax-m3")
                     else (len(attempts) or None)
                 ),
+                "max_retries": bound_arguments.get("max_retries"),
                 "transport_recovery_index": semantic_context["generation_index"],
                 "generation_index": semantic_context["generation_index"],
                 "semantic_root_id": semantic_context["semantic_root_id"],
@@ -2646,8 +2941,10 @@ def _load_recovery_authorization_chain(out_dir, path, record):
                 or authorization_id in seen_ids
                 or current.get("schema")
                 != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
-                or current.get("recovery_kind")
-                != LEDGER_LOCK_RECOVERY_KIND
+                or current.get("recovery_kind") not in {
+                    LEDGER_LOCK_RECOVERY_KIND,
+                    DISPATCHER_PROCESS_LOST_RECOVERY_KIND,
+                }
                 or current.get("prior_git_commit") != prior_commit
                 or current.get("prior_git_tree_state") != "clean"
                 or current.get("prior_code_fingerprint")
@@ -2714,9 +3011,19 @@ def _preauthorization_stop_evidence_matches(
         archived_stop.get("error") in expected_stop_errors)
 
 
-def read_campaign_recovery_authorization(out_dir):
+def read_campaign_recovery_authorization(
+        out_dir, *, allow_active_dispatcher_stop=False,
+        allow_pending_transaction=False):
     """Validate a narrow, append-only campaign recovery boundary."""
     out_dir = os.path.abspath(out_dir)
+    pending_path = os.path.join(
+        out_dir, DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
+    if os.path.isfile(pending_path) and not allow_pending_transaction:
+        raise RuntimeError(
+            "dispatcher parent-loss recovery transaction is pending; "
+            "rerun authorize_ledger_lock_recovery.py "
+            "--dispatcher_process_lost before resume"
+        )
     path = os.path.join(out_dir, CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME)
     if not os.path.exists(path):
         return None
@@ -2742,7 +3049,14 @@ def read_campaign_recovery_authorization(out_dir):
         record.get("schema") == CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
         and recovery_kind == LEDGER_LOCK_RECOVERY_KIND
     )
-    if not (legacy_git_recovery or ledger_lock_recovery):
+    dispatcher_process_lost_recovery = (
+        record.get("schema") == CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+        and recovery_kind == DISPATCHER_PROCESS_LOST_RECOVERY_KIND
+    )
+    if not (
+            legacy_git_recovery
+            or ledger_lock_recovery
+            or dispatcher_process_lost_recovery):
         raise RuntimeError("unknown campaign recovery kind")
 
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
@@ -2842,6 +3156,15 @@ def read_campaign_recovery_authorization(out_dir):
             and isinstance(record.get("deepseek_server_retry_samples"), list)
             and bool(record.get("deepseek_server_retry_samples"))
         )
+        dispatcher_process_lost_stop = (
+            dispatcher_process_lost_recovery
+            and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition") == "dispatcher_process_lost"
+            and archived_stop.get("dispatcher_pid")
+            == record.get("dispatcher_pid")
+            and archived_stop.get("dispatcher_instance_id")
+            == record.get("dispatcher_instance_id")
+        )
         stop_valid = (
             (
                 archived_stop.get("schema") == STOP_CONDITION_SCHEMA
@@ -2854,15 +3177,25 @@ def read_campaign_recovery_authorization(out_dir):
             or operator_pause_recovery
             or provider_access_retry_recovery
             or deepseek_server_retry_recovery
+            or dispatcher_process_lost_stop
         )
     if not stop_valid:
         raise RuntimeError("campaign recovery stop is not authorized")
-    if os.path.exists(os.path.join(out_dir, "campaign_stop.json")):
+    active_stop_records = read_campaign_stop_conditions(out_dir)
+    allowed_active_dispatcher_stop = (
+        allow_active_dispatcher_stop
+        and bool(active_stop_records)
+        and all(
+            item.get("condition") == "dispatcher_process_lost"
+            for item in active_stop_records
+        )
+    )
+    if active_stop_records and not allowed_active_dispatcher_stop:
         raise RuntimeError(
             "campaign recovery requires the stop latch to be archived first")
     recovery_chain = (
         _load_recovery_authorization_chain(out_dir, path, record)
-        if ledger_lock_recovery else [{
+        if (ledger_lock_recovery or dispatcher_process_lost_recovery) else [{
             "record": record,
             "path": path,
             "sha256": _sha256_file(path),
@@ -2884,7 +3217,10 @@ def read_campaign_recovery_authorization(out_dir):
         key for key in set(prior_fingerprint) | set(current_fingerprint)
         if prior_fingerprint.get(key) != current_fingerprint.get(key)
     )
-    expected_fingerprint_changes = ["run_meta.py"]
+    expected_fingerprint_changes = (
+        fingerprint_changes
+        if dispatcher_process_lost_recovery else ["run_meta.py"]
+    )
     if (fingerprint_changes != expected_fingerprint_changes
             or record.get("changed_code_fingerprint_keys")
             != expected_fingerprint_changes):
@@ -2905,6 +3241,8 @@ def read_campaign_recovery_authorization(out_dir):
     changed_set = set(changed)
     if legacy_git_recovery:
         changed_scope_valid = changed_set == _GIT_IDENTITY_RECOVERY_CHANGED_PATHS
+    elif dispatcher_process_lost_recovery:
+        changed_scope_valid = True
     elif record.get("deepseek_server_retry_recovery") is True:
         changed_scope_valid = (
             changed_set <= _LEDGER_LOCK_RECOVERY_ALLOWED_CHANGED_PATHS
@@ -3336,6 +3674,1009 @@ def read_campaign_recovery_authorization(out_dir):
                     expected_stop_errors)):
             raise RuntimeError(
                 "campaign recovery preauthorization stop evidence mismatch")
+    elif dispatcher_process_lost_recovery:
+        manifest_config = manifest.get("config") or {}
+        if (manifest_config.get("campaign_role") != "deepseek_full234"
+                or manifest_config.get("model") != "deepseek-v4-flash"
+                or manifest_config.get("num_round_trips") != 10
+                or set(manifest_config.get("method_set") or [])
+                != {"hybridpatch", "fullrewrite"}
+                or manifest_config.get("transport")
+                != "openai_sdk_stream"
+                or manifest_config.get("transport_revision")
+                != "opencode_openai_compatible/4"):
+            raise RuntimeError(
+                "dispatcher parent-loss manifest contract is invalid")
+        dispatcher_pid = record.get("dispatcher_pid")
+        dispatcher_instance_id = record.get("dispatcher_instance_id")
+        workers = record.get("dispatcher_parent_loss_workers")
+        cumulative_resume_workers = record.get(
+            "dispatcher_parent_loss_resume_workers")
+        resume_samples = record.get(
+            "dispatcher_parent_loss_resume_samples")
+        worker_ids = record.get("recovered_worker_launch_ids")
+        preauthorization_worker_ids = record.get(
+            "preauthorization_worker_launch_ids", [])
+        if (not isinstance(dispatcher_pid, int)
+                or isinstance(dispatcher_pid, bool) or dispatcher_pid <= 0
+                or not isinstance(dispatcher_instance_id, str)
+                or not dispatcher_instance_id
+                or not isinstance(workers, list) or not workers
+                or not isinstance(cumulative_resume_workers, list)
+                or not isinstance(resume_samples, list)
+                or len(resume_samples) != len(set(resume_samples))
+                or any(not isinstance(item, str) or not item
+                       for item in resume_samples)
+                or not isinstance(worker_ids, list) or not worker_ids
+                or len(worker_ids) != len(set(worker_ids))
+                or any(not isinstance(item, str) or not item
+                       for item in worker_ids)
+                or not isinstance(preauthorization_worker_ids, list)
+                or len(preauthorization_worker_ids)
+                != len(set(preauthorization_worker_ids))
+                or any(not isinstance(item, str) or not item
+                       for item in preauthorization_worker_ids)
+                or not set(preauthorization_worker_ids) <= set(worker_ids)):
+            raise RuntimeError(
+                "dispatcher parent-loss recovery scope is invalid")
+
+        current_workers = {}
+        current_samples = set()
+        for item in workers:
+            worker_id = (
+                item.get("worker_launch_id")
+                if isinstance(item, dict) else None
+            )
+            sample = item.get("sample") if isinstance(item, dict) else None
+            status = item.get("status") if isinstance(item, dict) else None
+            worker_pid = (
+                item.get("worker_pid") if isinstance(item, dict) else None
+            )
+            invocation_id = (
+                item.get("invocation_id") if isinstance(item, dict) else None
+            )
+            ordinary_status = status in {
+                "finished", "infrastructure_incomplete",
+                "evaluator_incomplete", "interrupted_by_dispatcher",
+            }
+            if (not isinstance(worker_id, str) or not worker_id
+                    or worker_id in current_workers
+                    or not isinstance(sample, str) or not sample
+                    or sample in current_samples
+                    or status not in {
+                        "finished", "infrastructure_incomplete",
+                        "evaluator_incomplete",
+                        "interrupted_by_dispatcher", "preauthorization",
+                        "registered_prelaunch",
+                    }
+                    or (
+                        ordinary_status
+                        and (
+                            not isinstance(worker_pid, int)
+                            or isinstance(worker_pid, bool)
+                            or worker_pid <= 0
+                            or not isinstance(invocation_id, str)
+                            or not invocation_id
+                        )
+                    )
+                    or (
+                        status == "preauthorization"
+                        and (
+                            not isinstance(worker_pid, int)
+                            or isinstance(worker_pid, bool)
+                            or worker_pid <= 0
+                            or invocation_id is not None
+                        )
+                    )
+                    or (
+                        status == "registered_prelaunch"
+                        and (worker_pid is not None
+                             or invocation_id is not None)
+                    )):
+                raise RuntimeError(
+                    "dispatcher parent-loss worker evidence is invalid")
+            current_workers[worker_id] = item
+            current_samples.add(sample)
+        current_resume_samples = {
+            item["sample"] for item in workers
+            if item["status"] in {
+                "interrupted_by_dispatcher", "preauthorization",
+                "registered_prelaunch",
+            }
+        }
+        current_preauthorization_ids = {
+            item["worker_launch_id"] for item in workers
+            if item["status"] == "preauthorization"
+        }
+        current_registered_ids = {
+            item["worker_launch_id"] for item in workers
+            if item["status"] == "registered_prelaunch"
+        }
+        if (set(resume_samples) != current_resume_samples
+                or not set(current_workers) <= set(worker_ids)
+                or not set(resume_samples) <= set(
+                    record.get("provider_access_resume_samples") or [])):
+            raise RuntimeError(
+                "dispatcher parent-loss resume scope is invalid")
+        cumulative_worker_ids = [
+            item.get("worker_launch_id")
+            if isinstance(item, dict) else None
+            for item in cumulative_resume_workers
+        ]
+        cumulative_samples = [
+            item.get("sample") if isinstance(item, dict) else None
+            for item in cumulative_resume_workers
+        ]
+        if (len(cumulative_worker_ids) != len(set(cumulative_worker_ids))
+                or len(cumulative_samples) != len(set(cumulative_samples))
+                or any(
+                    not isinstance(worker_id, str) or not worker_id
+                    for worker_id in cumulative_worker_ids
+                )
+                or any(
+                    not isinstance(sample, str) or not sample
+                    for sample in cumulative_samples
+                )
+                or not set(cumulative_worker_ids) <= set(worker_ids)):
+            raise RuntimeError(
+                "dispatcher parent-loss cumulative resume worker scope "
+                "is invalid")
+        archived_stop_worker = current_workers.get(
+            archived_stop.get("worker_launch_id"))
+        registered_prelaunch_only_stop = (
+            archived_stop.get("registered_prelaunch_only") is True
+            and archived_stop.get("worker_launch_id") is None
+            and archived_stop.get("worker_pid") is None
+            and set(archived_stop.get(
+                "registered_worker_launch_ids") or [])
+            == set(current_workers)
+            and current_registered_ids == set(current_workers)
+            and len(archived_stop.get(
+                "registered_worker_launch_ids") or [])
+            == len(current_workers)
+        )
+        ordinary_worker_stop = (
+            archived_stop.get("registered_prelaunch_only") is not True
+            and isinstance(archived_stop_worker, dict)
+            and archived_stop.get("worker_pid")
+            == archived_stop_worker.get("worker_pid")
+        )
+        if not (registered_prelaunch_only_stop or ordinary_worker_stop):
+            raise RuntimeError(
+                "dispatcher parent-loss canonical stop worker mismatch")
+
+        if len(recovery_chain) > 1:
+            superseded = recovery_chain[1]["record"]
+            identity_unchanged = (
+                record.get("recovery_git_commit")
+                == superseded.get("recovery_git_commit")
+                and record.get("recovery_code_fingerprint")
+                == superseded.get("recovery_code_fingerprint")
+            )
+            prior_worker_ids = set(
+                superseded.get("recovered_worker_launch_ids") or [])
+            prior_preauthorization_ids = set(
+                superseded.get(
+                    "preauthorization_worker_launch_ids") or [])
+            prior_resume_samples = set(
+                superseded.get("provider_access_resume_samples") or [])
+            prior_provider_retries = list(
+                superseded.get(
+                    "provider_access_retry_authorizations") or [])
+            prior_parent_resume_workers = list(
+                superseded.get(
+                    "dispatcher_parent_loss_resume_workers")
+                or superseded.get("dispatcher_parent_loss_workers")
+                or []
+            )
+        else:
+            superseded = None
+            identity_unchanged = (
+                record.get("recovery_git_commit")
+                == record.get("prior_git_commit")
+                and record.get("recovery_code_fingerprint")
+                == record.get("prior_code_fingerprint")
+            )
+            prior_worker_ids = set()
+            prior_preauthorization_ids = set()
+            prior_resume_samples = set()
+            prior_provider_retries = []
+            prior_parent_resume_workers = []
+        resumable_parent_loss_statuses = {
+            "interrupted_by_dispatcher",
+            "preauthorization",
+            "registered_prelaunch",
+        }
+        expected_parent_resume_by_sample = {}
+        for item in prior_parent_resume_workers:
+            sample = item.get("sample") if isinstance(item, dict) else None
+            if not isinstance(sample, str) or not sample:
+                raise RuntimeError(
+                    "dispatcher parent-loss inherited resume worker scope "
+                    "is invalid")
+            expected_parent_resume_by_sample[sample] = dict(item)
+        terminal_current_samples = set()
+        for item in workers:
+            sample = item.get("sample") if isinstance(item, dict) else None
+            status = item.get("status") if isinstance(item, dict) else None
+            if not isinstance(sample, str) or not sample:
+                raise RuntimeError(
+                    "dispatcher parent-loss current resume worker scope "
+                    "is invalid")
+            if status in resumable_parent_loss_statuses:
+                expected_parent_resume_by_sample[sample] = dict(item)
+            else:
+                expected_parent_resume_by_sample.pop(sample, None)
+                terminal_current_samples.add(sample)
+        expected_parent_resume_workers = [
+            expected_parent_resume_by_sample[sample]
+            for sample in sorted(expected_parent_resume_by_sample)
+        ]
+        if (not identity_unchanged
+                or set(worker_ids)
+                != prior_worker_ids | set(current_workers)
+                or set(preauthorization_worker_ids)
+                != prior_preauthorization_ids
+                | current_preauthorization_ids
+                or set(record.get(
+                    "dispatcher_parent_loss_registered_prelaunch_worker_launch_ids"
+                ) or []) != current_registered_ids
+                or set(record.get("provider_access_resume_samples") or [])
+                != (
+                    prior_resume_samples | set(resume_samples)
+                ) - terminal_current_samples
+                or record.get("provider_access_retry_authorizations")
+                != prior_provider_retries
+                or cumulative_resume_workers
+                != expected_parent_resume_workers
+                or record.get("committed_results_modified") is not False
+                or record.get("checkpoint_rows_modified") is not False
+                or record.get("provider_post_replay_scope")
+                != "uncommitted_steps_only"):
+            raise RuntimeError(
+                "dispatcher parent-loss recovery identity changed")
+
+        def _bound_recovery_file(path_field, digest_field, label):
+            relative = record.get(path_field)
+            if not isinstance(relative, str) or not relative:
+                raise RuntimeError(
+                    f"dispatcher parent-loss {label} path is invalid")
+            candidate = os.path.realpath(os.path.join(out_dir, relative))
+            if (os.path.commonpath([out_dir, candidate]) != out_dir
+                    or not os.path.isfile(candidate)
+                    or _sha256_file(candidate) != record.get(digest_field)):
+                raise RuntimeError(
+                    f"dispatcher parent-loss {label} digest mismatch")
+            return candidate
+
+        archived_active_path = _bound_recovery_file(
+            "archived_active_worker_set_path",
+            "archived_active_worker_set_sha256",
+            "active worker archive",
+        )
+        archived_metadata_path = _bound_recovery_file(
+            "archived_run_metadata_path",
+            "archived_run_metadata_sha256",
+            "metadata archive",
+        )
+        try:
+            with open(archived_active_path, encoding="utf-8") as handle:
+                archived_active = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "dispatcher parent-loss active worker archive is invalid"
+            ) from exc
+        expected_archived_workers = {
+            worker_id: {"sample": item["sample"]}
+            for worker_id, item in current_workers.items()
+        }
+        if (not isinstance(archived_active, dict)
+                or archived_active.get("schema")
+                != "anchorpatch.active_worker_set/1"
+                or archived_active.get("run_git_commit")
+                != record.get("prior_git_commit")
+                or archived_active.get("dispatcher_pid") != dispatcher_pid
+                or archived_active.get("dispatcher_instance_id")
+                != dispatcher_instance_id
+                or archived_active.get("workers")
+                != expected_archived_workers):
+            raise RuntimeError(
+                "dispatcher parent-loss active worker archive mismatch")
+        try:
+            archived_metadata = _read_run_metadata_strict(
+                archived_metadata_path)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "dispatcher parent-loss metadata archive is invalid") from exc
+        metadata_entries = record.get(
+            "dispatcher_parent_loss_metadata_rows")
+        if not isinstance(metadata_entries, list):
+            raise RuntimeError(
+                "dispatcher parent-loss metadata evidence is invalid")
+        metadata_worker_ids = {
+            worker_id for worker_id, item in current_workers.items()
+            if item["status"] not in {
+                "preauthorization", "registered_prelaunch",
+            }
+        }
+        bound_metadata = {}
+        for entry in metadata_entries:
+            number = (
+                entry.get("row_number")
+                if isinstance(entry, dict) else None
+            )
+            digest = (
+                entry.get("canonical_sha256")
+                if isinstance(entry, dict) else None
+            )
+            if (not isinstance(number, int) or isinstance(number, bool)
+                    or not 1 <= number <= len(archived_metadata)
+                    or not isinstance(digest, str)
+                    or digest != _canonical_record_sha256(
+                        archived_metadata[number - 1])):
+                raise RuntimeError(
+                    "dispatcher parent-loss metadata evidence mismatch")
+            metadata_row = archived_metadata[number - 1]
+            worker_id = metadata_row.get("worker_launch_id")
+            worker_item = current_workers.get(worker_id) or {}
+            if (worker_id not in metadata_worker_ids
+                    or worker_id in bound_metadata
+                    or entry.get("invocation_id")
+                    != metadata_row.get("invocation_id")
+                    or entry.get("prior_status")
+                    != metadata_row.get("status")
+                    or metadata_row.get("samples")
+                    != [worker_item.get("sample")]
+                    or metadata_row.get("worker_pid")
+                    != worker_item.get("worker_pid")
+                    or metadata_row.get("dispatcher_pid")
+                    != dispatcher_pid
+                    or metadata_row.get("dispatcher_instance_id")
+                    != dispatcher_instance_id
+                    or metadata_row.get("methods")
+                    != ["hybridpatch", "fullrewrite"]):
+                raise RuntimeError(
+                    "dispatcher parent-loss metadata evidence mismatch")
+            bound_metadata[worker_id] = metadata_row
+        if set(bound_metadata) != metadata_worker_ids:
+            raise RuntimeError(
+                "dispatcher parent-loss metadata scope is incomplete")
+
+        active_path = os.path.join(out_dir, "active_worker_set.json")
+        try:
+            with open(active_path, encoding="utf-8") as handle:
+                active_now = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "dispatcher parent-loss active worker set is invalid") from exc
+        if (not isinstance(active_now, dict)
+                or active_now.get("schema")
+                != "anchorpatch.active_worker_set/1"
+                or active_now.get("run_git_commit")
+                != record.get("prior_git_commit")
+                or not isinstance(active_now.get("workers"), dict)
+                or set(active_now.get("workers")) & set(current_workers)):
+            raise RuntimeError(
+                "dispatcher parent-loss recovered workers remain active")
+
+        current_metadata_path = os.path.join(
+            out_dir, "run_metadata.jsonl")
+        metadata_now = (
+            _read_jsonl_records_with_retry(current_metadata_path)
+            if os.path.isfile(current_metadata_path) else []
+        )
+        current_metadata = {}
+        for row in metadata_now:
+            worker_id = row.get("worker_launch_id")
+            if worker_id not in current_workers:
+                continue
+            if worker_id in current_metadata:
+                raise RuntimeError(
+                    "dispatcher parent-loss current metadata is duplicated")
+            current_metadata[worker_id] = row
+        if set(current_metadata) != metadata_worker_ids:
+            raise RuntimeError(
+                "dispatcher parent-loss current metadata scope is invalid")
+        for worker_id in metadata_worker_ids:
+            item = current_workers[worker_id]
+            before = bound_metadata[worker_id]
+            after = current_metadata.get(worker_id) or {}
+            if (after.get("invocation_id") != item["invocation_id"]
+                    or after.get("worker_pid") != item["worker_pid"]
+                    or after.get("samples") != [item["sample"]]
+                    or after.get("dispatcher_pid") != dispatcher_pid
+                    or after.get("dispatcher_instance_id")
+                    != dispatcher_instance_id
+                    or after.get("status") != item["status"]
+                    or before.get("status") not in {
+                        item["status"], "running"}):
+                raise RuntimeError(
+                    "dispatcher parent-loss metadata transition mismatch")
+
+        emergency_entries = record.get(
+            "archived_emergency_stop_records")
+        if not isinstance(emergency_entries, list):
+            raise RuntimeError(
+                "dispatcher parent-loss emergency stop evidence is invalid")
+        archived_emergency_dir = os.path.join(
+            os.path.dirname(archived_path), EMERGENCY_STOP_DIRECTORY)
+        actual_emergency_paths = set()
+        if os.path.isdir(archived_emergency_dir):
+            actual_emergency_paths = {
+                os.path.relpath(
+                    os.path.join(archived_emergency_dir, name), out_dir
+                ).replace("\\", "/")
+                for name in os.listdir(archived_emergency_dir)
+                if name.endswith(".json")
+            }
+        emergency_paths = set()
+        for entry in emergency_entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(
+                    "dispatcher parent-loss emergency stop evidence is invalid")
+            relative = entry.get("path")
+            if (not isinstance(relative, str) or not relative
+                    or relative in emergency_paths):
+                raise RuntimeError(
+                    "dispatcher parent-loss emergency stop evidence is invalid")
+            emergency_paths.add(relative)
+            candidate = os.path.realpath(os.path.join(out_dir, relative))
+            if (os.path.commonpath([out_dir, candidate]) != out_dir
+                    or not os.path.isfile(candidate)
+                    or _sha256_file(candidate) != entry.get("sha256")):
+                raise RuntimeError(
+                    "dispatcher parent-loss emergency stop digest mismatch")
+            stop_record = _read_stop_record(candidate)
+            stop_worker = current_workers.get(
+                stop_record.get("worker_launch_id"))
+            if (stop_record.get("condition")
+                    != "dispatcher_process_lost"
+                    or stop_record.get("dispatcher_pid") != dispatcher_pid
+                    or stop_record.get("dispatcher_instance_id")
+                    != dispatcher_instance_id
+                    or not isinstance(stop_worker, dict)
+                    or stop_record.get("worker_pid")
+                    != stop_worker.get("worker_pid")):
+                raise RuntimeError(
+                    "dispatcher parent-loss emergency stop identity mismatch")
+        if emergency_paths != actual_emergency_paths:
+            raise RuntimeError(
+                "dispatcher parent-loss emergency stop scope mismatch")
+
+        dispatch_rows = _read_jsonl_records_with_retry(
+            os.path.join(out_dir, "dispatch_log.jsonl"))
+        intents = {}
+        launches = {}
+        authorizations = {}
+        exits = {}
+        reconciliations = {}
+        for row in dispatch_rows:
+            worker_id = row.get("worker_launch_id")
+            if worker_id not in current_workers:
+                continue
+            target = None
+            if row.get("event") == "launch_intent":
+                target = intents
+            elif row.get("event") == "launch":
+                target = launches
+            elif row.get("event") == "worker_authorized":
+                target = authorizations
+            elif row.get("event") == "worker_exit":
+                target = exits
+            elif row.get("event") == "stale_worker_reconciled":
+                target = reconciliations
+            if target is not None:
+                if worker_id in target:
+                    raise RuntimeError(
+                        "dispatcher parent-loss dispatch evidence is duplicated")
+                target[worker_id] = row
+        expected_launched_ids = set(current_workers) - current_registered_ids
+        if set(launches) != expected_launched_ids:
+            raise RuntimeError(
+                "dispatcher parent-loss launch scope is incomplete")
+        for worker_id, item in current_workers.items():
+            intent = intents.get(worker_id)
+            if item["status"] == "registered_prelaunch":
+                if (worker_id in launches
+                        or worker_id in authorizations
+                        or worker_id in exits
+                        or (
+                            intent is not None
+                            and (
+                                intent.get("sample") != item["sample"]
+                                or intent.get("dispatcher_pid")
+                                != dispatcher_pid
+                                or intent.get("dispatcher_instance_id")
+                                != dispatcher_instance_id
+                            )
+                        )):
+                    raise RuntimeError(
+                        "dispatcher parent-loss registered-prelaunch "
+                        "evidence mismatch")
+                continue
+            launch = launches[worker_id]
+            exit_row = exits.get(worker_id)
+            if (not isinstance(intent, dict)
+                    or intent.get("sample") != item["sample"]
+                    or intent.get("dispatcher_pid") != dispatcher_pid
+                    or intent.get("dispatcher_instance_id")
+                    != dispatcher_instance_id
+                    or launch.get("sample") != item["sample"]
+                    or launch.get("pid") != item["worker_pid"]
+                    or launch.get("dispatcher_pid") != dispatcher_pid
+                    or launch.get("dispatcher_instance_id")
+                    != dispatcher_instance_id
+                    or not isinstance(exit_row, dict)
+                    or exit_row.get("sample") != item["sample"]
+                    or exit_row.get("pid") != item["worker_pid"]):
+                raise RuntimeError(
+                    "dispatcher parent-loss dispatch provenance mismatch")
+            authorization = authorizations.get(worker_id)
+            if authorization is not None and (
+                    authorization.get("sample") != item["sample"]
+                    or authorization.get("worker_pid")
+                    != item["worker_pid"]
+                    or authorization.get("invocation_id")
+                    != item["invocation_id"]
+                    or authorization.get("dispatcher_pid") != dispatcher_pid
+                    or authorization.get("dispatcher_instance_id")
+                    != dispatcher_instance_id):
+                raise RuntimeError(
+                    "dispatcher parent-loss authorization provenance mismatch")
+            if item["status"] == "preauthorization":
+                if (authorization is not None
+                        or exit_row.get("returncode") != 97
+                        or exit_row.get("disposition") != "campaign_fatal"):
+                    raise RuntimeError(
+                        "dispatcher parent-loss preauthorization evidence "
+                        "mismatch")
+            elif item["status"] == "interrupted_by_dispatcher":
+                reconciliation = reconciliations.get(worker_id)
+                if (exit_row.get("returncode") != 97
+                        or exit_row.get("disposition") != "campaign_fatal"
+                        or not isinstance(reconciliation, dict)
+                        or reconciliation.get("sample") != item["sample"]
+                        or reconciliation.get("pid") != item["worker_pid"]
+                        or reconciliation.get("invocation_id")
+                        != item["invocation_id"]
+                        or reconciliation.get("reason")
+                        != "dispatcher_process_lost"):
+                    raise RuntimeError(
+                        "dispatcher parent-loss interruption evidence mismatch")
+            elif (exit_row.get("disposition") != item["status"]
+                  or (
+                      item["status"] == "finished"
+                      and exit_row.get("returncode") != 0
+                  )
+                  or (
+                      item["status"] != "finished"
+                      and exit_row.get("returncode") == 0
+                  )):
+                raise RuntimeError(
+                    "dispatcher parent-loss terminal evidence mismatch")
+
+        def _validate_incident_entries(filename, entries):
+            if not isinstance(entries, list):
+                raise RuntimeError(
+                    f"dispatcher parent-loss {filename} evidence is invalid")
+            file_path = os.path.join(out_dir, filename)
+            rows = (
+                _read_jsonl_records_with_retry(file_path)
+                if os.path.isfile(file_path) else []
+            )
+            validated = {}
+            for entry in entries:
+                number = (
+                    entry.get("row_number")
+                    if isinstance(entry, dict) else None
+                )
+                digest = (
+                    entry.get("canonical_sha256")
+                    if isinstance(entry, dict) else None
+                )
+                if (not isinstance(number, int) or isinstance(number, bool)
+                        or not 1 <= number <= len(rows)
+                        or number in validated
+                        or not isinstance(digest, str)
+                        or digest != _canonical_record_sha256(
+                            rows[number - 1])):
+                    raise RuntimeError(
+                        f"dispatcher parent-loss {filename} evidence mismatch")
+                validated[number] = (entry, rows[number - 1])
+            return validated
+
+        current_api = _validate_incident_entries(
+            "api_calls.jsonl", record.get("incident_api_rows"))
+        current_attempts = _validate_incident_entries(
+            "api_attempt_ledger.jsonl",
+            record.get("incident_attempt_rows"))
+        prior_api_entries = {
+            (
+                item.get("row_number"),
+                item.get("canonical_sha256"),
+            ): item
+            for item in (
+                (superseded or {}).get("incident_api_rows") or [])
+        }
+        prior_attempt_entries = {
+            (
+                item.get("row_number"),
+                item.get("canonical_sha256"),
+            ): item
+            for item in (
+                (superseded or {}).get("incident_attempt_rows") or [])
+        }
+        new_api = []
+        for entry, row in current_api.values():
+            key = (entry.get("row_number"), entry.get("canonical_sha256"))
+            if key in prior_api_entries:
+                if prior_api_entries[key] != entry:
+                    raise RuntimeError(
+                        "dispatcher parent-loss prior API evidence drifted")
+            else:
+                new_api.append((entry, row))
+        new_attempts = []
+        for entry, row in current_attempts.values():
+            key = (entry.get("row_number"), entry.get("canonical_sha256"))
+            if key in prior_attempt_entries:
+                if prior_attempt_entries[key] != entry:
+                    raise RuntimeError(
+                        "dispatcher parent-loss prior attempt evidence drifted")
+            else:
+                new_attempts.append((entry, row))
+        if (set(prior_api_entries) - {
+                (entry.get("row_number"), entry.get("canonical_sha256"))
+                for entry, _row in current_api.values()
+        } or set(prior_attempt_entries) - {
+                (entry.get("row_number"), entry.get("canonical_sha256"))
+                for entry, _row in current_attempts.values()
+        }):
+            raise RuntimeError(
+                "dispatcher parent-loss superseded incident evidence is missing")
+
+        committed_call_ids = set()
+        manifest_methods = set((manifest.get("config") or {}).get(
+            "method_set") or [])
+        for sample in (manifest.get("config") or {}).get("samples") or []:
+            for method in manifest_methods:
+                result_path = os.path.join(
+                    out_dir, method, f"{sample}.jsonl")
+                if not os.path.isfile(result_path):
+                    continue
+                for result_row in _read_jsonl_records_with_retry(result_path):
+                    committed_call_ids.update(
+                        result_row.get("api_call_ids") or [])
+        expected_new_api_numbers = set()
+        all_api_rows = (
+            _read_jsonl_records_with_retry(
+                os.path.join(out_dir, "api_calls.jsonl"))
+            if os.path.isfile(os.path.join(
+                out_dir, "api_calls.jsonl")) else []
+        )
+        interrupted_worker_ids = {
+            worker_id for worker_id, item in current_workers.items()
+            if item["status"] == "interrupted_by_dispatcher"
+        }
+        for number, row in enumerate(all_api_rows, 1):
+            if (row.get("worker_launch_id") in interrupted_worker_ids
+                    and row.get("request_id") not in committed_call_ids):
+                expected_new_api_numbers.add(number)
+        if {
+                entry["row_number"] for entry, _row in new_api
+        } != expected_new_api_numbers:
+            raise RuntimeError(
+                "dispatcher parent-loss uncommitted API scope mismatch")
+        for entry, row in new_api:
+            worker = current_workers.get(row.get("worker_launch_id")) or {}
+            rt_index = row.get("rt_index")
+            method = row.get("method")
+            call_kind = row.get("call_kind")
+            allowed_call_kinds = (
+                {"hybridpatch_primary", "hybridpatch_repair"}
+                if method == "hybridpatch"
+                else {"fullrewrite_primary"}
+            )
+            attempts = row.get("transport_attempts")
+            if (entry.get("incident_kind")
+                    != "dispatcher_parent_loss_uncommitted_api"
+                    or row.get("schema") != API_CALL_SCHEMA
+                    or row.get("sample") != worker.get("sample")
+                    or row.get("worker_pid") != worker.get("worker_pid")
+                    or row.get("model") != "deepseek-v4-flash"
+                    or method not in manifest_methods
+                    or not isinstance(rt_index, int)
+                    or isinstance(rt_index, bool)
+                    or not 1 <= rt_index <= 10
+                    or row.get("direction") not in {"forward", "backward"}
+                    or call_kind not in allowed_call_kinds
+                    or row.get("transport") != "openai_sdk_stream"
+                    or row.get("transport_revision")
+                    != "opencode_openai_compatible/4"
+                    or row.get("provider_called") is not True
+                    or row.get("response_replayed") is not False
+                    or row.get("request_id") in committed_call_ids
+                    or row.get("classification") is not None
+                    or row.get("http_status") != 200
+                    or row.get("stream_complete") is not True
+                    or row.get("model_empty") is not False
+                    or not isinstance(row.get("input_tokens"), int)
+                    or isinstance(row.get("input_tokens"), bool)
+                    or row.get("input_tokens") < 0
+                    or not isinstance(row.get("output_tokens"), int)
+                    or isinstance(row.get("output_tokens"), bool)
+                    or row.get("output_tokens") < 0
+                    or not isinstance(attempts, list) or not attempts
+                    or row.get("http_attempts_used") != len(attempts)
+                    or row.get("retry_count") != len(attempts) - 1
+                    or attempts[-1].get("status") != "success"
+                    or attempts[-1].get("http_status") != 200
+                    or attempts[-1].get("stream_complete") is not True
+                    or attempts[-1].get("message_start_seen") is not True
+                    or attempts[-1].get("message_stop_seen") is not True
+                    or attempts[-1].get("final_usage_seen") is not True
+                    or attempts[-1].get("terminal_sequence_valid") is not True):
+                raise RuntimeError(
+                    "dispatcher parent-loss API incident is invalid")
+            budget_index = 0
+            for expected_index, attempt in enumerate(attempts, 1):
+                if attempt.get("attempt_index") != expected_index:
+                    raise RuntimeError(
+                        "dispatcher parent-loss retry sequence is invalid")
+                if expected_index == len(attempts):
+                    continue
+                free_503 = (
+                    attempt.get("http_status") == 503
+                    and attempt.get("generation_delta_seen") is False
+                )
+                if (attempt.get("status") != "retryable_error"
+                        or attempt.get("retry_budget_consumed")
+                        is not (not free_503)):
+                    raise RuntimeError(
+                        "dispatcher parent-loss retry sequence is invalid")
+                if not free_503:
+                    budget_index += 1
+                if attempt.get(
+                        "retry_budget_attempt_index") != budget_index:
+                    raise RuntimeError(
+                        "dispatcher parent-loss retry sequence is invalid")
+
+            sidecar_relative = entry.get("transport_sidecar_path")
+            sidecar_digest = entry.get("transport_sidecar_sha256")
+            if (not isinstance(sidecar_relative, str)
+                    or not sidecar_relative
+                    or not isinstance(sidecar_digest, str)
+                    or not sidecar_digest):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport sidecar evidence "
+                    "is invalid")
+            sidecar_path = os.path.realpath(os.path.join(
+                out_dir, sidecar_relative))
+            raw_path = os.path.realpath(str(
+                row.get("raw_sse_saved_path") or ""))
+            if (os.path.commonpath([out_dir, sidecar_path]) != out_dir
+                    or sidecar_path != raw_path
+                    or not os.path.isfile(sidecar_path)
+                    or _sha256_file(sidecar_path) != sidecar_digest):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport sidecar digest mismatch")
+            sidecar_rows = _read_jsonl_records_with_retry(sidecar_path)
+            starts = [
+                item for item in sidecar_rows
+                if item.get("record_type") == "attempt_start"
+            ]
+            ends = [
+                item.get("attempt") for item in sidecar_rows
+                if item.get("record_type") == "attempt_end"
+                and isinstance(item.get("attempt"), dict)
+            ]
+            if (len(starts) != len(attempts)
+                    or len(ends) != len(attempts)):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport sidecar is incomplete")
+            for expected_index, (attempt, start, end) in enumerate(
+                    zip(attempts, starts, ends), 1):
+                if (start.get("attempt_index") != expected_index
+                        or end != attempt
+                        or not any(
+                            item.get("record_type") == "sdk_stream_event"
+                            and item.get("attempt_index") == expected_index
+                            for item in sidecar_rows
+                        )):
+                    raise RuntimeError(
+                        "dispatcher parent-loss transport sidecar mismatch")
+        all_attempt_rows = (
+            _read_jsonl_records_with_retry(os.path.join(
+                out_dir, "api_attempt_ledger.jsonl"))
+            if os.path.isfile(os.path.join(
+                out_dir, "api_attempt_ledger.jsonl")) else []
+        )
+        open_groups = {}
+        for number, row in enumerate(all_attempt_rows, 1):
+            worker_id = row.get("worker_launch_id")
+            semantic_call_id = row.get("semantic_call_id")
+            if (worker_id in interrupted_worker_ids
+                    and isinstance(semantic_call_id, str)
+                    and semantic_call_id):
+                open_groups.setdefault(
+                    (worker_id, semantic_call_id), []).append((number, row))
+        expected_open_attempt_numbers = set()
+        for (_worker_id, semantic_call_id), group in open_groups.items():
+            events = [row.get("event") for _number, row in group]
+            starts = events.count("attempt_start")
+            ends = events.count("attempt_end")
+            pre_provider = (
+                starts == 0 and ends == 0
+                and events.count("semantic_request") == 1
+                and len(events) == 1
+            )
+            is_open = (
+                "response_committed" not in events
+                and (starts > ends or pre_provider)
+            )
+            if not is_open:
+                continue
+            journal_digest = hashlib.sha256(
+                semantic_call_id.encode("utf-8")).hexdigest()[:24]
+            if os.path.exists(os.path.join(
+                    out_dir, "api_journal",
+                    f"{journal_digest}.response.json")):
+                raise RuntimeError(
+                    "dispatcher parent-loss open attempt has a response journal")
+            expected_open_attempt_numbers.update(
+                number for number, _row in group)
+        if {
+                entry["row_number"] for entry, _row in new_attempts
+        } != expected_open_attempt_numbers:
+            raise RuntimeError(
+                "dispatcher parent-loss open attempt scope mismatch")
+        for entry, row in new_attempts:
+            if (entry.get("incident_kind")
+                    != "dispatcher_parent_loss_open_attempt"
+                    or row.get("worker_launch_id")
+                    not in interrupted_worker_ids
+                    or row.get("event") == "response_committed"):
+                raise RuntimeError(
+                    "dispatcher parent-loss attempt incident is invalid")
+
+        provider_worker_ids = {
+            row.get("worker_launch_id")
+            for row in all_api_rows + all_attempt_rows
+        }
+        no_provider_worker_ids = (
+            current_preauthorization_ids | current_registered_ids
+        )
+        if no_provider_worker_ids & provider_worker_ids:
+            raise RuntimeError(
+                "dispatcher parent-loss preauthorization provider evidence "
+                "is not empty")
+        for worker_id in interrupted_worker_ids:
+            if (worker_id not in authorizations
+                    and worker_id in provider_worker_ids):
+                raise RuntimeError(
+                    "dispatcher parent-loss unauthorized worker has provider "
+                    "evidence")
+
+        sidecar_entries = record.get("incident_transport_sidecars")
+        if not isinstance(sidecar_entries, list):
+            raise RuntimeError(
+                "dispatcher parent-loss transport incident evidence is invalid")
+        prior_sidecars = {
+            (item.get("path"), item.get("sha256")): item
+            for item in (
+                (superseded or {}).get(
+                    "incident_transport_sidecars") or [])
+        }
+        new_sidecars = {}
+        current_sidecar_keys = set()
+        for entry in sidecar_entries:
+            if not isinstance(entry, dict):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport incident evidence "
+                    "is invalid")
+            key = (entry.get("path"), entry.get("sha256"))
+            if (not isinstance(key[0], str) or not key[0]
+                    or not isinstance(key[1], str) or not key[1]
+                    or key in current_sidecar_keys):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport incident evidence "
+                    "is invalid")
+            current_sidecar_keys.add(key)
+            if key in prior_sidecars:
+                if prior_sidecars[key] != entry:
+                    raise RuntimeError(
+                        "dispatcher parent-loss prior transport evidence "
+                        "drifted")
+                continue
+            path = os.path.realpath(os.path.join(out_dir, key[0]))
+            if (os.path.commonpath([out_dir, path]) != out_dir
+                    or not os.path.isfile(path)
+                    or _sha256_file(path) != key[1]):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport incident digest mismatch")
+            rows = _read_jsonl_records_with_retry(path)
+            worker_id = entry.get("worker_launch_id")
+            worker = current_workers.get(worker_id) or {}
+            starts = [
+                row for row in rows
+                if row.get("record_type") == "attempt_start"
+            ]
+            ends = [
+                row for row in rows
+                if row.get("record_type") == "attempt_end"
+            ]
+            if (worker_id not in interrupted_worker_ids
+                    or not rows
+                    or any(
+                        row.get("transport_event_schema")
+                        != "anchorpatch.transport_event/1"
+                        or row.get("worker_launch_id") != worker_id
+                        or row.get("worker_pid") != worker.get("worker_pid")
+                        or row.get("sample") != worker.get("sample")
+                        or row.get("method") != entry.get("method")
+                        or row.get("rt_index") != entry.get("rt_index")
+                        or row.get("direction") != entry.get("direction")
+                        or row.get("call_id") != entry.get("call_id")
+                        for row in rows
+                    )
+                    or entry.get("sample") != worker.get("sample")
+                    or entry.get("worker_pid") != worker.get("worker_pid")
+                    or entry.get("method") not in manifest_methods
+                    or not isinstance(entry.get("rt_index"), int)
+                    or isinstance(entry.get("rt_index"), bool)
+                    or not 1 <= entry.get("rt_index") <= 10
+                    or entry.get("direction") not in {
+                        "forward", "backward"}
+                    or entry.get("event_count") != len(rows)
+                    or entry.get("attempt_start_count") != len(starts)
+                    or entry.get("attempt_end_count") != len(ends)
+                    or not starts or len(ends) > len(starts)):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport incident scope mismatch")
+            expected_state = (
+                "open_attempt" if len(ends) < len(starts)
+                else (
+                    "complete_unpublished_response"
+                    if (
+                        isinstance(ends[-1].get("attempt"), dict)
+                        and ends[-1]["attempt"].get("status") == "success"
+                        and ends[-1]["attempt"].get("stream_complete") is True
+                    )
+                    else "retry_or_error_unpublished"
+                )
+            )
+            if entry.get("state") != expected_state:
+                raise RuntimeError(
+                    "dispatcher parent-loss transport incident state mismatch")
+            new_sidecars[path] = entry
+        if set(prior_sidecars) - current_sidecar_keys:
+            raise RuntimeError(
+                "dispatcher parent-loss superseded transport evidence "
+                "is missing")
+
+        mapped_sidecars = {
+            os.path.realpath(row.get("raw_sse_saved_path"))
+            for row in all_api_rows
+            if isinstance(row.get("raw_sse_saved_path"), str)
+            and row.get("raw_sse_saved_path")
+        }
+        expected_new_sidecars = set()
+        raw_root = os.path.join(out_dir, "api_raw")
+        if os.path.isdir(raw_root):
+            for root, _dirs, files in os.walk(raw_root):
+                for name in files:
+                    if not name.endswith(".transport.jsonl"):
+                        continue
+                    path = os.path.realpath(os.path.join(root, name))
+                    if path in mapped_sidecars:
+                        continue
+                    rows = _read_jsonl_records_with_retry(path)
+                    if rows and {
+                            row.get("worker_launch_id") for row in rows
+                    } & interrupted_worker_ids:
+                        expected_new_sidecars.add(path)
+        if set(new_sidecars) != expected_new_sidecars:
+            raise RuntimeError(
+                "dispatcher parent-loss transport incident set mismatch")
 
     identity_history = [{
         "authorization_id": None,
@@ -3367,15 +4708,19 @@ def campaign_recovery_incident_evidence(out_dir):
     """Return exact row hashes and workers covered by a V2 lock recovery."""
     authorization = read_campaign_recovery_authorization(out_dir)
     if (not authorization
-            or authorization.get("recovery_kind")
-            != LEDGER_LOCK_RECOVERY_KIND):
+            or authorization.get("recovery_kind") not in {
+                LEDGER_LOCK_RECOVERY_KIND,
+                DISPATCHER_PROCESS_LOST_RECOVERY_KIND,
+            }):
         return {
             "api_row_hashes": frozenset(),
             "attempt_row_hashes": frozenset(),
+            "transport_sidecar_hashes": frozenset(),
             "worker_launch_ids": frozenset(),
             "preauthorization_worker_launch_ids": frozenset(),
             "provider_access_retry_authorizations": {},
             "provider_access_resume_samples": frozenset(),
+            "dispatcher_parent_loss_workers": {},
             "authorization_id": None,
         }
     provider_access_retries = {
@@ -3392,6 +4737,11 @@ def campaign_recovery_incident_evidence(out_dir):
             item["canonical_sha256"]
             for item in authorization["incident_attempt_rows"]
         }),
+        "transport_sidecar_hashes": frozenset({
+            item["sha256"]
+            for item in authorization.get(
+                "incident_transport_sidecars", [])
+        }),
         "worker_launch_ids": frozenset(
             authorization["recovered_worker_launch_ids"]),
         "preauthorization_worker_launch_ids": frozenset(
@@ -3399,6 +4749,13 @@ def campaign_recovery_incident_evidence(out_dir):
         "provider_access_retry_authorizations": provider_access_retries,
         "provider_access_resume_samples": frozenset(
             authorization.get("provider_access_resume_samples") or []),
+        "dispatcher_parent_loss_workers": {
+            item["sample"]: dict(item)
+            for item in authorization.get(
+                "dispatcher_parent_loss_resume_workers")
+            or authorization.get(
+                "dispatcher_parent_loss_workers", [])
+        },
         "authorization_id": authorization["authorization_id"],
     }
 
@@ -3602,14 +4959,22 @@ def interrupt_running_invocations(out_dir, *, status, worker_launch_ids=None):
     return changed
 
 
-def interrupt_audited_running_invocations(out_dir, *, status, audited):
+def interrupt_audited_running_invocations(
+        out_dir, *, status=None, statuses=None, audited):
     """Atomically close exactly the stale invocations audited by the caller.
 
     Any new or identity-changed ``running`` record makes the transition fail
     without editing metadata. This closes the audit-to-interrupt TOCTOU window.
     """
-    if status == "running" or not isinstance(status, str) or not status:
+    if (status is None) == (statuses is None):
+        raise ValueError(
+            "provide exactly one uniform status or per-invocation statuses")
+    if status is not None and (
+            status == "running"
+            or not isinstance(status, str) or not status):
         raise ValueError("interrupt status must be a non-running string")
+    if statuses is not None and not isinstance(statuses, dict):
+        raise ValueError("per-invocation statuses must be a mapping")
     audited = list(audited or [])
     expected = {}
     for item in audited:
@@ -3629,6 +4994,18 @@ def interrupt_audited_running_invocations(out_dir, *, status, audited):
         expected[invocation_id] = (worker_id, worker_pid, sample)
     if len(expected) != len(audited):
         raise RuntimeError("audited running invocation identities are invalid")
+    status_by_invocation = (
+        {invocation_id: status for invocation_id in expected}
+        if status is not None else dict(statuses)
+    )
+    if (set(status_by_invocation) != set(expected)
+            or any(
+                value == "running"
+                or not isinstance(value, str) or not value
+                for value in status_by_invocation.values()
+            )):
+        raise RuntimeError(
+            "per-invocation terminal statuses are invalid")
     changed = []
     with _campaign_metadata_lock(out_dir) as metadata_path:
         records = _read_run_metadata_strict(metadata_path)
@@ -3656,7 +5033,8 @@ def interrupt_audited_running_invocations(out_dir, *, status, audited):
                 )
         finished_now = _aware_now()
         for record in running:
-            record["status"] = status
+            record["status"] = status_by_invocation[
+                record["invocation_id"]]
             record["invocation_finished_at"] = _iso_with_timezone(finished_now)
             changed.append({
                 "invocation_id": record.get("invocation_id"),
@@ -3880,13 +5258,16 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                     continue
                 authorization_id = identity.get("authorization_id")
                 if authorization_id is None:
-                    return boundary is None
-                return bool(
+                    if boundary is None:
+                        return True
+                    continue
+                if (
                     isinstance(boundary, dict)
                     and boundary.get("authorization_id") == authorization_id
                     and boundary.get("authorization_sha256")
                     == identity.get("authorization_sha256")
-                )
+                ):
+                    return True
             return False
 
         recovery_identity_history_valid = bool(
@@ -3894,6 +5275,12 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             and prior
             and all(_matches_authorized_identity(record) for record in prior)
         )
+        if (recovery_authorization and prior
+                and not recovery_identity_history_valid):
+            raise RuntimeError(
+                f"refusing to resume/mix {out_dir!r}: prior recovery "
+                "authorization boundary differs from the validated chain"
+            )
         for key, current in identity_fields.items():
             if recovery_identity_history_valid:
                 continue
@@ -4007,6 +5394,13 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                 "ANCHORPATCH_WORKER_LAUNCH_ID"
             ),
             "worker_pid": os.getpid(),
+            "dispatcher_pid": (
+                int(os.environ["ANCHORPATCH_DISPATCHER_PID"])
+                if os.environ.get("ANCHORPATCH_DISPATCHER_PID")
+                else None
+            ),
+            "dispatcher_instance_id": os.environ.get(
+                "ANCHORPATCH_DISPATCHER_INSTANCE_ID"),
             "transport_resume_authorization": transport_resume_authorization,
             "campaign_recovery_authorization": (
                 {

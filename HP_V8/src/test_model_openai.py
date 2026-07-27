@@ -10,6 +10,7 @@ import sys
 import tempfile
 import textwrap
 import threading
+import traceback
 import unittest
 from datetime import datetime
 from unittest import mock
@@ -2132,6 +2133,8 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(active, {
                 "schema": "anchorpatch.active_worker_set/1",
                 "run_git_commit": "1" * 40,
+                "dispatcher_pid": None,
+                "dispatcher_instance_id": None,
                 "workers": {},
             })
             manifest = paired_dispatch._read_json(os.path.join(
@@ -6066,6 +6069,18 @@ class IntegrationContractTests(unittest.TestCase):
                 [{"value": 1}],
             )
 
+            json_path = os.path.join(out_dir, "active_worker_set.json")
+            attempts.clear()
+            with mock.patch.object(
+                    run_meta.os, "replace",
+                    side_effect=flaky_replace), mock.patch.object(
+                    run_meta.time, "sleep") as sleep:
+                run_meta.write_json_atomic(json_path, {"workers": {}})
+            self.assertEqual(len(attempts), 2)
+            sleep.assert_called_once_with(0.05)
+            with open(json_path, encoding="utf-8") as handle:
+                self.assertEqual(json.load(handle), {"workers": {}})
+
     def test_api_recorder_filters_only_authorized_lock_incident_rows(self):
         with tempfile.TemporaryDirectory() as out_dir:
             semantic = (
@@ -6446,7 +6461,7 @@ class IntegrationContractTests(unittest.TestCase):
             result["closed_invocations"],
             [{"invocation_id": "invocation-a"}],
         )
-        leases_free.assert_called_once_with(out_dir, running)
+        leases_free.assert_called_once_with(out_dir, ["sample"])
         audit.assert_called_once_with(out_dir)
         interrupt.assert_called_once_with(
             out_dir,
@@ -6458,6 +6473,32 @@ class IntegrationContractTests(unittest.TestCase):
                 "sample": "sample",
             }],
         )
+
+    def test_reconcile_full_lease_scope_preserves_live_orphan_metadata(self):
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_terminate_workers") as terminate, \
+                mock.patch.object(
+                    paired_dispatch, "_assert_worker_leases_free",
+                    side_effect=RuntimeError("worker lease still held: orphan"),
+                ) as leases_free, \
+                mock.patch.object(
+                    paired_dispatch,
+                    "_audit_running_invocation_provenance",
+                ) as audit, \
+                mock.patch.object(
+                    paired_dispatch,
+                    "interrupt_audited_running_invocations",
+                ) as interrupt:
+            result = paired_dispatch._stop_and_reconcile_workers(
+                out_dir, {}, lease_scope=["orphan"])
+        terminate.assert_called_once_with({})
+        leases_free.assert_called_once_with(out_dir, ["orphan"])
+        self.assertIn("still held", result["lease_error"])
+        self.assertEqual(result["lease_scope"], ["orphan"])
+        self.assertEqual(result["closed_invocations"], [])
+        audit.assert_not_called()
+        interrupt.assert_not_called()
 
     def test_dispatch_retains_active_worker_until_lease_and_metadata_close(self):
         class FakeProcess:
@@ -7131,6 +7172,40 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(
                 snapshot[0]["task_plans"]["sample"]["sha256"], plan_sha)
 
+    def test_worker_authorization_retries_transient_active_set_read(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            worker_id = "worker-a"
+            active_path = os.path.join(out_dir, "active_worker_set.json")
+            run_meta.write_json_atomic(active_path, {
+                "schema": "anchorpatch.active_worker_set/1",
+                "workers": {worker_id: {"sample": "sample"}},
+            })
+            real_open = open
+            reads = []
+
+            def flaky_open(path, *args, **kwargs):
+                if os.path.abspath(path) == os.path.abspath(active_path):
+                    reads.append(path)
+                    if len(reads) == 1:
+                        error = PermissionError(
+                            13, "transient sharing violation")
+                        error.winerror = 5
+                        raise error
+                return real_open(path, *args, **kwargs)
+
+            with mock.patch.dict(os.environ, {
+                "ANCHORPATCH_WORKER_LAUNCH_ID": worker_id,
+                "ANCHORPATCH_ACTIVE_WORKER_SET_PATH": active_path,
+            }, clear=False), mock.patch(
+                "builtins.open", side_effect=flaky_open
+            ), mock.patch.object(run_meta.time, "sleep") as sleep:
+                run_meta.enforce_active_worker_authorization(
+                    out_dir, "sample")
+            self.assertEqual(len(reads), 2)
+            sleep.assert_called_once_with(0.05)
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir), [])
+
     def test_standalone_runner_cannot_race_paired_dispatcher_lock(self):
         with tempfile.TemporaryDirectory() as out_dir:
             argv = [
@@ -7652,6 +7727,9 @@ class IntegrationContractTests(unittest.TestCase):
             samples_folder = None
 
         class DummyExecLog:
+            def __init__(self, preservation_violations):
+                self.preservation_violations = preservation_violations
+
             def to_dict(self):
                 return {"ops_accepted": 1, "ops_total": 1}
 
@@ -7668,10 +7746,12 @@ class IntegrationContractTests(unittest.TestCase):
             },
         }
         sample = {"start_state": "initial", "sample_type": "dummy"}
-        edit_result = (
-            "raw", {"a.txt": "new"}, {}, DummyExecLog(), "hybridpatch",
-            {"a.txt": "old"}, {},
-        )
+        def edit_result(preservation_violations):
+            return (
+                "raw", {"a.txt": "new"}, {},
+                DummyExecLog(preservation_violations), "hybridpatch",
+                {"a.txt": "old"}, {},
+            )
         with tempfile.TemporaryDirectory() as forward_dir, \
                 tempfile.TemporaryDirectory() as backward_dir, \
                 mock.patch.object(
@@ -7711,7 +7791,7 @@ class IntegrationContractTests(unittest.TestCase):
                 mock.patch.object(
                     experiment_runner, "_evaluate",
                     return_value={"score": 1.0},
-                ), \
+                ) as evaluate, \
                 mock.patch.object(
                     experiment_runner, "is_context_complete",
                     return_value=True,
@@ -7725,7 +7805,7 @@ class IntegrationContractTests(unittest.TestCase):
                 ), \
                 mock.patch.object(
                     experiment_runner, "_edit_step",
-                    return_value=edit_result,
+                    return_value=edit_result(1),
                 ) as edit_step, \
                 mock.patch.object(
                     experiment_runner, "append_relay_rows_and_checkpoint"
@@ -7743,6 +7823,7 @@ class IntegrationContractTests(unittest.TestCase):
                     stop_on_preservation_violation=True,
                 )
             self.assertEqual(edit_step.call_count, 1)
+            evaluate.assert_not_called()
             commit.assert_not_called()
             forward_stop = run_meta.read_campaign_stop_conditions(
                 forward_dir)[0]
@@ -7752,13 +7833,16 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertFalse(forward_stop["result_committed"])
 
             edit_step.reset_mock()
+            evaluate.reset_mock()
             commit.reset_mock()
+            edit_step.side_effect = [
+                edit_result(0), edit_result(1),
+            ]
             make_row.side_effect = [
                 {
                     "bdpatch": {"preservation_violations": 0},
                     "evaluation": {"score": 1.0},
                 },
-                {"bdpatch": {"preservation_violations": 1}},
             ]
             with self.assertRaisesRegex(RuntimeError, "/backward"):
                 experiment_runner.run_relay(
@@ -7769,6 +7853,7 @@ class IntegrationContractTests(unittest.TestCase):
                     stop_on_preservation_violation=True,
                 )
             self.assertEqual(edit_step.call_count, 2)
+            self.assertEqual(evaluate.call_count, 1)
             commit.assert_not_called()
             backward_stop = run_meta.read_campaign_stop_conditions(
                 backward_dir)[0]
@@ -9783,6 +9868,229 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(record["max_tokens"], 131072)
             self.assertEqual(record["thinking_mode"], "adaptive")
 
+    def test_deepseek_failed_attempt_body_persists_in_api_row_and_sidecar(self):
+        secret = "unit-test-key"
+        sanitized_attempt = {
+            "attempt_index": 1,
+            "status": "retryable_error",
+            "error_type": "server_error",
+            "http_status": 502,
+            "stream_complete": False,
+            "retry_budget_consumed": True,
+            "retry_budget_attempt_index": 3,
+            "error_body": {
+                "error_name": "origin_bad_gateway",
+                "detail": "<redacted-key>",
+            },
+        }
+        raw_attempt = copy.deepcopy(sanitized_attempt)
+        raw_attempt["error_body"]["detail"] = secret
+        last_error = model_openai._HTTPStatusError(
+            502, json.dumps(raw_attempt["error_body"]))
+        terminal = model_openai.OpenAICompatibleTransportError(
+            "failed transport",
+            attempts=[sanitized_attempt],
+            last_error=last_error,
+        )
+
+        def fail_generate(*_args, **kwargs):
+            sink = kwargs["_raw_event_sink"]
+            sink({
+                "record_type": "attempt_start",
+                "attempt_index": 1,
+            })
+            sink({
+                "record_type": "attempt_end",
+                "attempt_index": 1,
+                "attempt": raw_attempt,
+            })
+            raise terminal
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": secret,
+                "OPENAI_BASE_URL": paired_dispatch.DEEPSEEK_BASE_URL,
+            },
+            clear=False,
+        ):
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                paired_dispatch.DEEPSEEK_MODEL, fail_generate)
+            recorder.set_step(1, "forward", "target")
+            with self.assertRaises(
+                    model_openai.OpenAICompatibleTransportError):
+                recorder.generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model=paired_dispatch.DEEPSEEK_MODEL,
+                    max_tokens=paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                    reasoning_effort="high",
+                    call_kind="hybridpatch_primary",
+                )
+            record = next(iter(recorder.records_by_id.values()))
+            self.assertEqual(
+                record["transport_revision"],
+                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION)
+            self.assertEqual(
+                record["transport_attempts"][0]["error_body"],
+                sanitized_attempt["error_body"])
+            sidecar = record["raw_sse_saved_path"]
+            self.assertTrue(os.path.isfile(sidecar))
+            with open(sidecar, encoding="utf-8") as handle:
+                sidecar_text = handle.read()
+            self.assertIn("origin_bad_gateway", sidecar_text)
+            self.assertIn("<redacted-key>", sidecar_text)
+            self.assertNotIn(secret, sidecar_text)
+            with open(
+                os.path.join(out_dir, "api_calls.jsonl"),
+                encoding="utf-8",
+            ) as handle:
+                self.assertNotIn(secret, handle.read())
+
+    def test_deepseek_sidecar_write_failure_aborts_before_success_commit(self):
+        real_open = open
+
+        class FailingTransportFile:
+            def __init__(self, inner):
+                self._inner = inner
+
+            @property
+            def closed(self):
+                return self._inner.closed
+
+            def write(self, _value):
+                raise OSError("transport sidecar write failed")
+
+            def flush(self):
+                self._inner.flush()
+
+            def close(self):
+                self._inner.close()
+
+        def selective_open(path, *args, **kwargs):
+            inner = real_open(path, *args, **kwargs)
+            if str(path).endswith(".transport.jsonl"):
+                return FailingTransportFile(inner)
+            return inner
+
+        def fake_generate(*_args, **kwargs):
+            model_openai._emit_transport_event(
+                kwargs["_raw_event_sink"],
+                {
+                    "record_type": "attempt_start",
+                    "attempt_index": 1,
+                },
+            )
+            self.fail("provider call continued after sidecar write failure")
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "unit-test-key",
+                    "OPENAI_BASE_URL": paired_dispatch.DEEPSEEK_BASE_URL,
+                },
+                clear=False), mock.patch.object(
+                    run_meta, "open", side_effect=selective_open,
+                    create=True):
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                paired_dispatch.DEEPSEEK_MODEL, fake_generate)
+            recorder.set_step(1, "forward", "target")
+            with self.assertRaisesRegex(
+                    OSError, "transport sidecar write failed"):
+                recorder.generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model=paired_dispatch.DEEPSEEK_MODEL,
+                    max_tokens=paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                    reasoning_effort="high",
+                    call_kind="hybridpatch_primary",
+                )
+            record = next(iter(recorder.records_by_id.values()))
+            self.assertEqual(record["classification"], "runner_exception")
+            self.assertFalse(record["provider_called"])
+            self.assertFalse(record["stream_complete"])
+            self.assertIsNone(record["raw_sse_saved_path"])
+
+    def test_deepseek_sidecar_fsync_failure_aborts_before_success_commit(self):
+        real_open = open
+        real_fsync = run_meta.os.fsync
+        transport_fd = 987654321
+
+        class FailingFsyncTransportFile:
+            def __init__(self, inner):
+                self._inner = inner
+
+            @property
+            def closed(self):
+                return self._inner.closed
+
+            def write(self, value):
+                return self._inner.write(value)
+
+            def flush(self):
+                return self._inner.flush()
+
+            def fileno(self):
+                return transport_fd
+
+            def close(self):
+                self._inner.close()
+
+        def selective_open(path, *args, **kwargs):
+            inner = real_open(path, *args, **kwargs)
+            if str(path).endswith(".transport.jsonl"):
+                return FailingFsyncTransportFile(inner)
+            return inner
+
+        def selective_fsync(fd):
+            if fd == transport_fd:
+                raise OSError("transport sidecar fsync failed")
+            return real_fsync(fd)
+
+        def fake_generate(*_args, **kwargs):
+            sink = kwargs["_raw_event_sink"]
+            model_openai._emit_transport_event(sink, {
+                "record_type": "attempt_start",
+                "attempt_index": 1,
+            })
+            model_openai._emit_transport_event(sink, {
+                "record_type": "attempt_end",
+                "attempt_index": 1,
+                "attempt": {
+                    "attempt_index": 1,
+                    "status": "success",
+                },
+            })
+            self.fail("provider result continued after sidecar fsync failure")
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "unit-test-key",
+                    "OPENAI_BASE_URL": paired_dispatch.DEEPSEEK_BASE_URL,
+                },
+                clear=False), mock.patch.object(
+                    run_meta, "open", side_effect=selective_open,
+                    create=True), mock.patch.object(
+                        run_meta.os, "fsync", side_effect=selective_fsync):
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                paired_dispatch.DEEPSEEK_MODEL, fake_generate)
+            recorder.set_step(1, "forward", "target")
+            with self.assertRaisesRegex(
+                    OSError, "transport sidecar fsync failed"):
+                recorder.generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model=paired_dispatch.DEEPSEEK_MODEL,
+                    max_tokens=paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                    reasoning_effort="high",
+                    call_kind="hybridpatch_primary",
+                )
+            record = next(iter(recorder.records_by_id.values()))
+            self.assertEqual(record["classification"], "runner_exception")
+            self.assertTrue(record["provider_called"])
+            self.assertFalse(record["stream_complete"])
+
     def test_run_metadata_rejects_unversioned_resume(self):
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
             os.environ, {"OPENCODE_TRANSPORT": "anthropic_sdk_v2"}, clear=False
@@ -9827,6 +10135,52 @@ def _official_payload(content="Hello", finish_reason="stop"):
     }
 
 
+def _stream_chunks_from_payload(payload):
+    choice = (payload.get("choices") or [{}])[0]
+    message = choice.get("message") or {}
+    common = {
+        "id": payload.get("id"),
+        "model": "deepseek-v4-flash",
+    }
+    chunks = [{
+        **common,
+        "choices": [{
+            "index": 0,
+            "delta": {
+                "role": "assistant",
+                "reasoning_details": message.get("reasoning_details") or [],
+            },
+            "finish_reason": None,
+        }],
+        "usage": None,
+    }]
+    if message.get("content") is not None:
+        chunks.append({
+            **common,
+            "choices": [{
+                "index": 0,
+                "delta": {"content": message.get("content")},
+                "finish_reason": None,
+            }],
+            "usage": None,
+        })
+    chunks.append({
+        **common,
+        "choices": [{
+            "index": 0,
+            "delta": {},
+            "finish_reason": choice.get("finish_reason"),
+        }],
+        "usage": None,
+    })
+    chunks.append({
+        **common,
+        "choices": [],
+        "usage": payload.get("usage"),
+    })
+    return chunks
+
+
 def _official_client_factory(outcomes, captures):
     """outcomes: list of payload dicts or Exceptions, consumed per call."""
 
@@ -9836,6 +10190,19 @@ def _official_client_factory(outcomes, captures):
             outcome = outcomes.pop(0)
             if isinstance(outcome, Exception):
                 raise outcome
+            if kwargs.get("stream"):
+                chunks = (
+                    outcome if isinstance(outcome, list)
+                    else _stream_chunks_from_payload(outcome)
+                )
+
+                def _iter_chunks():
+                    for chunk in chunks:
+                        if isinstance(chunk, Exception):
+                            raise chunk
+                        yield chunk
+
+                return _iter_chunks()
             return _FakeOfficialResponse(outcome)
 
     class _Chat:
@@ -9854,6 +10221,8 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         env = {
             "OPENAI_API_KEY": "unit-test-key",
             "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "AZURE_OPENAI_API_KEY": "",
+            "AZURE_OPENAI_ENDPOINT": "",
         }
         fake_cls = _official_client_factory(list(outcomes), captures)
         events = []
@@ -9886,24 +10255,32 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(request["model"], "deepseek-v4-flash")
         self.assertEqual(request["reasoning_effort"], "high")
         self.assertEqual(request["max_completion_tokens"], 20000)
+        self.assertIs(request["stream"], True)
+        self.assertEqual(
+            request["stream_options"], {"include_usage": True})
         self.assertEqual(
             result["_raw_request_body"]["reasoning_effort"], "high")
         self.assertEqual(result["provider"], "opencode_zen")
-        self.assertEqual(result["transport"], "openai_sdk_nonstream")
+        self.assertEqual(result["transport"], "openai_sdk_stream")
         self.assertEqual(
-            result["transport_revision"], "opencode_openai_compatible/3")
+            result["transport_revision"], "opencode_openai_compatible/4")
         self.assertEqual(
             result["request_url"],
             "https://opencode.ai/zen/go/v1/chat/completions")
         self.assertEqual(result["reasoning_effort"], "high")
+        self.assertIs(result["stream_complete"], True)
+        self.assertEqual(len(result["_raw_stream_events"]), 4)
         self.assertEqual(result["http_attempts_used"], 1)
         self.assertEqual(result["retry_count"], 0)
         self.assertEqual(result["cost_currency"], "USD")
         self.assertAlmostEqual(result["total_usd"], 0.00000252)
         self.assertEqual(result["total_cny"], 0.0)
+        self.assertEqual(events[0]["record_type"], "attempt_start")
+        self.assertEqual(events[-1]["record_type"], "attempt_end")
         self.assertEqual(
-            [event["record_type"] for event in events],
-            ["attempt_start", "attempt_end"],
+            sum(event["record_type"] == "sdk_stream_event"
+                for event in events),
+            4,
         )
 
     def test_retryable_failure_is_bounded_and_recorded(self):
@@ -9923,15 +10300,22 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             ["retryable_error", "success"],
         )
         self.assertEqual(
-            [event["record_type"] for event in events],
+            [event["record_type"] for event in events
+             if event["record_type"] != "sdk_stream_event"],
             ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
         )
 
     def test_503_retries_do_not_consume_retry_budget(self):
         captures = []
+        body = {
+            "error_name": "failover_exhausted",
+            "detail": "Inference is temporarily unavailable",
+            "retry_after": 12,
+        }
         result, _events = self._generate(
             [
-                model_openai._HTTPStatusError(503, "unavailable"),
+                model_openai._HTTPStatusError(
+                    503, json.dumps(body, ensure_ascii=False)),
                 model_openai._HTTPStatusError(503, "unavailable"),
                 model_openai._HTTPStatusError(503, "unavailable"),
                 _official_payload(content="Hello", finish_reason="stop"),
@@ -9949,6 +10333,196 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertTrue(all(
             item["retry_budget_attempt_index"] == 0 for item in failed
         ))
+        self.assertEqual(failed[0]["error_body"], body)
+        self.assertEqual(failed[0]["retry_after_seconds"], 12)
+        self.assertGreaterEqual(failed[1]["retry_after_seconds"], 10)
+        self.assertGreater(
+            failed[2]["retry_after_seconds"],
+            failed[1]["retry_after_seconds"],
+        )
+        self.assertLessEqual(failed[2]["retry_after_seconds"], 300)
+
+    def test_partial_stream_is_discarded_and_retried(self):
+        captures = []
+        partial = [{
+            "id": "partial",
+            "model": "deepseek-v4-flash",
+            "choices": [{
+                "index": 0,
+                "delta": {"content": "must-not-leak"},
+                "finish_reason": None,
+            }],
+            "usage": None,
+        }]
+        result, _events = self._generate(
+            [partial, _official_payload(content="complete")],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        self.assertEqual(result["failed_attempt_count"], 1)
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(first["http_status"], 200)
+        self.assertEqual(first["response_started_http_status"], 200)
+        self.assertTrue(first["generation_delta_seen"])
+        self.assertTrue(first["retry_budget_consumed"])
+        self.assertNotIn("must-not-leak", result["message"])
+
+    def test_503_after_generation_delta_consumes_stream_retry_budget(self):
+        captures = []
+        partial = [
+            {
+                "id": "partial-503",
+                "model": "deepseek-v4-flash",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "must-not-leak"},
+                    "finish_reason": None,
+                }],
+                "usage": None,
+            },
+            model_openai._HTTPStatusError(
+                503,
+                json.dumps({
+                    "error_name": "failover_exhausted",
+                    "detail": "Inference is temporarily unavailable",
+                })),
+        ]
+        result, _events = self._generate(
+            [partial, _official_payload(content="complete")],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["http_status"], 503)
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertTrue(first["generation_delta_seen"])
+        self.assertTrue(first["retry_budget_consumed"])
+        self.assertEqual(first["retry_budget_attempt_index"], 1)
+        self.assertEqual(result["message"], "complete")
+
+    def test_usage_before_finish_is_not_terminal_usage(self):
+        captures = []
+        malformed = [{
+            "id": "early-usage",
+            "model": "deepseek-v4-flash",
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+            },
+        }, *_stream_chunks_from_payload(_official_payload(content="bad"))]
+        result, _events = self._generate(
+            [malformed, _official_payload(content="complete")],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertFalse(first["terminal_sequence_valid"])
+        self.assertEqual(first["http_status"], 200)
+        self.assertEqual(result["message"], "complete")
+
+    def test_empty_terminal_usage_is_incomplete(self):
+        captures = []
+        malformed = _stream_chunks_from_payload(
+            _official_payload(content="bad"))
+        malformed[-1] = {**malformed[-1], "usage": {}}
+        result, _events = self._generate(
+            [malformed, _official_payload(content="complete")],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertFalse(first["final_usage_seen"])
+        self.assertEqual(first["http_status"], 200)
+        self.assertEqual(result["message"], "complete")
+
+    def test_reasoning_only_stream_is_complete_model_empty(self):
+        captures = []
+        payload = _official_payload(content="", finish_reason="stop")
+        result, _events = self._generate([payload], captures)
+        self.assertEqual(result["message"], "")
+        self.assertTrue(result["stream_complete"])
+        self.assertEqual(result["response_classification"], "model_empty")
+        attempt = result["transport_attempts"][-1]
+        self.assertTrue(attempt["thinking_delta_seen"])
+        self.assertTrue(attempt["final_usage_seen"])
+        self.assertTrue(attempt["terminal_sequence_valid"])
+
+    def test_502_body_is_preserved_redacted_and_retry_after_is_honored(self):
+        captures = []
+        body = {
+            "error_name": "origin_bad_gateway",
+            "retry_after": 60,
+            "detail": "unit-test-key",
+        }
+        result, _events = self._generate(
+            [
+                model_openai._HTTPStatusError(
+                    502, json.dumps(body, ensure_ascii=False)),
+                _official_payload(),
+            ],
+            captures,
+        )
+        attempt = result["transport_attempts"][0]
+        self.assertEqual(attempt["http_status"], 502)
+        self.assertEqual(attempt["error_body"], {
+            "error_name": "origin_bad_gateway",
+            "retry_after": 60,
+            "detail": "<redacted-key>",
+        })
+        self.assertEqual(attempt["retry_after_seconds"], 60)
+        self.assertTrue(attempt["retry_budget_consumed"])
+
+    def test_terminal_5xx_traceback_does_not_retain_provider_secret(self):
+        captures = []
+        secret = "unit-test-key"
+        body = json.dumps({
+            "error_name": "origin_bad_gateway",
+            "detail": secret,
+        })
+        fake_cls = _official_client_factory(
+            [model_openai._HTTPStatusError(502, body)], captures)
+        events = []
+        with mock.patch.dict(os.environ, {
+                "OPENAI_API_KEY": secret,
+                "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+                "AZURE_OPENAI_API_KEY": "",
+                "AZURE_OPENAI_ENDPOINT": "",
+        }, clear=False), mock.patch.object(
+                model_openai, "OpenAI", fake_cls), mock.patch.object(
+                    model_openai.time, "sleep"):
+            with self.assertRaises(
+                    model_openai.OpenAICompatibleTransportError) as caught:
+                model_openai.OpenAI_Model().generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="deepseek-v4-flash",
+                    max_tokens=20000,
+                    max_retries=1,
+                    reasoning_effort="high",
+                    return_metadata=True,
+                    _raw_event_sink=events.append,
+                )
+
+        rendered = "".join(traceback.format_exception(
+            caught.exception))
+        attempts = json.dumps(
+            caught.exception.transport_attempts, ensure_ascii=False)
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn(secret, str(caught.exception.last_error))
+        self.assertNotIn(secret, attempts)
+        self.assertIn("<redacted-key>", attempts)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertIsNone(caught.exception.__cause__)
+        frame_last_errors = []
+        trace = caught.exception.__traceback__
+        while trace is not None:
+            if trace.tb_frame.f_code.co_filename == model_openai.__file__:
+                retained = trace.tb_frame.f_locals.get("last_err")
+                if retained is not None:
+                    frame_last_errors.append(retained)
+            trace = trace.tb_next
+        self.assertNotIn(secret, repr(frame_last_errors))
 
     def test_runtime_config_and_reasoning_validation(self):
         with mock.patch.dict(
@@ -9963,10 +10537,29 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             )
         self.assertEqual(config["provider"], "opencode_zen")
         self.assertEqual(
-            config["transport_revision"], "opencode_openai_compatible/3")
+            config["transport_revision"], "opencode_openai_compatible/4")
+        self.assertEqual(config["transport"], "openai_sdk_stream")
         self.assertEqual(config["reasoning_effort"], "high")
         with self.assertRaises(ValueError):
             model_openai._effective_reasoning_effort("ultra")
+
+    def test_opencode_zen_rejects_inherited_azure_client_environment(self):
+        with mock.patch.dict(os.environ, {
+            "OPENAI_API_KEY": "unit-test-key",
+            "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+            "AZURE_OPENAI_API_KEY": "azure-key",
+            "AZURE_OPENAI_ENDPOINT": "https://azure.invalid",
+        }, clear=False), mock.patch.object(
+                model_openai, "AzureOpenAI") as azure_client:
+            with self.assertRaisesRegex(RuntimeError, "forbids inherited"):
+                model_openai.model_runtime_config(
+                    "deepseek-v4-flash",
+                    max_tokens=20000,
+                    reasoning_effort="high",
+                )
+            with self.assertRaisesRegex(RuntimeError, "forbids inherited"):
+                model_openai.OpenAI_Model()._default_client()
+        azure_client.assert_not_called()
 
 
 class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
@@ -9977,8 +10570,12 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         worker_pid = os.getpid()
         methods = ["hybridpatch", "fullrewrite"]
         plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
-        utils_relay_plan.save_relay_task_plan(
-            plan_path, ["state-1", "state-2"])
+        states = [
+            f"state-{index}"
+            for index in range(
+                1, paired_dispatch.DEEPSEEK_FULL234_ROUND_TRIPS + 1)
+        ]
+        utils_relay_plan.save_relay_task_plan(plan_path, states)
         manifest = {
             "schema": paired_dispatch.SCHEMA,
             "run_git_commit": "1" * 40,
@@ -9986,10 +10583,11 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "campaign_role": "deepseek_full234",
                 "samples": [sample],
                 "method_set": methods,
-                "num_round_trips": 2,
+                "num_round_trips": (
+                    paired_dispatch.DEEPSEEK_FULL234_ROUND_TRIPS),
                 "model": paired_dispatch.DEEPSEEK_MODEL,
                 "provider": "opencode_zen",
-                "transport": "openai_sdk_nonstream",
+                "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
                 "transport_revision": (
                     paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
                 "transport_resume_policy": None,
@@ -9997,15 +10595,23 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "reasoning_effort": (
                     paired_dispatch.DEEPSEEK_REASONING_EFFORT),
                 "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                "slots_per_key": (
+                    paired_dispatch.DEEPSEEK_FULL_SLOTS_PER_KEY),
+                "key_count": paired_dispatch.DEEPSEEK_FULL_KEY_COUNT,
+                "max_worker_count": (
+                    paired_dispatch.DEEPSEEK_FULL_SLOTS_PER_KEY
+                    * paired_dispatch.DEEPSEEK_FULL_KEY_COUNT),
             },
             "task_plans": {
                 sample: {
                     "path": os.path.basename(plan_path),
                     "sha256": paired_dispatch._sha256(plan_path),
-                    "forward_state_sequence": ["state-1", "state-2"],
+                    "forward_state_sequence": states,
                 },
             },
         }
+        run_meta.write_json_atomic(
+            os.path.join(out_dir, "dispatch_manifest.json"), manifest)
         paired_dispatch._write_active_worker_set(
             out_dir, manifest, [{
                 "worker_launch_id": worker_id,
@@ -10034,7 +10640,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "methods": methods,
                 "model": paired_dispatch.DEEPSEEK_MODEL,
                 "provider": "opencode_zen",
-                "transport": "openai_sdk_nonstream",
+                "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
                 "transport_revision": (
                     paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
                 "transport_resume_policy": None,
@@ -10054,11 +10660,186 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         return manifest, sample, worker_id, worker_pid
 
     @staticmethod
+    def _write_dispatcher_parent_loss_fixture(
+            out_dir, stages, *, record_stop=True):
+        commit = "1" * 40
+        fingerprint = {
+            "model_openai.py": "2" * 64,
+            "paired_campaign_dispatch.py": "3" * 64,
+            "run_meta.py": "4" * 64,
+        }
+        methods = ["hybridpatch", "fullrewrite"]
+        dispatcher_pid = 43210
+        dispatcher_instance_id = "dispatcher-instance-a"
+        manifest = {
+            "schema": paired_dispatch.SCHEMA,
+            "run_git_commit": commit,
+            "git_tree_state": "clean",
+            "code_fingerprint": fingerprint,
+            "config": {
+                "campaign_role": "deepseek_full234",
+                "samples": [
+                    f"parent-loss-{index}"
+                    for index in range(len(stages))
+                ],
+                "method_set": methods,
+                "num_round_trips": (
+                    paired_dispatch.DEEPSEEK_FULL234_ROUND_TRIPS),
+                "model": paired_dispatch.DEEPSEEK_MODEL,
+                "provider": "opencode_zen",
+                "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                "transport_revision": (
+                    paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                "transport_resume_policy": None,
+                "openai_base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                "reasoning_effort": (
+                    paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                "slots_per_key": (
+                    paired_dispatch.DEEPSEEK_FULL_SLOTS_PER_KEY),
+                "key_count": paired_dispatch.DEEPSEEK_FULL_KEY_COUNT,
+                "max_worker_count": (
+                    paired_dispatch.DEEPSEEK_FULL_SLOTS_PER_KEY
+                    * paired_dispatch.DEEPSEEK_FULL_KEY_COUNT),
+            },
+            "task_plans": {},
+        }
+        run_meta.write_json_atomic(
+            os.path.join(out_dir, "dispatch_manifest.json"), manifest)
+        workers = []
+        details = []
+        for index, stage in enumerate(stages):
+            sample = f"parent-loss-{index}"
+            worker_id = f"worker-parent-loss-{index}"
+            worker_pid = (
+                None
+                if stage == "registered_prelaunch"
+                else os.getpid() + index
+            )
+            item = {
+                "sample": sample,
+                "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
+                "invocation_id": (
+                    f"invocation-parent-loss-{index}"
+                    if stage == "running" else None
+                ),
+                "stage": stage,
+            }
+            details.append(item)
+            workers.append({
+                "sample": sample,
+                "worker_launch_id": worker_id,
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+            })
+        paired_dispatch._write_active_worker_set(
+            out_dir, manifest, workers)
+
+        dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+        metadata_path = os.path.join(out_dir, "run_metadata.jsonl")
+        for index, item in enumerate(details):
+            intent = {
+                "event": "launch_intent",
+                "sample": item["sample"],
+                "key_label": f"KEY_{index + 1}",
+                "methods": methods,
+                "worker_launch_id": item["worker_launch_id"],
+                "console_log": (
+                    f"dispatch_logs/{item['sample']}.console.log"),
+                "method_phase": None,
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+            }
+            run_meta.append_jsonl_locked(dispatch_path, intent)
+            if item["stage"] == "registered_prelaunch":
+                continue
+            run_meta.append_jsonl_locked(dispatch_path, {
+                **intent,
+                "event": "launch",
+                "pid": item["worker_pid"],
+            })
+            if item["stage"] != "running":
+                continue
+            run_meta.append_jsonl_locked(dispatch_path, {
+                "event": "worker_authorized",
+                "worker_launch_id": item["worker_launch_id"],
+                "sample": item["sample"],
+                "worker_pid": item["worker_pid"],
+                "invocation_id": item["invocation_id"],
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+            })
+            run_meta.append_jsonl_locked(metadata_path, {
+                "schema": run_meta.METADATA_SCHEMA,
+                "invocation_id": item["invocation_id"],
+                "worker_launch_id": item["worker_launch_id"],
+                "worker_pid": item["worker_pid"],
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+                "samples": [item["sample"]],
+                "methods": methods,
+                "method_phase": None,
+                "model": paired_dispatch.DEEPSEEK_MODEL,
+                "provider": "opencode_zen",
+                "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                "transport_revision": (
+                    paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                "transport_resume_policy": None,
+                "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                "reasoning_effort": (
+                    paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                "campaign_config": {
+                    "reasoning_effort": (
+                        paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                },
+                "run_git_commit": commit,
+                "git_tree_state": "clean",
+                "code_fingerprint": fingerprint,
+                "status": "running",
+                "finished_at": None,
+            })
+
+        if record_stop:
+            stop_worker = next(
+                item for item in details
+                if item["stage"] != "registered_prelaunch"
+            )
+            with mock.patch.dict(
+                    os.environ,
+                    {
+                        "ANCHORPATCH_WORKER_LAUNCH_ID": stop_worker[
+                            "worker_launch_id"],
+                    },
+                    clear=False):
+                run_meta.record_campaign_stop_condition(
+                    out_dir,
+                    "dispatcher_process_lost",
+                    dispatcher_pid=dispatcher_pid,
+                    dispatcher_instance_id=dispatcher_instance_id,
+                )
+        return {
+            "commit": commit,
+            "fingerprint": fingerprint,
+            "manifest": manifest,
+            "dispatcher_pid": dispatcher_pid,
+            "dispatcher_instance_id": dispatcher_instance_id,
+            "workers": details,
+        }
+
+    @staticmethod
     def _deepseek_api_row(
-            out_dir, sample, worker_id, worker_pid, direction):
-        request_id = f"call-{direction}"
+            out_dir, sample, worker_id, worker_pid, direction, *,
+            method="fullrewrite", call_kind=None, request_id=None):
+        request_id = request_id or f"call-{direction}"
+        call_kind = call_kind or (
+            "hybridpatch_primary"
+            if method == "hybridpatch" else "fullrewrite_primary")
         raw_path = os.path.join(
             out_dir, "api_raw", f"{request_id}.request.json")
+        sidecar_path = os.path.join(
+            out_dir, "api_raw", f"{request_id}.transport.jsonl")
         run_meta.write_json_atomic(raw_path, {
             "request_body": {
                 "model": paired_dispatch.DEEPSEEK_MODEL,
@@ -10066,24 +10847,67 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                     paired_dispatch.DEEPSEEK_REASONING_EFFORT),
                 "max_completion_tokens": (
                     paired_dispatch.DEEPSEEK_MAX_TOKENS),
+                "stream": True,
+                "stream_options": {"include_usage": True},
             },
         })
+        attempt = {
+            "attempt_index": 1,
+            "status": "success",
+            "error_type": None,
+            "http_status": 200,
+            "response_started_http_status": 200,
+            "stream_complete": True,
+            "message_start_seen": True,
+            "message_delta_seen": True,
+            "message_stop_seen": True,
+            "final_usage_seen": True,
+            "generation_delta_seen": True,
+            "thinking_delta_seen": False,
+            "text_delta_seen": True,
+            "tool_delta_seen": False,
+            "content_blocks_started": 0,
+            "content_blocks_stopped": 0,
+            "content_blocks_balanced": True,
+            "terminal_sequence_valid": True,
+        }
+        for event in (
+                {
+                    "record_type": "attempt_start",
+                    "attempt_index": 1,
+                },
+                {
+                    "record_type": "sdk_stream_event",
+                    "attempt_index": 1,
+                    "event": {
+                        "choices": [{
+                            "delta": {"content": "fixture"},
+                            "finish_reason": None,
+                        }],
+                    },
+                },
+                {
+                    "record_type": "attempt_end",
+                    "attempt_index": 1,
+                    "attempt": attempt,
+                }):
+            run_meta.append_jsonl_locked(sidecar_path, event)
         return {
             "schema": paired_dispatch.API_CALL_SCHEMA,
             "request_id": request_id,
             "semantic_call_id": f"semantic-{direction}",
             "sample": sample,
-            "method": "fullrewrite",
+            "method": method,
             "rt_index": 1,
             "direction": direction,
-            "call_kind": "fullrewrite_primary",
+            "call_kind": call_kind,
             "worker_launch_id": worker_id,
             "worker_pid": worker_pid,
             "model": paired_dispatch.DEEPSEEK_MODEL,
             "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
             "request_url": (
                 f"{paired_dispatch.DEEPSEEK_BASE_URL}/chat/completions"),
-            "transport": "openai_sdk_nonstream",
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
             "transport_revision": (
                 paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
             "transport_resume_policy": None,
@@ -10099,16 +10923,144 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "http_status": 200,
             "input_tokens": 1,
             "output_tokens": 1,
-            "transport_attempts": [{
-                "attempt_index": 1,
-                "status": "success",
-                "http_status": 200,
-            }],
+            "transport_attempts": [attempt],
             "http_attempts_used": 1,
             "retry_count": 0,
             "failed_attempt_count": 0,
             "max_retries": 3,
             "raw_request_saved_path": raw_path,
+            "raw_sse_saved_path": sidecar_path,
+        }
+
+    @staticmethod
+    def _deepseek_failed_api_row(
+            out_dir, sample, worker_id, worker_pid, *, method,
+            direction, call_kind, request_id):
+        attempts = [
+            {
+                "attempt_index": index,
+                "status": "retryable_error",
+                "error_type": "server_error",
+                "http_status": 502,
+                "response_started_http_status": None,
+                "stream_complete": False,
+                "message_start_seen": False,
+                "message_delta_seen": False,
+                "message_stop_seen": False,
+                "final_usage_seen": False,
+                "generation_delta_seen": False,
+                "thinking_delta_seen": False,
+                "text_delta_seen": False,
+                "tool_delta_seen": False,
+                "content_blocks_started": 0,
+                "content_blocks_stopped": 0,
+                "content_blocks_balanced": False,
+                "terminal_sequence_valid": False,
+                "retry_budget_consumed": True,
+                "retry_budget_attempt_index": index,
+            }
+            for index in range(1, 4)
+        ]
+        sidecar_path = os.path.join(
+            out_dir, "api_raw", f"{request_id}.transport.jsonl")
+        for attempt in attempts:
+            run_meta.append_jsonl_locked(sidecar_path, {
+                "record_type": "attempt_start",
+                "attempt_index": attempt["attempt_index"],
+            })
+            run_meta.append_jsonl_locked(sidecar_path, {
+                "record_type": "attempt_end",
+                "attempt_index": attempt["attempt_index"],
+                "attempt": attempt,
+            })
+        return {
+            "schema": paired_dispatch.API_CALL_SCHEMA,
+            "request_id": request_id,
+            "semantic_call_id": f"semantic-{request_id}",
+            "sample": sample,
+            "method": method,
+            "rt_index": 1,
+            "direction": direction,
+            "call_kind": call_kind,
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+            "model": paired_dispatch.DEEPSEEK_MODEL,
+            "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+            "request_url": (
+                f"{paired_dispatch.DEEPSEEK_BASE_URL}/chat/completions"),
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+            "transport_resume_policy": None,
+            "reasoning_effort": (
+                paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+            "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+            "provider_called": True,
+            "response_replayed": False,
+            "generation_index": 0,
+            "classification": "provider/API failure",
+            "response_classification": None,
+            "error_type": "server_error",
+            "http_status": 502,
+            "raw_content_length": 0,
+            "stream_complete": False,
+            "count_as_method_failure": False,
+            "input_tokens": None,
+            "output_tokens": None,
+            "transport_attempts": attempts,
+            "http_attempts_used": 3,
+            "retry_count": 2,
+            "failed_attempt_count": 3,
+            "max_retries": 3,
+            "raw_request_saved_path": None,
+            "raw_sse_saved_path": sidecar_path,
+        }
+
+    @staticmethod
+    def _deepseek_infrastructure_outcome(
+            sample, worker_id, worker_pid, api_row):
+        methods = ["hybridpatch", "fullrewrite"]
+        return {
+            "schema": run_meta.SAMPLE_OUTCOME_SCHEMA,
+            "created_at": datetime.now().astimezone().isoformat(),
+            "sample": sample,
+            "status": "infrastructure_incomplete",
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+            "invocation_id": "invocation-a",
+            "methods": methods,
+            "method": api_row["method"],
+            "rt_index": api_row["rt_index"],
+            "direction": api_row["direction"],
+            "call_kind": api_row["call_kind"],
+            "semantic_root_id": api_row.get("semantic_root_id"),
+            "semantic_call_id": api_row["semantic_call_id"],
+            "generation_index": api_row["generation_index"],
+            "parent_semantic_call_id": api_row.get(
+                "parent_semantic_call_id"),
+            "request_fingerprint": api_row.get("request_fingerprint"),
+            "request_id": api_row["request_id"],
+            "error_type": api_row["error_type"],
+            "classification": api_row["classification"],
+            "response_slots_used": api_row.get("response_slots_used"),
+            "transient_failure_count": api_row.get(
+                "transient_failure_count"),
+            "http_attempts_used": api_row["http_attempts_used"],
+            "next_attempt_index": api_row["http_attempts_used"] + 1,
+            "transport_recovery_index": api_row.get(
+                "transport_recovery_index"),
+            "checkpoint_progress": {
+                method: {
+                    "completed_round_trips": 0,
+                    "committed_rows": 0,
+                }
+                for method in methods
+            },
+            "evidence": {
+                "api_calls": "api_calls.jsonl",
+                "attempt_ledger": "api_attempt_ledger.jsonl",
+                "run_metadata": "run_metadata.jsonl",
+            },
         }
 
     @staticmethod
@@ -10201,6 +11153,258 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             self.assertEqual(len(real_read_jsonl(os.path.join(
                 out_dir, "fullrewrite", f"{sample}.jsonl"))), 2)
 
+    def test_active_retry_exhaustion_waits_for_sample_outcome_publication(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            attempts = [
+                {
+                    "attempt_index": index,
+                    "status": "retryable_error",
+                    "error_type": "server_error",
+                    "http_status": 502,
+                    "response_started_http_status": None,
+                    "stream_complete": False,
+                    "message_start_seen": False,
+                    "message_delta_seen": False,
+                    "message_stop_seen": False,
+                    "final_usage_seen": False,
+                    "generation_delta_seen": False,
+                    "thinking_delta_seen": False,
+                    "text_delta_seen": False,
+                    "tool_delta_seen": False,
+                    "content_blocks_started": 0,
+                    "content_blocks_stopped": 0,
+                    "content_blocks_balanced": False,
+                    "terminal_sequence_valid": False,
+                    "retry_budget_consumed": True,
+                    "retry_budget_attempt_index": index,
+                }
+                for index in range(1, 4)
+            ]
+            request_id = "call-provisional-failure"
+            sidecar_path = os.path.join(
+                out_dir, "api_raw",
+                f"{request_id}.transport.jsonl")
+            for attempt in attempts:
+                run_meta.append_jsonl_locked(sidecar_path, {
+                    "record_type": "attempt_start",
+                    "attempt_index": attempt["attempt_index"],
+                })
+                run_meta.append_jsonl_locked(sidecar_path, {
+                    "record_type": "attempt_end",
+                    "attempt_index": attempt["attempt_index"],
+                    "attempt": attempt,
+                })
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), {
+                    "schema": paired_dispatch.API_CALL_SCHEMA,
+                    "request_id": request_id,
+                    "semantic_call_id": "semantic-provisional",
+                    "sample": sample,
+                    "method": "fullrewrite",
+                    "rt_index": 1,
+                    "direction": "forward",
+                    "call_kind": "fullrewrite_primary",
+                    "worker_launch_id": worker_id,
+                    "worker_pid": worker_pid,
+                    "model": paired_dispatch.DEEPSEEK_MODEL,
+                    "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                    "request_url": (
+                        f"{paired_dispatch.DEEPSEEK_BASE_URL}"
+                        "/chat/completions"),
+                    "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                    "transport_revision": (
+                        paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                    "transport_resume_policy": None,
+                    "reasoning_effort": (
+                        paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                    "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                    "provider_called": True,
+                    "response_replayed": False,
+                    "generation_index": 0,
+                    "classification": "provider/API failure",
+                    "response_classification": None,
+                    "error_type": "server_error",
+                    "http_status": 502,
+                    "raw_content_length": 0,
+                    "stream_complete": False,
+                    "count_as_method_failure": False,
+                    "input_tokens": None,
+                    "output_tokens": None,
+                    "transport_attempts": attempts,
+                    "http_attempts_used": 3,
+                    "retry_count": 2,
+                    "failed_attempt_count": 3,
+                    "max_retries": 3,
+                    "raw_request_saved_path": None,
+                    "raw_sse_saved_path": sidecar_path,
+                })
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")):
+                active = paired_dispatch._inspect_deepseek_campaign(
+                    out_dir, manifest, active_samples={sample})
+                inactive = paired_dispatch._inspect_deepseek_campaign(
+                    out_dir, manifest, active_samples=set())
+            self.assertEqual(active["errors"], [])
+            self.assertIn(
+                "DeepSeek API response incomplete at row 1",
+                inactive["errors"])
+
+    def test_active_infrastructure_outcome_waits_for_metadata_finish(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            api_row = self._deepseek_failed_api_row(
+                out_dir, sample, worker_id, worker_pid,
+                method="hybridpatch", direction="forward",
+                call_kind="hybridpatch_primary",
+                request_id="call-outcome-before-metadata")
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), api_row)
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "sample_outcomes.jsonl"),
+                self._deepseek_infrastructure_outcome(
+                    sample, worker_id, worker_pid, api_row))
+
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")):
+                active = paired_dispatch._inspect_deepseek_campaign(
+                    out_dir, manifest, active_samples={sample})
+                with self.assertRaisesRegex(
+                        RuntimeError, "run metadata mismatch"):
+                    paired_dispatch._inspect_deepseek_campaign(
+                        out_dir, manifest, active_samples=set())
+
+            self.assertEqual(active["errors"], [])
+
+    def test_infrastructure_outcome_snapshot_precedes_api_snapshot(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            api_row = self._deepseek_failed_api_row(
+                out_dir, sample, worker_id, worker_pid,
+                method="hybridpatch", direction="forward",
+                call_kind="hybridpatch_primary",
+                request_id="call-after-api-snapshot")
+            outcome = self._deepseek_infrastructure_outcome(
+                sample, worker_id, worker_pid, api_row)
+            api_snapshot_taken = threading.Event()
+            writer_done = threading.Event()
+            inspection_results = []
+            inspection_errors = []
+            real_read_jsonl = paired_dispatch._read_jsonl
+
+            def blocked_read_jsonl(path):
+                rows = real_read_jsonl(path)
+                if (os.path.basename(path) == "api_calls.jsonl"
+                        and not api_snapshot_taken.is_set()):
+                    api_snapshot_taken.set()
+                    if not writer_done.wait(5):
+                        raise RuntimeError(
+                            "unit-test publication barrier timed out")
+                return rows
+
+            def inspect_live_campaign():
+                try:
+                    inspection_results.append(
+                        paired_dispatch._inspect_deepseek_campaign(
+                            out_dir, manifest, active_samples={sample}))
+                except BaseException as exc:
+                    inspection_errors.append(exc)
+
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")), mock.patch.object(
+                        paired_dispatch, "_read_jsonl",
+                        side_effect=blocked_read_jsonl):
+                inspector = threading.Thread(
+                    target=inspect_live_campaign, daemon=True)
+                inspector.start()
+                self.assertTrue(api_snapshot_taken.wait(5))
+                try:
+                    run_meta.append_jsonl_locked(
+                        os.path.join(out_dir, "api_calls.jsonl"), api_row)
+                    run_meta.append_jsonl_locked(
+                        os.path.join(out_dir, "sample_outcomes.jsonl"),
+                        outcome)
+                finally:
+                    writer_done.set()
+                inspector.join(5)
+
+            self.assertFalse(inspector.is_alive())
+            self.assertEqual(inspection_errors, [])
+            self.assertEqual(len(inspection_results), 1)
+            self.assertEqual(inspection_results[0]["errors"], [])
+
+    def test_retry_incident_cohort_covers_uncommitted_primary_calls(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            _manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            forward = self._deepseek_api_row(
+                out_dir, sample, worker_id, worker_pid, "forward",
+                request_id="call-fr-forward")
+            backward_failure = self._deepseek_failed_api_row(
+                out_dir, sample, worker_id, worker_pid,
+                method="fullrewrite", direction="backward",
+                call_kind="fullrewrite_primary",
+                request_id="call-fr-backward-failure")
+            fullrewrite_outcome = {
+                "sample": sample,
+                "method": "fullrewrite",
+                "rt_index": 1,
+                "direction": "backward",
+                "call_kind": "fullrewrite_primary",
+            }
+            fullrewrite_evidence = {
+                "request_id": backward_failure["request_id"],
+                "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
+            }
+            self.assertEqual(
+                paired_dispatch
+                ._verified_deepseek_uncommitted_incident_request_ids(
+                    out_dir, fullrewrite_outcome,
+                    fullrewrite_evidence,
+                    [forward, backward_failure], set()),
+                {"call-fr-forward", "call-fr-backward-failure"},
+            )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            _manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            primary = self._deepseek_api_row(
+                out_dir, sample, worker_id, worker_pid, "forward",
+                method="hybridpatch",
+                call_kind="hybridpatch_primary",
+                request_id="call-hp-primary")
+            repair_failure = self._deepseek_failed_api_row(
+                out_dir, sample, worker_id, worker_pid,
+                method="hybridpatch", direction="forward",
+                call_kind="hybridpatch_repair",
+                request_id="call-hp-repair-failure")
+            hybrid_outcome = {
+                "sample": sample,
+                "method": "hybridpatch",
+                "rt_index": 1,
+                "direction": "forward",
+                "call_kind": "hybridpatch_repair",
+            }
+            hybrid_evidence = {
+                "request_id": repair_failure["request_id"],
+                "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
+            }
+            self.assertEqual(
+                paired_dispatch
+                ._verified_deepseek_uncommitted_incident_request_ids(
+                    out_dir, hybrid_outcome, hybrid_evidence,
+                    [primary, repair_failure], set()),
+                {"call-hp-primary", "call-hp-repair-failure"},
+            )
+
     def test_deepseek_inspection_rejects_persistent_missing_api_linkage(self):
         with tempfile.TemporaryDirectory() as out_dir:
             manifest, sample, worker_id, worker_pid = (
@@ -10232,12 +11436,50 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "fullrewrite/sample/(1, 'backward')",
             })
 
+    def test_current_stream_inspection_requires_matching_transport_sidecar(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            api_rows = [
+                self._deepseek_api_row(
+                    out_dir, sample, worker_id, worker_pid, direction)
+                for direction in ("forward", "backward")
+            ]
+            api_rows[0]["raw_sse_saved_path"] = os.path.join(
+                out_dir, "api_raw", "missing.transport.jsonl")
+            for row in api_rows:
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "api_calls.jsonl"), row)
+            commit = run_meta.append_relay_rows_and_checkpoint(
+                os.path.join(
+                    out_dir, "fullrewrite", f"{sample}.jsonl"),
+                os.path.join(
+                    out_dir, "fullrewrite", f"{sample}.ckpt.json"),
+                self._fullrewrite_result_rows(
+                    sample, [row["request_id"] for row in api_rows]),
+                {"completed_round_trips": 1},
+                campaign_out_dir=out_dir,
+            )
+            self.assertEqual(commit["status"], "appended")
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")):
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, active_samples={sample})
+            self.assertIn(
+                "DeepSeek transport sidecar invalid at row 1",
+                inspection["errors"],
+            )
+
     def test_retry_audit_allows_unbounded_free_503_attempts(self):
         attempts = [
             {
                 "attempt_index": index,
                 "status": "retryable_error",
+                "error_type": "server_error",
                 "http_status": 503,
+                "stream_complete": False,
+                "generation_delta_seen": False,
                 "retry_budget_consumed": False,
                 "retry_budget_attempt_index": 0,
             }
@@ -10246,9 +11488,18 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         attempts.append({
             "attempt_index": 6,
             "status": "success",
+            "error_type": None,
             "http_status": 200,
+            "stream_complete": True,
+            "message_start_seen": True,
+            "message_stop_seen": True,
+            "final_usage_seen": True,
+            "terminal_sequence_valid": True,
         })
         self.assertTrue(paired_dispatch._valid_deepseek_retry_evidence({
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
             "transport_attempts": attempts,
             "http_attempts_used": 6,
             "retry_count": 5,
@@ -10261,7 +11512,10 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             {
                 "attempt_index": index,
                 "status": "retryable_error",
+                "error_type": "rate_limit",
                 "http_status": 429,
+                "stream_complete": False,
+                "generation_delta_seen": False,
                 "retry_budget_consumed": True,
                 "retry_budget_attempt_index": index,
             }
@@ -10270,9 +11524,18 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         attempts.append({
             "attempt_index": 4,
             "status": "success",
+            "error_type": None,
             "http_status": 200,
+            "stream_complete": True,
+            "message_start_seen": True,
+            "message_stop_seen": True,
+            "final_usage_seen": True,
+            "terminal_sequence_valid": True,
         })
         self.assertFalse(paired_dispatch._valid_deepseek_retry_evidence({
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
             "transport_attempts": attempts,
             "http_attempts_used": 4,
             "retry_count": 3,
@@ -10280,13 +11543,300 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "max_retries": 3,
         }))
 
+    def test_retry_audit_requires_explicit_current_stream_terminal_evidence(self):
+        success = {
+            "attempt_index": 2,
+            "status": "success",
+            "error_type": None,
+            "http_status": 200,
+            "stream_complete": True,
+            "message_start_seen": True,
+            "message_stop_seen": True,
+            "final_usage_seen": True,
+            "terminal_sequence_valid": True,
+        }
+        row = {
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+            "transport_attempts": [{
+                "attempt_index": 1,
+                "status": "retryable_error",
+                "error_type": "server_error",
+                "http_status": 503,
+                "stream_complete": False,
+                "retry_budget_consumed": False,
+                "retry_budget_attempt_index": 0,
+            }, success],
+            "http_attempts_used": 2,
+            "retry_count": 1,
+            "failed_attempt_count": 1,
+            "max_retries": 3,
+        }
+        self.assertFalse(
+            paired_dispatch._valid_deepseek_retry_evidence(row))
+        row["transport_attempts"][0]["generation_delta_seen"] = False
+        self.assertTrue(
+            paired_dispatch._valid_deepseek_retry_evidence(row))
+        del success["terminal_sequence_valid"]
+        self.assertFalse(
+            paired_dispatch._valid_deepseek_retry_evidence(row))
+
+    def test_retry_audit_keeps_frozen_legacy_nonstream_rows_readable(self):
+        row = {
+            "transport": paired_dispatch.DEEPSEEK_LEGACY_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_LEGACY_TRANSPORT_REVISION),
+            "transport_attempts": [{
+                "attempt_index": 1,
+                "status": "retryable_error",
+                "error_type": "server_error",
+                "http_status": 503,
+                "retry_budget_consumed": False,
+                "retry_budget_attempt_index": 0,
+            }, {
+                "attempt_index": 2,
+                "status": "success",
+                "http_status": 200,
+                "stream_complete": True,
+            }],
+            "http_attempts_used": 2,
+            "retry_count": 1,
+            "failed_attempt_count": 1,
+            "max_retries": 3,
+        }
+        self.assertTrue(
+            paired_dispatch._valid_deepseek_retry_evidence(row))
+        self.assertTrue(
+            paired_dispatch._valid_deepseek_transport_sidecar(
+                "unused", row))
+
+    def test_partial_stream_exhaustion_routes_to_deepseek_sample_isolation(self):
+        attempts = [
+            {
+                "attempt_index": index,
+                "status": "retryable_error",
+                "error_type": "incomplete_stream",
+                "http_status": 503,
+                "stream_complete": False,
+                "generation_delta_seen": True,
+                "retry_budget_consumed": True,
+                "retry_budget_attempt_index": index,
+            }
+            for index in range(1, 4)
+        ]
+        api_row = {
+            "model": paired_dispatch.DEEPSEEK_MODEL,
+            "classification": "provider/API failure",
+            "error_type": "incomplete_stream",
+            "http_status": 503,
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+            "provider_called": True,
+            "stream_complete": False,
+            "response_replayed": False,
+            "count_as_method_failure": False,
+            "transport_attempts": attempts,
+            "http_attempts_used": len(attempts),
+            "retry_count": len(attempts) - 1,
+            "failed_attempt_count": len(attempts),
+            "max_retries": 3,
+        }
+        self.assertTrue(
+            paired_dispatch._deepseek_failed_retry_row(api_row))
+
+        outcome = {
+            "status": "infrastructure_incomplete",
+            "worker_launch_id": "worker-a",
+            "worker_pid": 123,
+            "methods": ["hybridpatch", "fullrewrite"],
+            "classification": "provider/API failure",
+            "error_type": "incomplete_stream",
+            "method_phase": None,
+        }
+        expected = {"request_id": "call-a"}
+        with mock.patch.object(
+                paired_dispatch, "read_campaign_stop_conditions",
+                return_value=[]), mock.patch.object(
+                    paired_dispatch, "_latest_sample_outcomes",
+                    return_value={"sample": outcome}), mock.patch.object(
+                        paired_dispatch, "_worker_lease_is_held",
+                        return_value=False), mock.patch.object(
+                            paired_dispatch,
+                            "_deepseek_campaign_runtime_identity",
+                            return_value=(
+                                paired_dispatch.DEEPSEEK_TRANSPORT,
+                                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION,
+                            )), mock.patch.object(
+                                paired_dispatch,
+                                "_verified_deepseek_infrastructure_incomplete",
+                                return_value=expected) as verify:
+            actual = paired_dispatch._verified_infrastructure_incomplete(
+                "unused", "sample", {
+                    "worker_launch_id": "worker-a",
+                    "worker_pid": 123,
+                    "methods": ["hybridpatch", "fullrewrite"],
+                    "method_phase": None,
+                })
+        self.assertEqual(actual, expected)
+        verify.assert_called_once_with(
+            "unused", "sample",
+            {
+                "worker_launch_id": "worker-a",
+                "worker_pid": 123,
+                "methods": ["hybridpatch", "fullrewrite"],
+                "method_phase": None,
+            },
+            outcome,
+        )
+
+    def test_failed_retry_audit_validates_every_attempt_and_budget_step(self):
+        attempts = [
+            {
+                "attempt_index": 1,
+                "status": "retryable_error",
+                "error_type": "server_error",
+                "http_status": 503,
+                "stream_complete": False,
+                "generation_delta_seen": False,
+                "retry_budget_consumed": False,
+                "retry_budget_attempt_index": 0,
+            },
+            *[
+                {
+                    "attempt_index": index,
+                    "status": "retryable_error",
+                    "error_type": "incomplete_stream",
+                    "http_status": 200,
+                    "stream_complete": False,
+                    "generation_delta_seen": True,
+                    "retry_budget_consumed": True,
+                    "retry_budget_attempt_index": index - 1,
+                }
+                for index in range(2, 5)
+            ],
+        ]
+        row = {
+            "model": paired_dispatch.DEEPSEEK_MODEL,
+            "classification": "provider/API failure",
+            "error_type": "incomplete_stream",
+            "http_status": 200,
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+            "provider_called": True,
+            "stream_complete": False,
+            "response_replayed": False,
+            "count_as_method_failure": False,
+            "transport_attempts": attempts,
+            "http_attempts_used": 4,
+            "retry_count": 3,
+            "failed_attempt_count": 4,
+            "max_retries": 3,
+        }
+        self.assertTrue(paired_dispatch._deepseek_failed_retry_row(row))
+
+        malformed = copy.deepcopy(row)
+        malformed["transport_attempts"][1][
+            "retry_budget_attempt_index"] = 0
+        self.assertFalse(
+            paired_dispatch._deepseek_failed_retry_row(malformed))
+        malformed = copy.deepcopy(row)
+        malformed["transport_attempts"][2]["attempt_index"] = 99
+        self.assertFalse(
+            paired_dispatch._deepseek_failed_retry_row(malformed))
+
+    def test_historical_infrastructure_outcomes_remain_auditable(self):
+        def outcome(sample, request_id, worker_id):
+            return {
+                "sample": sample,
+                "status": "infrastructure_incomplete",
+                "worker_launch_id": worker_id,
+                "worker_pid": 123,
+                "methods": ["hybridpatch", "fullrewrite"],
+                "classification": "provider/API failure",
+                "method_phase": None,
+                "request_id": request_id,
+            }
+
+        first = outcome("sample-a", "call-a1", "worker-a1")
+        second = outcome("sample-b", "call-b1", "worker-b1")
+        third = outcome("sample-b", "call-b2", "worker-b2")
+        rows = [
+            first,
+            {
+                "sample": "sample-a",
+                "status": "finished",
+            },
+            second,
+            third,
+        ]
+        config = {
+            "samples": ["sample-a", "sample-b"],
+            "method_set": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 10,
+        }
+
+        def verified(_out_dir, _sample, _item, row, **kwargs):
+            self.assertFalse(kwargs["require_current_progress"])
+            return {
+                "request_id": row["request_id"],
+                "worker_launch_id": row["worker_launch_id"],
+                "worker_pid": row["worker_pid"],
+            }
+
+        def incident(_out_dir, row, _evidence, _api, _committed):
+            return {row["request_id"]}
+
+        with mock.patch.object(
+                paired_dispatch, "_latest_sample_outcomes"), \
+                mock.patch.object(
+                    paired_dispatch, "read_sample_outcomes",
+                    return_value=rows), \
+                mock.patch.object(
+                    paired_dispatch,
+                    "_verified_deepseek_infrastructure_incomplete",
+                    side_effect=verified) as verify, mock.patch.object(
+                        paired_dispatch,
+                        "_verified_deepseek_uncommitted_incident_request_ids",
+                        side_effect=incident) as verify_incident:
+            request_ids = (
+                paired_dispatch
+                ._verified_deepseek_infrastructure_request_ids(
+                    "unused", config, api_snapshot=[],
+                    committed_call_ids=set())
+            )
+        self.assertEqual(
+            request_ids, {"call-a1", "call-b1", "call-b2"})
+        self.assertEqual(verify.call_count, 3)
+        self.assertEqual(verify_incident.call_count, 3)
+
+        forged = copy.deepcopy(first)
+        forged["classification"] = "runner_exception"
+        with mock.patch.object(
+                paired_dispatch, "_latest_sample_outcomes"), \
+                mock.patch.object(
+                    paired_dispatch, "read_sample_outcomes",
+                    return_value=[forged]):
+            with self.assertRaisesRegex(
+                    RuntimeError, "invalid DeepSeek infrastructure outcome"):
+                paired_dispatch._verified_deepseek_infrastructure_request_ids(
+                    "unused", config)
+
     def test_formal_runner_requires_opencode_zen_and_high(self):
         with mock.patch.dict(
                 os.environ,
-                {"OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1"},
+                {
+                    "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+                    "AZURE_OPENAI_API_KEY": "",
+                    "AZURE_OPENAI_ENDPOINT": "",
+                },
                 clear=False):
             experiment_runner._require_formal_opencode_transport(
                 "deepseek-v4-flash", "high")
+            experiment_runner._require_formal_opencode_transport(
+                "t-deepseek-v4-flash", "high")
             with self.assertRaises(RuntimeError):
                 experiment_runner._require_formal_opencode_transport(
                     "deepseek-v4-flash", "medium")
@@ -10298,13 +11848,27 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 experiment_runner._require_formal_opencode_transport(
                     "deepseek-v4-flash", "high")
 
+    def test_multisample_deepseek_runner_requires_dispatch_manifest(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            experiment_runner._require_formal_dispatch_environment(
+                out_dir, ["sample"], "deepseek-v4-flash")
+            with self.assertRaisesRegex(
+                    RuntimeError, "require.*paired dispatcher manifest"):
+                experiment_runner._require_formal_dispatch_environment(
+                    out_dir, ["sample-a", "sample-b"],
+                    "t-deepseek-v4-flash")
+
     def test_capacity_manifest_is_one_key_fifteen_slot_rt2(self):
         args = argparse.Namespace(
             campaign_role="deepseek_capacity15",
             num_round_trips=2,
             seed=42,
+            slots_per_key=paired_dispatch.DEEPSEEK_CAPACITY_SLOTS_PER_KEY,
+            smoke_dir=None,
         )
         samples = list(paired_dispatch.DEEPSEEK_CAPACITY_SAMPLES)
+        args.samples = samples
+        paired_dispatch._validate_campaign_grid(args)
         assignments = paired_dispatch.build_key_assignments(
             samples, ["KEY_1"], 15,
             alternate_within_key=True, allow_queue=True)
@@ -10337,8 +11901,11 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
     def test_full_manifest_is_three_key_work_conserving_queue(self):
         args = argparse.Namespace(
             campaign_role="deepseek_full234",
-            num_round_trips=2,
+            num_round_trips=(
+                paired_dispatch.DEEPSEEK_FULL234_ROUND_TRIPS),
             seed=42,
+            slots_per_key=paired_dispatch.DEEPSEEK_FULL_SLOTS_PER_KEY,
+            smoke_dir=None,
             _full234_scope_record={
                 "schema": "anchorpatch.full234_scope/1",
                 "sample_count": 234,
@@ -10347,6 +11914,8 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             },
         )
         samples = list(args._full234_scope_record["sample_ids"])
+        args.samples = samples
+        paired_dispatch._validate_campaign_grid(args)
         labels = ["KEY_1", "KEY_2", "KEY_3"]
         assignments = paired_dispatch.build_key_assignments(
             samples, labels, 10,
@@ -10367,6 +11936,9 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             manifest = paired_dispatch.build_manifest(
                 "unused", samples, assignments, task_plans, args)
         config = manifest["config"]
+        self.assertEqual(
+            config["num_round_trips"],
+            paired_dispatch.DEEPSEEK_FULL234_ROUND_TRIPS)
         self.assertEqual(config["key_count"], 3)
         self.assertEqual(config["slots_per_key"], 10)
         self.assertEqual(config["max_worker_count"], 30)
@@ -10378,6 +11950,39 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         self.assertEqual(
             sorted(queue["worker_count"] for queue in queues),
             [78, 78, 78])
+
+        two_key_assignments = paired_dispatch.build_key_assignments(
+            samples, labels[:2], 10,
+            alternate_within_key=True, allow_queue=True)
+        with mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"unit": "test"}):
+            with self.assertRaisesRegex(
+                    RuntimeError, "requires exactly three keys"):
+                paired_dispatch.build_manifest(
+                    "unused", samples, two_key_assignments,
+                    task_plans, args)
+
+    def test_formal_deepseek_full234_rejects_rt2(self):
+        samples = [f"sample-{index:03d}" for index in range(234)]
+        args = argparse.Namespace(
+            campaign_role="deepseek_full234",
+            num_round_trips=2,
+            seed=42,
+            slots_per_key=paired_dispatch.DEEPSEEK_FULL_SLOTS_PER_KEY,
+            smoke_dir=None,
+            samples=samples,
+            _full234_scope_record={
+                "schema": "anchorpatch.full234_scope/1",
+                "sample_count": 234,
+                "sample_ids": samples,
+                "sample_json_sha256": "c" * 64,
+            },
+        )
+        with self.assertRaisesRegex(RuntimeError, "at 10 RT"):
+            paired_dispatch._validate_campaign_grid(args)
 
     def test_worker_launch_uses_per_key_openai_env_and_high(self):
         captured = {}
@@ -10431,6 +12036,8 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                             "OPENCODE_API_KEY": "wrong",
                             "MINIMAX_API_KEY": "wrong",
                             "MINIMAX_TRANSPORT": "wrong",
+                            "AZURE_OPENAI_API_KEY": "wrong",
+                            "AZURE_OPENAI_ENDPOINT": "https://wrong.invalid",
                         },
                         clear=False):
                 running = {}
@@ -10449,9 +12056,1128 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         self.assertEqual(
             environment["OPENAI_BASE_URL"],
             "https://opencode.ai/zen/go/v1")
+        self.assertEqual(
+            environment["ANCHORPATCH_DISPATCHER_PID"], str(os.getpid()))
+        self.assertTrue(
+            environment["ANCHORPATCH_DISPATCHER_INSTANCE_ID"].startswith(
+                "dispatcher-"))
         self.assertNotIn("OPENCODE_API_KEY", environment)
         self.assertNotIn("MINIMAX_API_KEY", environment)
         self.assertNotIn("MINIMAX_TRANSPORT", environment)
+        self.assertNotIn("AZURE_OPENAI_API_KEY", environment)
+        self.assertNotIn("AZURE_OPENAI_ENDPOINT", environment)
+
+    def test_dispatcher_parent_watchdog_requires_complete_identity(self):
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("ANCHORPATCH_DISPATCHER_PID", None)
+            os.environ.pop("ANCHORPATCH_DISPATCHER_INSTANCE_ID", None)
+            self.assertIsNone(
+                experiment_runner._start_dispatcher_parent_watchdog(out_dir))
+
+            os.environ["ANCHORPATCH_DISPATCHER_PID"] = str(os.getpid())
+            with self.assertRaisesRegex(
+                    RuntimeError, "watchdog identity is invalid"):
+                experiment_runner._start_dispatcher_parent_watchdog(out_dir)
+
+    def test_dispatcher_parent_loss_records_campaign_stop_latch(self):
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+                os.environ,
+                {"ANCHORPATCH_WORKER_LAUNCH_ID": "worker-a"},
+                clear=False), mock.patch.object(
+                    run_meta, "_campaign_metadata_lock",
+                    side_effect=AssertionError(
+                        "emergency writer must not take metadata lock")):
+            experiment_runner._record_dispatcher_parent_loss(
+                out_dir, 12345, "dispatcher-instance-a")
+            records = run_meta.read_campaign_stop_conditions(out_dir)
+            self.assertTrue(os.path.isfile(os.path.join(
+                out_dir, "campaign_stop.json")))
+            emergency_dir = os.path.join(
+                out_dir, run_meta.EMERGENCY_STOP_DIRECTORY)
+            self.assertEqual(
+                [
+                    name for name in os.listdir(emergency_dir)
+                    if name.endswith(".json")
+                ],
+                [],
+            )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            records[0]["condition"], "dispatcher_process_lost")
+        self.assertEqual(records[0]["dispatcher_pid"], 12345)
+        self.assertEqual(
+            records[0]["dispatcher_instance_id"],
+            "dispatcher-instance-a")
+        self.assertEqual(records[0]["worker_pid"], os.getpid())
+
+    def test_dispatcher_parent_loss_recovery_closes_and_resumes_worker(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["running"])
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            worker = fixture["workers"][0]
+            git_result = mock.Mock(stdout="")
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                result = ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+                authorization = (
+                    run_meta.read_campaign_recovery_authorization(out_dir))
+                allowed = (
+                    paired_dispatch
+                    ._verified_deepseek_resume_missing_samples(
+                        out_dir, [{
+                            "sample": worker["sample"],
+                            "methods": ["hybridpatch", "fullrewrite"],
+                        }]))
+
+            self.assertEqual(result["reconciled_workers"], 1)
+            self.assertEqual(result["resume_samples"], [worker["sample"]])
+            self.assertEqual(
+                authorization["recovery_kind"],
+                run_meta.DISPATCHER_PROCESS_LOST_RECOVERY_KIND)
+            self.assertEqual(
+                authorization["dispatcher_parent_loss_workers"], [{
+                    "sample": worker["sample"],
+                    "worker_launch_id": worker["worker_launch_id"],
+                    "worker_pid": worker["worker_pid"],
+                    "invocation_id": worker["invocation_id"],
+                    "status": "interrupted_by_dispatcher",
+                }])
+            self.assertEqual(allowed, {worker["sample"]})
+            self.assertEqual(run_meta.read_campaign_stop_conditions(out_dir), [])
+            active = ledger_recovery._read_json(os.path.join(
+                out_dir, "active_worker_set.json"))
+            self.assertEqual(active["workers"], {})
+            metadata = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertEqual(
+                [row["status"] for row in metadata],
+                ["interrupted_by_dispatcher"])
+            events = [
+                row["event"] for row in ledger_recovery._read_jsonl(
+                    os.path.join(out_dir, "dispatch_log.jsonl"))
+            ]
+            self.assertEqual(events.count("worker_exit"), 1)
+            self.assertEqual(events.count("stale_worker_reconciled"), 1)
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir,
+                ledger_recovery._DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
+            )))
+
+    def test_dispatcher_parent_loss_recovery_covers_startup_windows(self):
+        stages = ["preauthorization", "registered_prelaunch"]
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, stages)
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            git_result = mock.Mock(stdout="")
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                result = ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+                authorization = (
+                    run_meta.read_campaign_recovery_authorization(out_dir))
+                allowed = (
+                    paired_dispatch
+                    ._verified_deepseek_resume_missing_samples(
+                        out_dir, [{
+                            "sample": item["sample"],
+                            "methods": ["hybridpatch", "fullrewrite"],
+                        } for item in fixture["workers"]]))
+
+            expected_samples = {
+                item["sample"] for item in fixture["workers"]
+            }
+            self.assertEqual(result["reconciled_workers"], 2)
+            self.assertEqual(set(result["resume_samples"]), expected_samples)
+            self.assertEqual(allowed, expected_samples)
+            workers = {
+                item["sample"]: item
+                for item in authorization[
+                    "dispatcher_parent_loss_workers"]
+            }
+            self.assertEqual(
+                workers["parent-loss-0"]["status"], "preauthorization")
+            self.assertEqual(
+                workers["parent-loss-1"]["status"],
+                "registered_prelaunch")
+            self.assertEqual(
+                authorization["preauthorization_worker_launch_ids"],
+                ["worker-parent-loss-0"])
+            self.assertEqual(
+                authorization[
+                    "dispatcher_parent_loss_registered_prelaunch_worker_launch_ids"],
+                ["worker-parent-loss-1"])
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, "run_metadata.jsonl")))
+            events = ledger_recovery._read_jsonl(os.path.join(
+                out_dir, "dispatch_log.jsonl"))
+            self.assertEqual(
+                [
+                    row["worker_launch_id"] for row in events
+                    if row.get("event") == "worker_exit"
+                ],
+                ["worker-parent-loss-0"])
+
+    def test_stopless_registered_prelaunch_has_recovery_entry(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["registered_prelaunch"], record_stop=False)
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            worker = fixture["workers"][0]
+            git_result = mock.Mock(stdout="")
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                result = ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+                authorization = (
+                    run_meta.read_campaign_recovery_authorization(out_dir))
+                allowed = (
+                    paired_dispatch
+                    ._verified_deepseek_resume_missing_samples(
+                        out_dir, [{
+                            "sample": worker["sample"],
+                            "methods": ["hybridpatch", "fullrewrite"],
+                        }]))
+
+            self.assertEqual(result["reconciled_workers"], 1)
+            self.assertEqual(result["resume_samples"], [worker["sample"]])
+            self.assertEqual(allowed, {worker["sample"]})
+            self.assertEqual(
+                authorization["dispatcher_parent_loss_workers"], [{
+                    "sample": worker["sample"],
+                    "worker_launch_id": worker["worker_launch_id"],
+                    "worker_pid": None,
+                    "invocation_id": None,
+                    "status": "registered_prelaunch",
+                }])
+            archived_stop = ledger_recovery._read_json(os.path.join(
+                out_dir,
+                authorization["archived_stop_path"],
+            ))
+            self.assertIs(archived_stop["registered_prelaunch_only"], True)
+            self.assertEqual(
+                archived_stop["registered_worker_launch_ids"],
+                [worker["worker_launch_id"]],
+            )
+            self.assertIsNone(archived_stop["worker_launch_id"])
+            self.assertIsNone(archived_stop["worker_pid"])
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir), [])
+
+    def test_stopless_parent_loss_rejects_launched_worker(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["preauthorization"], record_stop=False)
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint):
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "limited to workers registered before process launch"):
+                    ledger_recovery.authorize(
+                        out_dir, dispatcher_process_lost=True)
+
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir), [])
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir,
+                ledger_recovery._DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
+            )))
+
+    def test_synthetic_prelaunch_stop_absorbs_late_watchdog_record(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["registered_prelaunch"], record_stop=False)
+            worker = fixture["workers"][0]
+            stop_path = os.path.join(out_dir, "campaign_stop.json")
+            synthetic = (
+                ledger_recovery
+                ._record_stopless_registered_prelaunch_parent_loss(
+                    out_dir, fixture["manifest"], stop_path))
+            with mock.patch.dict(
+                    os.environ,
+                    {
+                        "ANCHORPATCH_WORKER_LAUNCH_ID": worker[
+                            "worker_launch_id"],
+                    },
+                    clear=False), mock.patch.object(
+                        run_meta.os, "getpid",
+                        return_value=os.getpid() + 1000):
+                run_meta.record_emergency_campaign_stop_condition(
+                    out_dir,
+                    "dispatcher_process_lost",
+                    dispatcher_pid=fixture["dispatcher_pid"],
+                    dispatcher_instance_id=fixture[
+                        "dispatcher_instance_id"],
+                )
+
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir),
+                [synthetic],
+            )
+            emergency_dir = os.path.join(
+                out_dir, run_meta.EMERGENCY_STOP_DIRECTORY)
+            self.assertFalse(
+                os.path.isdir(emergency_dir)
+                and any(
+                    name.endswith(".json")
+                    for name in os.listdir(emergency_dir)
+                )
+            )
+
+    def test_recovered_active_set_blocks_late_watchdog_relatched_stop(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["registered_prelaunch"], record_stop=False)
+            worker = fixture["workers"][0]
+            paired_dispatch._write_active_worker_set(
+                out_dir, fixture["manifest"], [])
+            with mock.patch.dict(
+                    os.environ,
+                    {
+                        "ANCHORPATCH_WORKER_LAUNCH_ID": worker[
+                            "worker_launch_id"],
+                    },
+                    clear=False):
+                run_meta.record_emergency_campaign_stop_condition(
+                    out_dir,
+                    "dispatcher_process_lost",
+                    dispatcher_pid=fixture["dispatcher_pid"],
+                    dispatcher_instance_id=fixture[
+                        "dispatcher_instance_id"],
+                )
+
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir), [])
+
+    def test_parent_loss_recovery_serializes_late_watchdog_publication(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["registered_prelaunch"], record_stop=False)
+            worker = fixture["workers"][0]
+            stop_path = os.path.join(out_dir, "campaign_stop.json")
+            ledger_recovery._record_stopless_registered_prelaunch_parent_loss(
+                out_dir, fixture["manifest"], stop_path)
+            publication_entered = threading.Event()
+            allow_publication = threading.Event()
+            original_link = os.link
+            watchdog_errors = []
+            recovery_results = []
+            recovery_errors = []
+
+            def blocked_link(source, destination):
+                publication_entered.set()
+                if not allow_publication.wait(timeout=5):
+                    raise RuntimeError("test publication barrier timed out")
+                return original_link(source, destination)
+
+            def publish_watchdog():
+                try:
+                    run_meta.record_emergency_campaign_stop_condition(
+                        out_dir,
+                        "dispatcher_process_lost",
+                        dispatcher_pid=fixture["dispatcher_pid"],
+                        dispatcher_instance_id=fixture[
+                            "dispatcher_instance_id"],
+                    )
+                except Exception as exc:
+                    watchdog_errors.append(exc)
+
+            def recover_parent():
+                try:
+                    recovery_results.append(ledger_recovery.authorize(
+                        out_dir, dispatcher_process_lost=True))
+                except Exception as exc:
+                    recovery_errors.append(exc)
+
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            git_result = mock.Mock(stdout="")
+            with mock.patch.dict(
+                    os.environ,
+                    {
+                        "ANCHORPATCH_WORKER_LAUNCH_ID": worker[
+                            "worker_launch_id"],
+                    },
+                    clear=False), mock.patch.object(
+                        run_meta.os, "getpid",
+                        return_value=os.getpid() + 1000), mock.patch.object(
+                            run_meta.os, "link",
+                            side_effect=blocked_link), mock.patch.object(
+                                ledger_recovery, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                watchdog = threading.Thread(
+                    target=publish_watchdog, daemon=True)
+                watchdog.start()
+                self.assertTrue(publication_entered.wait(timeout=5))
+                recovery = threading.Thread(
+                    target=recover_parent, daemon=True)
+                recovery.start()
+                recovery.join(timeout=0.1)
+                self.assertTrue(recovery.is_alive())
+                allow_publication.set()
+                watchdog.join(timeout=5)
+                recovery.join(timeout=5)
+
+            self.assertFalse(watchdog.is_alive())
+            self.assertFalse(recovery.is_alive())
+            self.assertEqual(watchdog_errors, [])
+            self.assertEqual(recovery_errors, [])
+            self.assertEqual(len(recovery_results), 1)
+            self.assertEqual(
+                recovery_results[0]["resume_samples"], [worker["sample"]])
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir,
+                ledger_recovery._DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
+            )))
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir), [])
+
+    def test_parent_loss_stop_recovers_unrecorded_worker_launch(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["running", "registered_prelaunch"])
+            unrecorded = fixture["workers"][1]
+            unrecorded_pid = os.getpid() + 1000
+            with mock.patch.dict(
+                    os.environ,
+                    {
+                        "ANCHORPATCH_WORKER_LAUNCH_ID": unrecorded[
+                            "worker_launch_id"],
+                    },
+                    clear=False), mock.patch.object(
+                        run_meta.os, "getpid",
+                        return_value=unrecorded_pid):
+                run_meta.record_emergency_campaign_stop_condition(
+                    out_dir,
+                    "dispatcher_process_lost",
+                    dispatcher_pid=fixture["dispatcher_pid"],
+                    dispatcher_instance_id=fixture[
+                        "dispatcher_instance_id"],
+                )
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            git_result = mock.Mock(stdout="")
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+                authorization = (
+                    run_meta.read_campaign_recovery_authorization(out_dir))
+
+            workers = {
+                item["worker_launch_id"]: item
+                for item in authorization[
+                    "dispatcher_parent_loss_workers"]
+            }
+            self.assertEqual(
+                workers[unrecorded["worker_launch_id"]]["status"],
+                "preauthorization")
+            self.assertEqual(
+                workers[unrecorded["worker_launch_id"]]["worker_pid"],
+                unrecorded_pid)
+            launches = [
+                row for row in ledger_recovery._read_jsonl(os.path.join(
+                    out_dir, "dispatch_log.jsonl"))
+                if row.get("event") == "launch"
+                and row.get("worker_launch_id")
+                == unrecorded["worker_launch_id"]
+            ]
+            self.assertEqual(len(launches), 1)
+            self.assertIs(launches[0]["launch_observed"], False)
+            self.assertTrue(launches[0]["reconciled_after_parent_loss"])
+            self.assertEqual(
+                len(authorization["archived_emergency_stop_records"]), 1)
+
+    def test_dispatcher_parent_loss_recovery_retries_transaction_once(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["running"])
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            git_result = mock.Mock(stdout="")
+            real_archive = ledger_recovery._archive_campaign_stop_cohort
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                with mock.patch.object(
+                        ledger_recovery,
+                        "_archive_campaign_stop_cohort",
+                        side_effect=RuntimeError(
+                            "injected archive interruption")):
+                    with self.assertRaisesRegex(
+                            RuntimeError, "injected archive interruption"):
+                        ledger_recovery.authorize(
+                            out_dir, dispatcher_process_lost=True)
+                pending_path = os.path.join(
+                    out_dir,
+                    ledger_recovery
+                    ._DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
+                )
+                self.assertTrue(os.path.isfile(pending_path))
+                self.assertTrue(os.path.isfile(os.path.join(
+                    out_dir,
+                    run_meta.CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME,
+                )))
+                self.assertTrue(
+                    run_meta.read_campaign_stop_conditions(out_dir))
+                with mock.patch.object(
+                        ledger_recovery,
+                        "_archive_campaign_stop_cohort",
+                        wraps=real_archive):
+                    result = ledger_recovery.authorize(
+                        out_dir, dispatcher_process_lost=True)
+
+            self.assertEqual(result["reconciled_workers"], 1)
+            self.assertFalse(os.path.exists(pending_path))
+            self.assertEqual(run_meta.read_campaign_stop_conditions(out_dir), [])
+            events = ledger_recovery._read_jsonl(os.path.join(
+                out_dir, "dispatch_log.jsonl"))
+            self.assertEqual(sum(
+                row.get("event") == "worker_exit" for row in events), 1)
+            self.assertEqual(sum(
+                row.get("event") == "stale_worker_reconciled"
+                for row in events), 1)
+            self.assertEqual(sum(
+                row.get("event")
+                == "user_authorized_dispatcher_parent_loss_recovery"
+                for row in events), 1)
+
+    def test_parent_loss_pending_after_archive_blocks_resume(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["running"])
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            git_result = mock.Mock(stdout="")
+            real_read = (
+                ledger_recovery.read_campaign_recovery_authorization)
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                with mock.patch.object(
+                        ledger_recovery,
+                        "read_campaign_recovery_authorization",
+                        side_effect=RuntimeError(
+                            "injected post-archive interruption")):
+                    with self.assertRaisesRegex(
+                            RuntimeError, "post-archive interruption"):
+                        ledger_recovery.authorize(
+                            out_dir, dispatcher_process_lost=True)
+                self.assertEqual(
+                    run_meta.read_campaign_stop_conditions(out_dir), [])
+                with self.assertRaisesRegex(
+                        RuntimeError, "transaction is pending"):
+                    run_meta.read_campaign_recovery_authorization(out_dir)
+                with self.assertRaisesRegex(
+                        RuntimeError, "transaction is pending"):
+                    paired_dispatch._launch_under_lease(
+                        mock.Mock(), out_dir)
+                with mock.patch.object(
+                        ledger_recovery,
+                        "read_campaign_recovery_authorization",
+                        wraps=real_read):
+                    result = ledger_recovery.authorize(
+                        out_dir, dispatcher_process_lost=True)
+
+            self.assertEqual(result["reconciled_workers"], 1)
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir,
+                run_meta.DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
+            )))
+
+    def test_parent_loss_pending_after_event_unlinks_idempotently(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["running"])
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            git_result = mock.Mock(stdout="")
+            real_unlink = ledger_recovery._unlink_with_sharing_retry
+            pending_name = (
+                run_meta.DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
+
+            def interrupt_pending_unlink(path):
+                if os.path.basename(path) == pending_name:
+                    raise RuntimeError("injected pending unlink interruption")
+                return real_unlink(path)
+
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                with mock.patch.object(
+                        ledger_recovery, "_unlink_with_sharing_retry",
+                        side_effect=interrupt_pending_unlink):
+                    with self.assertRaisesRegex(
+                            RuntimeError, "pending unlink interruption"):
+                        ledger_recovery.authorize(
+                            out_dir, dispatcher_process_lost=True)
+                with self.assertRaisesRegex(
+                        RuntimeError, "transaction is pending"):
+                    run_meta.read_campaign_recovery_authorization(out_dir)
+                result = ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+
+            self.assertEqual(result["reconciled_workers"], 1)
+            events = ledger_recovery._read_jsonl(os.path.join(
+                out_dir, "dispatch_log.jsonl"))
+            self.assertEqual(sum(
+                row.get("event")
+                == "user_authorized_dispatcher_parent_loss_recovery"
+                for row in events), 1)
+
+    def test_emergency_only_archive_retry_rebuilds_canonical_stop(self):
+        stop = {
+            "schema": run_meta.STOP_CONDITION_SCHEMA,
+            "created_at": "2026-07-28T00:00:00+08:00",
+            "condition": "dispatcher_process_lost",
+            "worker_launch_id": "worker-a",
+            "worker_pid": 123,
+            "dispatcher_pid": 456,
+            "dispatcher_instance_id": "dispatcher-instance-a",
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            emergency_dir = os.path.join(
+                out_dir, run_meta.EMERGENCY_STOP_DIRECTORY)
+            history_dir = os.path.join(
+                out_dir, "recovery_history", "authorization-a")
+            os.makedirs(emergency_dir)
+            os.makedirs(history_dir)
+            run_meta.write_json_atomic(
+                os.path.join(emergency_dir, "worker-a.json"), stop)
+            stop_path = os.path.join(out_dir, "campaign_stop.json")
+            with mock.patch.object(
+                    ledger_recovery, "_copy_file_durable",
+                    side_effect=RuntimeError(
+                        "injected canonical reconstruction interruption")):
+                with self.assertRaisesRegex(
+                        RuntimeError, "canonical reconstruction"):
+                    ledger_recovery._archive_campaign_stop_cohort(
+                        out_dir, stop_path, history_dir)
+            archived_stop, archived_emergency = (
+                ledger_recovery._archive_campaign_stop_cohort(
+                    out_dir, stop_path, history_dir))
+
+            self.assertTrue(os.path.isfile(archived_stop))
+            self.assertEqual(len(archived_emergency), 1)
+            self.assertEqual(
+                ledger_recovery._read_json(archived_stop), stop)
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir), [])
+
+    def test_repeated_dispatcher_parent_loss_keeps_prior_pending_worker(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["preauthorization", "registered_prelaunch"])
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            manifest = fixture["manifest"]
+            git_result = mock.Mock(stdout="")
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+
+                sample = fixture["workers"][0]["sample"]
+                worker_id = "worker-parent-loss-repeat"
+                worker_pid = os.getpid()
+                invocation_id = "invocation-parent-loss-repeat"
+                dispatcher_pid = 54321
+                dispatcher_instance_id = "dispatcher-instance-b"
+                paired_dispatch._write_active_worker_set(
+                    out_dir, manifest, [{
+                        "sample": sample,
+                        "worker_launch_id": worker_id,
+                        "dispatcher_pid": dispatcher_pid,
+                        "dispatcher_instance_id": dispatcher_instance_id,
+                    }])
+                dispatch_path = os.path.join(
+                    out_dir, "dispatch_log.jsonl")
+                intent = {
+                    "event": "launch_intent",
+                    "sample": sample,
+                    "key_label": "KEY_1",
+                    "methods": ["hybridpatch", "fullrewrite"],
+                    "worker_launch_id": worker_id,
+                    "console_log": (
+                        f"dispatch_logs/{sample}.repeat.console.log"),
+                    "method_phase": None,
+                    "dispatcher_pid": dispatcher_pid,
+                    "dispatcher_instance_id": dispatcher_instance_id,
+                }
+                run_meta.append_jsonl_locked(dispatch_path, intent)
+                run_meta.append_jsonl_locked(dispatch_path, {
+                    **intent,
+                    "event": "launch",
+                    "pid": worker_pid,
+                })
+                run_meta.append_jsonl_locked(dispatch_path, {
+                    "event": "worker_authorized",
+                    "worker_launch_id": worker_id,
+                    "sample": sample,
+                    "worker_pid": worker_pid,
+                    "invocation_id": invocation_id,
+                    "dispatcher_pid": dispatcher_pid,
+                    "dispatcher_instance_id": dispatcher_instance_id,
+                })
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "run_metadata.jsonl"), {
+                        "schema": run_meta.METADATA_SCHEMA,
+                        "invocation_id": invocation_id,
+                        "worker_launch_id": worker_id,
+                        "worker_pid": worker_pid,
+                        "dispatcher_pid": dispatcher_pid,
+                        "dispatcher_instance_id": dispatcher_instance_id,
+                        "samples": [sample],
+                        "methods": ["hybridpatch", "fullrewrite"],
+                        "method_phase": None,
+                        "model": paired_dispatch.DEEPSEEK_MODEL,
+                        "provider": "opencode_zen",
+                        "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                        "transport_revision": (
+                            paired_dispatch
+                            .DEEPSEEK_TRANSPORT_REVISION),
+                        "transport_resume_policy": None,
+                        "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                        "reasoning_effort": (
+                            paired_dispatch
+                            .DEEPSEEK_REASONING_EFFORT),
+                        "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                        "campaign_config": {
+                            "reasoning_effort": (
+                                paired_dispatch
+                                .DEEPSEEK_REASONING_EFFORT),
+                        },
+                        "run_git_commit": commit,
+                        "git_tree_state": "clean",
+                        "code_fingerprint": fingerprint,
+                        "status": "running",
+                        "finished_at": None,
+                    })
+                with mock.patch.dict(
+                        os.environ,
+                        {"ANCHORPATCH_WORKER_LAUNCH_ID": worker_id},
+                        clear=False):
+                    run_meta.record_campaign_stop_condition(
+                        out_dir,
+                        "dispatcher_process_lost",
+                        dispatcher_pid=dispatcher_pid,
+                        dispatcher_instance_id=dispatcher_instance_id,
+                    )
+                ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+                authorization = (
+                    run_meta.read_campaign_recovery_authorization(out_dir))
+                incidents = (
+                    run_meta.campaign_recovery_incident_evidence(out_dir))
+                prior_pending_sample = fixture["workers"][1]["sample"]
+                allowed = (
+                    paired_dispatch
+                    ._verified_deepseek_resume_missing_samples(
+                        out_dir, [{
+                            "sample": prior_pending_sample,
+                            "methods": ["hybridpatch", "fullrewrite"],
+                        }]))
+
+            resume_workers = {
+                item["sample"]: item
+                for item in authorization[
+                    "dispatcher_parent_loss_resume_workers"]
+            }
+            self.assertEqual(
+                resume_workers[sample]["worker_launch_id"], worker_id)
+            self.assertEqual(
+                resume_workers[sample]["status"],
+                "interrupted_by_dispatcher")
+            self.assertEqual(
+                resume_workers[prior_pending_sample]["status"],
+                "registered_prelaunch")
+            self.assertEqual(
+                incidents["dispatcher_parent_loss_workers"][
+                    prior_pending_sample]["status"],
+                "registered_prelaunch")
+            self.assertEqual(allowed, {prior_pending_sample})
+
+    def test_repeated_parent_loss_removes_now_finished_resume_sample(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["preauthorization", "registered_prelaunch"])
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            manifest = fixture["manifest"]
+            git_result = mock.Mock(stdout="")
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+
+                sample = fixture["workers"][0]["sample"]
+                prior_pending_sample = fixture["workers"][1]["sample"]
+                worker_id = "worker-parent-loss-finished"
+                worker_pid = os.getpid() + 1000
+                invocation_id = "invocation-parent-loss-finished"
+                dispatcher_pid = 54321
+                dispatcher_instance_id = "dispatcher-instance-finished"
+                paired_dispatch._write_active_worker_set(
+                    out_dir, manifest, [{
+                        "sample": sample,
+                        "worker_launch_id": worker_id,
+                        "dispatcher_pid": dispatcher_pid,
+                        "dispatcher_instance_id": dispatcher_instance_id,
+                    }])
+                dispatch_path = os.path.join(
+                    out_dir, "dispatch_log.jsonl")
+                intent = {
+                    "event": "launch_intent",
+                    "sample": sample,
+                    "key_label": "KEY_1",
+                    "methods": ["hybridpatch", "fullrewrite"],
+                    "worker_launch_id": worker_id,
+                    "console_log": (
+                        f"dispatch_logs/{sample}.finished.console.log"),
+                    "method_phase": None,
+                    "dispatcher_pid": dispatcher_pid,
+                    "dispatcher_instance_id": dispatcher_instance_id,
+                }
+                run_meta.append_jsonl_locked(dispatch_path, intent)
+                run_meta.append_jsonl_locked(dispatch_path, {
+                    **intent,
+                    "event": "launch",
+                    "pid": worker_pid,
+                })
+                run_meta.append_jsonl_locked(dispatch_path, {
+                    "event": "worker_authorized",
+                    "worker_launch_id": worker_id,
+                    "sample": sample,
+                    "worker_pid": worker_pid,
+                    "invocation_id": invocation_id,
+                    "dispatcher_pid": dispatcher_pid,
+                    "dispatcher_instance_id": dispatcher_instance_id,
+                })
+                run_meta.append_jsonl_locked(
+                    os.path.join(out_dir, "run_metadata.jsonl"), {
+                        "schema": run_meta.METADATA_SCHEMA,
+                        "invocation_id": invocation_id,
+                        "worker_launch_id": worker_id,
+                        "worker_pid": worker_pid,
+                        "dispatcher_pid": dispatcher_pid,
+                        "dispatcher_instance_id": dispatcher_instance_id,
+                        "samples": [sample],
+                        "methods": ["hybridpatch", "fullrewrite"],
+                        "method_phase": None,
+                        "model": paired_dispatch.DEEPSEEK_MODEL,
+                        "provider": "opencode_zen",
+                        "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                        "transport_revision": (
+                            paired_dispatch
+                            .DEEPSEEK_TRANSPORT_REVISION),
+                        "transport_resume_policy": None,
+                        "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                        "reasoning_effort": (
+                            paired_dispatch
+                            .DEEPSEEK_REASONING_EFFORT),
+                        "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                        "campaign_config": {
+                            "reasoning_effort": (
+                                paired_dispatch
+                                .DEEPSEEK_REASONING_EFFORT),
+                        },
+                        "run_git_commit": commit,
+                        "git_tree_state": "clean",
+                        "code_fingerprint": fingerprint,
+                        "status": "finished",
+                        "finished_at": "2026-07-28T00:00:00+08:00",
+                    })
+                expected_progress = {}
+                for method in ("hybridpatch", "fullrewrite"):
+                    method_dir = os.path.join(out_dir, method)
+                    os.makedirs(method_dir, exist_ok=True)
+                    rows = [
+                        {
+                            "sample_id": sample,
+                            "method": method,
+                            "round_trip_num": rt_index,
+                            "round_trip_direction": direction,
+                        }
+                        for rt_index in range(1, 11)
+                        for direction in ("forward", "backward")
+                    ]
+                    with open(
+                            os.path.join(
+                                method_dir, f"{sample}.jsonl"),
+                            "w", encoding="utf-8") as handle:
+                        for row in rows:
+                            handle.write(json.dumps(row) + "\n")
+                    run_meta.write_json_atomic(
+                        os.path.join(
+                            method_dir, f"{sample}.ckpt.json"),
+                        {"completed_round_trips": 10},
+                    )
+                    expected_progress[method] = {
+                        "completed_round_trips": 10,
+                        "committed_rows": 20,
+                    }
+                with mock.patch.dict(
+                        os.environ,
+                        {"ANCHORPATCH_WORKER_LAUNCH_ID": worker_id},
+                        clear=False), mock.patch.object(
+                            run_meta.os, "getpid",
+                            return_value=worker_pid):
+                    run_meta.record_sample_outcome(
+                        out_dir,
+                        sample,
+                        "finished",
+                        invocation_id=invocation_id,
+                        methods=["hybridpatch", "fullrewrite"],
+                        checkpoint_progress=expected_progress,
+                    )
+                    run_meta.record_campaign_stop_condition(
+                        out_dir,
+                        "dispatcher_process_lost",
+                        dispatcher_pid=dispatcher_pid,
+                        dispatcher_instance_id=dispatcher_instance_id,
+                    )
+                ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+                authorization = (
+                    run_meta.read_campaign_recovery_authorization(out_dir))
+                selected, _authorizations = (
+                    paired_dispatch._select_invocation_assignments(
+                        out_dir,
+                        [
+                            {
+                                "sample": sample,
+                                "methods": [
+                                    "hybridpatch", "fullrewrite"],
+                            },
+                            {
+                                "sample": prior_pending_sample,
+                                "methods": [
+                                    "hybridpatch", "fullrewrite"],
+                            },
+                        ],
+                        resume=True,
+                        target_round_trips=10,
+                        allow_deepseek_resume=True,
+                    ))
+
+            self.assertNotIn(
+                sample,
+                authorization["provider_access_resume_samples"],
+            )
+            self.assertNotIn(
+                sample,
+                {
+                    item["sample"] for item in authorization[
+                        "dispatcher_parent_loss_resume_workers"]
+                },
+            )
+            self.assertEqual(
+                [item["sample"] for item in selected],
+                [prior_pending_sample],
+            )
+
+    def test_emergency_stop_retries_transient_secondary_name_cleanup(self):
+        real_unlink = os.unlink
+        transient_failures = []
+
+        def flaky_unlink(path):
+            if (path.endswith(".json")
+                    and run_meta.EMERGENCY_STOP_DIRECTORY in path
+                    and not transient_failures):
+                transient_failures.append(path)
+                exc = OSError("simulated Windows sharing violation")
+                exc.winerror = 32
+                raise exc
+            return real_unlink(path)
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta.os, "unlink", side_effect=flaky_unlink):
+            run_meta.record_emergency_campaign_stop_condition(
+                out_dir, "dispatcher_process_lost",
+                dispatcher_pid=12345,
+                dispatcher_instance_id="dispatcher-instance-a",
+            )
+            self.assertTrue(os.path.isfile(os.path.join(
+                out_dir, "campaign_stop.json")))
+            emergency_dir = os.path.join(
+                out_dir, run_meta.EMERGENCY_STOP_DIRECTORY)
+            self.assertEqual(
+                [
+                    name for name in os.listdir(emergency_dir)
+                    if name.endswith(".json")
+                ],
+                [],
+            )
+        self.assertEqual(len(transient_failures), 1)
+
+    def test_emergency_stop_keeps_each_distinct_worker_record(self):
+        real_pid = os.getpid()
+        with tempfile.TemporaryDirectory() as out_dir:
+            with mock.patch.dict(
+                    os.environ,
+                    {"ANCHORPATCH_WORKER_LAUNCH_ID": "worker-a"},
+                    clear=False):
+                run_meta.record_emergency_campaign_stop_condition(
+                    out_dir,
+                    "dispatcher_process_lost",
+                    dispatcher_pid=12345,
+                    dispatcher_instance_id="dispatcher-instance-a",
+                )
+            with mock.patch.dict(
+                    os.environ,
+                    {"ANCHORPATCH_WORKER_LAUNCH_ID": "worker-b"},
+                    clear=False), mock.patch.object(
+                        run_meta.os, "getpid",
+                        return_value=real_pid + 1000):
+                run_meta.record_emergency_campaign_stop_condition(
+                    out_dir,
+                    "dispatcher_process_lost",
+                    dispatcher_pid=12345,
+                    dispatcher_instance_id="dispatcher-instance-a",
+                )
+            records = run_meta.read_campaign_stop_conditions(out_dir)
+            emergency_dir = os.path.join(
+                out_dir, run_meta.EMERGENCY_STOP_DIRECTORY)
+            emergency_names = [
+                name for name in os.listdir(emergency_dir)
+                if name.endswith(".json")
+            ]
+
+        self.assertEqual(len(records), 2)
+        self.assertEqual(
+            {row["worker_launch_id"] for row in records},
+            {"worker-a", "worker-b"})
+        self.assertEqual(
+            {row["worker_pid"] for row in records},
+            {real_pid, real_pid + 1000})
+        self.assertEqual(len(emergency_names), 1)
 
 
 class MinimaxOfficialTransportTests(unittest.TestCase):

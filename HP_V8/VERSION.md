@@ -735,3 +735,67 @@ full234 c10 实跑由 commit `c98dcc00dc78d2e3069f0674a7bb05cfd49bf6f0` 启动�
 HybridPatch 44 行、FullRewrite 50 行，1 sample 完成，preservation=0。metadata 为 1 failed、
 1 finished、29 dispatcher-interrupted，active worker 归零。本档只是不完整 supporting
 evidence，不构成 full234 结果。
+
+## 2026-07-27 DeepSeek RT10 stream 与 Dispatcher hardening
+
+`exp_dsv4f_hpfr_full234_rt2_c10_r3` 被确认为错误口径的 RT2 non-stream
+supporting campaign，并已由用户中止。其 manifest、API ledger、checkpoint 与结果保持
+历史原样；不得在同一目录把 `num_round_trips=2` 改为 10，也不得把 revision `/3`
+伪装成流式。
+
+当前 DeepSeek transport revision 为 `opencode_openai_compatible/4`。OpenCode Zen Go
+请求使用 OpenAI Chat Completions stream 与 `include_usage`；完整性要求在非空
+finish reason 后观察到有效 usage-only terminal chunk。任何 partial EOF/exception、
+乱序 usage 或空 token accounting 均不返回 partial content，而是作为
+`incomplete_stream` 全量重发。正式 `deepseek_full234` 在 dispatcher 两层
+配置守卫中固定为精确 234 sample、RT10、每 Key 10 槽；`deepseek_capacity15` 继续保留
+RT2 诊断角色。
+
+旧 RT2 档审计到 1,975 个 503 attempt（357 call）和 17 个 502 attempt（11 call）；
+3 个 terminal 502 的完整结构化内容均为 Cloudflare `origin_bad_gateway`，指出
+`inference.opencode.ai` origin 返回无效或不完整响应并要求至少退避 60 秒。旧 attempt
+schema 没有保存 503 body，不能从该档追溯每个 503 的 exact reason。`/4` 因此新增
+失败 body/message 脱敏持久化和 per-call `transport.jsonl`，并从 header/body/message
+读取 `Retry-After`（上限 300 秒）。生成前 503 仍不消耗有限 retry budget，并采用
+带 per-worker spread 的指数退避；502 与生成后中断消耗预算。终端 transport
+exception 不再保留或 traceback-chain 原始 provider exception，避免已脱敏 ledger
+之外的 console log 泄露错误 body。
+
+Dispatcher 同步收紧四个全局故障边界：
+
+1. catch-path reconciliation 检查完整 campaign sample lease scope；旧 orphan 仍持有
+   lease 时不关闭其 running metadata，也不撤销 active-worker authorization。
+2. dispatcher 为 worker 注入父 PID/instance identity；worker watchdog 在 parent
+   消失后 best-effort 记录 stop，并在有限 0.5 秒内无条件退出，避免继续 paid POST。
+3. HybridPatch preservation violation 在 domain evaluator 前写 durable latch，不能被
+   evaluator exception 覆盖为 sample-local incomplete。
+4. worker 顶层未分类 fatal 立即写 `worker_fatal_error` latch，使 sibling 在下一次
+   provider guard 前停止，而不是等待 dispatcher 下一轮 poll。
+
+`dispatcher_process_lost` 现在有独立、可重入的恢复事务：
+`authorize_ledger_lock_recovery.py --dispatcher_process_lost` 必须独占 dispatcher
+lease，先 hash-bind active set、metadata、完整 multi-worker stop cohort、dispatch
+lifecycle、未提交 API/attempt 与 stream sidecar，再关闭 running metadata、合成缺失的
+launch/exit/reconciliation 记录、发布 authorization，最后归档 stop。事务中途失败保留
+pending journal，重复执行不会重复写行。active-only、intent-only、Popen 后 launch
+未落盘、launch 后 metadata 未落盘、已授权调用中以及连续多次 parent loss 均有明确
+恢复分类。若首个 worker 仅登记、尚未启动而没有 worker 能写 stop，恢复器只在持有
+dispatcher lease、全部 sample lease 空闲且零 execution/API evidence 时生成
+registered-prelaunch-only stop；不同 worker 的 emergency stop 记录不会被首个
+canonical stop 覆盖。迟到启动的旧 worker 若已被 synthetic stop 覆盖或已从 active
+set 撤销，只退出而不重新锁存 campaign；连续 parent loss 中本次已经 terminal 的
+sample 会从累计 resume scope 移除。emergency stop 的完整发布过程与 parent-loss
+snapshot、pending、apply、archive/commit 事务由独立 publication lock 串行化。
+
+历史 result/API linkage torn-snapshot 已由早先的 result-first/API-second inspector
+修复；本轮保留该修复并增加 orphan/preservation/watchdog 回归。严格证据损坏、Git/
+task-plan/manifest drift、preservation 与未知 worker fatal 仍为正确的全局 fail-closed；
+有完整证据的 transport exhaustion 与 evaluator incomplete 继续 sample-local 隔离。
+
+为尝试获得当前 503 的 exact body，新增有墙钟上限的单 Key 短提示并发诊断工具。一次 c10
+与一次 c15 共 25 个 `/4` stream 调用全部完整 HTTP 200，全部为 high reasoning 且 terminal
+usage 完整，合计 3,790 tokens；未发生 retry、502 或 503。证据目录分别为
+`exp_dsv4f_stream_c10_error_diag_20260727` 和
+`exp_dsv4f_stream_c15_error_diag_20260727`。因此当前可以确认 `/4` 的 c15 短调用链路可用，
+但不能由这 25 次健康响应反推长 HP/FR 请求下不会出现 origin 5xx，也不能补造旧档未保存的
+503 body。
