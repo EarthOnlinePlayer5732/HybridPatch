@@ -132,6 +132,29 @@
 - 零 API 验证：transport-core 65/65、HP 集成/dispatcher/recovery 196/196 PASS；
   其中两边 DeepSeek terminal 状态机定向回归各 18/18 PASS。
 
+### `opencode_openai_compatible/6`（DeepSeek compact critical sidecar）
+
+- 触发：正式 `/5` 长 reasoning campaign 的逐 chunk critical transport sidecar 已膨胀
+  到约 49.2 GB；同一批 `_raw_stream_events` 又被另写成约 26.1 GB 的重复
+  `.sse.jsonl`。该 campaign 已由用户放弃，不恢复或升级为 `/6`。
+- `/6` 不改变 endpoint、model、stream request、high reasoning、terminal usage、
+  502/503、retry budget、HP/FR、evaluator 或 scoring；唯一变化是 critical stream
+  evidence 的持久化形态。
+- sidecar schema 升为 `anchorpatch.transport_event/2`：每 call 一个 header；每
+  attempt 仅保存 start、最多四个单调 checkpoint、一个聚合 stream summary 与 end。
+  summary 保存 chunk count、canonical bytes、长度前缀增量 SHA-256、delta 计数/bytes、
+  finish、usage 与 terminal state。文件规模因此为 O(attempt)，不再为 O(chunk)。
+- terminal API row 绑定 sidecar SHA-256、byte size 和 record count；inspector/recovery
+  核对 header linkage、checkpoint 顺序以及 summary/attempt/API 一致性。open attempt
+  的 `generation_started` checkpoint 继续提供 parent-loss 的 cost-bearing witness。
+- DeepSeek `/6` 不返回 `_raw_stream_events`，且 critical `.transport.jsonl` 存在时不再
+  生成第二份 `.sse.jsonl`。最终正文、request、重建 response、usage 和完整脱敏
+  502/503 body/message 继续保存。
+- `/4`、`/5` linear sidecar 保留只读 reader；新 writer 与新 out_dir 固定 `/6`，禁止
+  混目录或原地 resume。活动规范见 `docs/API_TRANSPORT_DEEPSEEK_V6.md`。
+- 本次实现/文档阶段未调用 API；正式实验仍需零 API 回归、clean commit、新计划与
+  用户授权。
+
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 
 - 动机：为 FR baseline 忠实翻译上游 DELEGATE-52 的官方非流式 + 盲异常重试语义，与 OpenCode v3 公平性策略分线。

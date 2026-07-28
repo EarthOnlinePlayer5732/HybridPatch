@@ -48,8 +48,11 @@ from run_meta import (
     _deepseek_dispatcher_stopped_sidecar_evidence,
     _git_identity,
     _git_identity_details,
+    _read_deepseek_transport_sidecar,
     _sha256_file,
     _run_metadata_recovery_identities,
+    _validate_deepseek_compact_records,
+    _validate_deepseek_linear_records,
     _validate_dispatcher_parent_loss_pending_reprepare_witnesses,
     append_jsonl_locked,
     campaign_recovery_incident_evidence,
@@ -2351,7 +2354,7 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
                 or not 1 <= row.get("rt_index") <= target_rt
                 or row.get("transport") != DEEPSEEK_TRANSPORT
                 or row.get("transport_revision")
-                != DEEPSEEK_TRANSPORT_REVISION
+                != config.get("transport_revision")
                 or row.get("provider_called") is not True
                 or row.get("response_replayed") is not False):
             raise RuntimeError(
@@ -2434,10 +2437,14 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
                 path = os.path.realpath(os.path.join(root, name))
                 if path in mapped_sidecars:
                     continue
-                rows = _read_jsonl(path)
+                sidecar = _read_deepseek_transport_sidecar(path)
+                rows = sidecar["rows"]
                 if not rows:
                     continue
-                worker_ids = {row.get("worker_launch_id") for row in rows}
+                identity_rows = sidecar["identity_rows"]
+                worker_ids = {
+                    row.get("worker_launch_id") for row in identity_rows
+                }
                 relevant = worker_ids & set(workers_by_id)
                 if not relevant:
                     continue
@@ -2451,12 +2458,12 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
                     raise RuntimeError(
                         "dispatcher parent-loss preauthorization worker has "
                         "transport evidence")
-                methods_seen = {row.get("method") for row in rows}
-                samples_seen = {row.get("sample") for row in rows}
-                pids_seen = {row.get("worker_pid") for row in rows}
-                call_ids = {row.get("call_id") for row in rows}
-                rt_indexes = {row.get("rt_index") for row in rows}
-                directions = {row.get("direction") for row in rows}
+                methods_seen = {row.get("method") for row in identity_rows}
+                samples_seen = {row.get("sample") for row in identity_rows}
+                pids_seen = {row.get("worker_pid") for row in identity_rows}
+                call_ids = {row.get("call_id") for row in identity_rows}
+                rt_indexes = {row.get("rt_index") for row in identity_rows}
+                directions = {row.get("direction") for row in identity_rows}
                 if (samples_seen != {worker["sample"]}
                         or pids_seen != {worker["worker_pid"]}
                         or len(call_ids) != 1
@@ -2468,42 +2475,49 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
                         or isinstance(next(iter(rt_indexes)), bool)
                         or not 1 <= next(iter(rt_indexes)) <= target_rt
                         or len(directions) != 1
-                        or not directions <= {"forward", "backward"}
-                        or any(
-                            row.get("transport_event_schema")
-                            != "anchorpatch.transport_event/1"
-                            for row in rows)):
+                        or not directions <= {"forward", "backward"}):
                     raise RuntimeError(
                         "dispatcher parent-loss transport sidecar scope "
                         "is invalid")
-                starts = [
-                    row for row in rows
-                    if row.get("record_type") == "attempt_start"
-                ]
-                ends = [
-                    row for row in rows
-                    if row.get("record_type") == "attempt_end"
-                ]
-                if (not starts or len(ends) > len(starts)
-                        or [row.get("attempt_index") for row in starts]
-                        != list(range(1, len(starts) + 1))
-                        or any(
-                            not isinstance(row.get("attempt"), dict)
-                            or row["attempt"].get("attempt_index") != index
-                            for index, row in enumerate(ends, 1)
-                        )):
+                expected_linkage = {
+                    "worker_launch_id": worker_id,
+                    "worker_pid": worker["worker_pid"],
+                    "sample": worker["sample"],
+                    "method": next(iter(methods_seen)),
+                    "rt_index": next(iter(rt_indexes)),
+                    "direction": next(iter(directions)),
+                    "call_id": next(iter(call_ids)),
+                }
+                try:
+                    if (config.get("transport_revision")
+                            == DEEPSEEK_TRANSPORT_REVISION):
+                        if not sidecar["compact"]:
+                            raise RuntimeError(
+                                "compact transport schema was downgraded")
+                        parsed = _validate_deepseek_compact_records(
+                            rows,
+                            expected_linkage=expected_linkage,
+                            allow_open_final=True,
+                        )
+                    elif config.get("transport_revision") in {
+                            "opencode_openai_compatible/4",
+                            "opencode_openai_compatible/5",
+                    }:
+                        if sidecar["compact"]:
+                            raise RuntimeError(
+                                "linear transport schema was upgraded")
+                        parsed = _validate_deepseek_linear_records(
+                            rows,
+                            expected_linkage=expected_linkage,
+                            allow_open_final=True,
+                        )
+                    else:
+                        raise RuntimeError(
+                            "unsupported DeepSeek transport revision")
+                except RuntimeError as exc:
                     raise RuntimeError(
                         "dispatcher parent-loss transport sidecar sequence "
-                        "is invalid")
-                terminal_attempt = (
-                    ends[-1].get("attempt") if ends else None)
-                if len(ends) < len(starts):
-                    state = "open_attempt"
-                elif (terminal_attempt.get("status") == "success"
-                      and terminal_attempt.get("stream_complete") is True):
-                    state = "complete_unpublished_response"
-                else:
-                    state = "retry_or_error_unpublished"
+                        "is invalid") from exc
                 sidecar_incidents.append({
                     "path": os.path.relpath(
                         path, out_dir).replace("\\", "/"),
@@ -2516,9 +2530,9 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
                     "direction": next(iter(directions)),
                     "call_id": next(iter(call_ids)),
                     "event_count": len(rows),
-                    "attempt_start_count": len(starts),
-                    "attempt_end_count": len(ends),
-                    "state": state,
+                    "attempt_start_count": parsed["attempt_start_count"],
+                    "attempt_end_count": parsed["attempt_end_count"],
+                    "state": parsed["recovery_state"],
                 })
     return {
         "api": api_incidents,

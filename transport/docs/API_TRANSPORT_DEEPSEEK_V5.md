@@ -1,8 +1,8 @@
 # OpenCode DeepSeek OpenAI-compatible transport-v5
 
-状态：`opencode_openai_compatible/5` 的活动规范。它只用于新的
-DeepSeek-V4-Flash 实验目录；`/3` 与 `/4` 目录保持原身份、原证据和原完成判定，
-不得原地 resume 或改写成 `/5`。
+状态：`opencode_openai_compatible/5` 的冻结历史规范，仅用于解释既有证据。
+活动 revision 已升为 `/6`；`/3`、`/4`、`/5` 目录均保持原身份、原证据和原完成
+判定，不得原地 resume、改写或升级 revision。
 
 ## 请求身份
 

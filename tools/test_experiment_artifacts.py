@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tarfile
 import tempfile
 import unittest
@@ -73,6 +74,22 @@ class ExperimentArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "cache key changed"):
                 artifacts.seal_experiment(source, archive, root=root)
 
+    def test_same_size_same_mtime_source_change_invalidates_seal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, archive = self.fixture(root)
+            artifacts.seal_experiment(source, archive, root=root)
+            result = source / "result.jsonl"
+            before = result.stat()
+            result.write_text('{"score":0}\n', encoding="utf-8")
+            os.utime(
+                result,
+                ns=(before.st_atime_ns, before.st_mtime_ns),
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "cache key changed"):
+                artifacts.seal_experiment(source, archive, root=root)
+
     def test_exact_secret_match_blocks_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -101,6 +118,30 @@ class ExperimentArtifactTests(unittest.TestCase):
 
             (source / "new.txt").write_text("changed", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "changed after"):
+                artifacts.load_valid_seal(
+                    seal_path,
+                    experiment_id="exp_fixture",
+                    source=source,
+                    root=root,
+                )
+
+    def test_load_valid_seal_rejects_changed_archive_content(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, archive = self.fixture(root)
+            artifacts.seal_experiment(source, archive, root=root)
+            seal_path = archive.with_name(archive.name + ".seal.json")
+            before = archive.stat()
+            payload = bytearray(archive.read_bytes())
+            payload[len(payload) // 2] ^= 1
+            archive.write_bytes(payload)
+            os.utime(
+                archive,
+                ns=(before.st_atime_ns, before.st_mtime_ns),
+            )
+
+            with self.assertRaisesRegex(
+                    RuntimeError, "archive content is missing or changed"):
                 artifacts.load_valid_seal(
                     seal_path,
                     experiment_id="exp_fixture",

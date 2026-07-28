@@ -124,16 +124,20 @@ python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch ful
 - 默认模型 `deepseek-v4-flash` 仍可使用显式配置的 OpenAI 兼容端点；正式 OpenCode
   DeepSeek-V4-Flash campaign 固定走 OpenCode Zen
   `https://opencode.ai/zen/go/v1/chat/completions`（USD），revision
-  `opencode_openai_compatible/5`，stream，`reasoning_effort=high`。正式
+  `opencode_openai_compatible/6`，stream，`reasoning_effort=high`。正式
   `deepseek_full234` 固定 RT10；历史 `/3` RT2 non-stream 目录只作冻结 supporting
-  evidence，失败的 `/4` RT10 目录同样只作冻结 transport evidence；两者都不得原地
-  升级成 `/5`。流必须同时包含非空 `finish_reason` 和计数完整一致的 terminal
+  evidence，`/4` 与 `/5` stream 目录只作冻结 transport evidence；旧目录都不得原地
+  resume 或升级成 `/6`。流必须同时包含非空 `finish_reason` 和计数完整一致的 terminal
   usage；usage 可与 finish 位于同一 choice chunk，也可位于随后的 usage-only chunk。
   finish 后只允许无 choices、无 usage 的尾随元数据；partial、乱序、重复或空 usage
   stream 全量重发且不得提交部分正文。
   生成前 HTTP 503 重试不消耗有限重试额度，使用带 worker spread 的指数退避；
   502 与生成后失败消耗额度；provider `Retry-After` 最多按 300 秒执行，所有失败
   attempt 的脱敏 body/message 同时写入 API terminal row 与 transport sidecar。
+  `/6` 使用 `anchorpatch.transport_event/2` compact sidecar：每 call 一个 header、每
+  attempt 仅保存单调 checkpoint、聚合 summary 与 terminal end，规模为 O(attempt)；
+  不保存逐 chunk raw event，也不生成重复 `.sse.jsonl`。完整规范见
+  `transport/docs/API_TRANSPORT_DEEPSEEK_V6.md`。
   `minimax-m3` 固定走 OpenCode Go
   `https://opencode.ai/zen/go/v1/messages`（USD），Python 使用 Anthropic SDK，所有调用均为
   adaptive thinking，默认/硬上限 `max_tokens=131072`。

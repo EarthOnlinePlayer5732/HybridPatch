@@ -670,6 +670,82 @@ class ProcessExperimentTests(unittest.TestCase):
                 assert report is not None
                 self.assertEqual(report.read().decode(), "new validated record")
 
+    def test_public_finalize_records_canonical_report_sha256(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog_path = root / "tools" / "experiment_records_catalog.json"
+            catalog_path.parent.mkdir(parents=True)
+            original_catalog = {
+                "record_sets": [{
+                    "owner": "HP_V8",
+                    "experiments": [{"experiment_id": "published"}],
+                }]
+            }
+            prospective_catalog = json.loads(json.dumps(original_catalog))
+            prospective_catalog["record_sets"][0]["experiments"].append(
+                {"experiment_id": "exp_test"}
+            )
+            catalog_path.write_text(
+                process.stable_json(original_catalog), encoding="utf-8"
+            )
+            (root / "docs").mkdir()
+            (root / "docs" / "EXPERIMENT_INDEX.md").write_text(
+                "original index", encoding="utf-8"
+            )
+            owner = root / "HP_V8"
+            records = owner / "records"
+            (records / "published").mkdir(parents=True)
+            (records / "published" / "report.md").write_text(
+                "published", encoding="utf-8"
+            )
+            (owner / "EXPERIMENTS.md").write_text(
+                "original owner index", encoding="utf-8"
+            )
+            archive = owner / "exp_test"
+            (archive / "analysis").mkdir(parents=True)
+
+            def generate_state(*_args, **_kwargs):
+                target = records / "exp_test"
+                target.mkdir(parents=True)
+                (target / "report.md").write_text(
+                    "new validated record", encoding="utf-8"
+                )
+                return SimpleNamespace(returncode=0)
+
+            with (
+                mock.patch.object(process, "ROOT", root),
+                mock.patch.object(process, "CATALOG", catalog_path),
+                mock.patch.object(
+                    process,
+                    "reviewed_finalization_inputs",
+                    return_value=(
+                        "HP_V8",
+                        archive,
+                        {"input_sha256": "a" * 64},
+                        {"experiment_id": "exp_test"},
+                        prospective_catalog,
+                    ),
+                ),
+                mock.patch.object(
+                    process.subprocess,
+                    "run",
+                    side_effect=generate_state,
+                ),
+            ):
+                process.finalize_experiment(archive, None)
+
+            report = records / "exp_test" / "report.md"
+            state = json.loads(
+                (archive / "analysis" / "process_state.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(state["stage"], "finalized")
+            self.assertEqual(
+                state["public_record_sha256"], process.sha256_file(report)
+            )
+            self.assertIsNone(state["private_record_bundle_sha256"])
+
 
 if __name__ == "__main__":
     unittest.main()

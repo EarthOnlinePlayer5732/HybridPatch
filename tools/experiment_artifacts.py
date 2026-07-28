@@ -98,6 +98,41 @@ def quick_tree_fingerprint(
     }
 
 
+def _content_tree_identity(root: Path) -> dict[str, Any]:
+    """Return the strong, credential-free identity stored inside a seal."""
+
+    from build_experiment_records import tree_digest
+
+    tree = tree_digest(root, scan_credentials=False)
+    return {
+        key: tree.get(key)
+        for key in (
+            "algorithm",
+            "tree_sha256",
+            "file_count",
+            "size_bytes",
+            "skipped_sensitive_files",
+            "skipped_symlinks",
+        )
+    }
+
+
+def _stored_tree_identity(tree: Any) -> dict[str, Any] | None:
+    if not isinstance(tree, dict):
+        return None
+    return {
+        key: tree.get(key)
+        for key in (
+            "algorithm",
+            "tree_sha256",
+            "file_count",
+            "size_bytes",
+            "skipped_sensitive_files",
+            "skipped_symlinks",
+        )
+    }
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open(encoding="utf-8") as handle:
         value = json.load(handle)
@@ -121,8 +156,11 @@ def _cache_matches(source: Path, archive: Path, seal_path: Path) -> bool:
     archive_stat = archive.stat()
     return (
         seal.get("source_quick_fingerprint") == quick
+        and _stored_tree_identity(seal.get("tree"))
+        == _content_tree_identity(source)
         and seal.get("archive", {}).get("size_bytes") == archive_stat.st_size
         and seal.get("archive", {}).get("mtime_ns") == archive_stat.st_mtime_ns
+        and seal.get("archive", {}).get("sha256") == sha256_file(archive)
     )
 
 
@@ -294,4 +332,16 @@ def load_valid_seal(
     current = quick_tree_fingerprint(source)
     if seal.get("source_quick_fingerprint") != current:
         raise RuntimeError("experiment changed after artifact sealing")
+    if _stored_tree_identity(tree) != _content_tree_identity(source):
+        raise RuntimeError("experiment content changed after artifact sealing")
+    suffix = ".seal.json"
+    if not path.name.endswith(suffix):
+        raise RuntimeError("sealed artifact manifest filename is invalid")
+    archive_path = path.with_name(path.name[:-len(suffix)])
+    archive_record = seal.get("archive")
+    if (not archive_path.is_file()
+            or not isinstance(archive_record, dict)
+            or archive_record.get("size_bytes") != archive_path.stat().st_size
+            or archive_record.get("sha256") != sha256_file(archive_path)):
+        raise RuntimeError("sealed private archive content is missing or changed")
     return seal

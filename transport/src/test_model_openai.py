@@ -1632,6 +1632,32 @@ class IntegrationContractTests(unittest.TestCase):
                     call_kind="hybridpatch_primary")
             provider.assert_not_called()
 
+    def test_raw_io_does_not_duplicate_critical_stream_events(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                "deepseek-v4-flash", mock.Mock())
+            recorder.set_step(1, "forward", "target")
+            meta = {
+                "_raw_request_body": {"stream": True},
+                "_raw_stream_events": [{"choices": [{"delta": {"content": "x"}}]}],
+                "_raw_response_full": {"message": "x"},
+            }
+
+            critical = recorder._dump_raw_io(
+                "critical", meta, stream_events_already_saved=True)
+            fallback = recorder._dump_raw_io("fallback", meta)
+
+            self.assertNotIn("sse", critical)
+            self.assertTrue(os.path.isfile(critical["request"]))
+            self.assertTrue(os.path.isfile(critical["response_full"]))
+            self.assertTrue(os.path.isfile(fallback["sse"]))
+            self.assertFalse(any(
+                name.endswith("critical.sse.jsonl")
+                for _root, _dirs, files in os.walk(out_dir)
+                for name in files
+            ))
+
     def test_api_log_schema_v4_and_secret_redaction(self):
         secret = "unit-test-secret-key"
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
@@ -1905,13 +1931,13 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(result["provider"], "opencode_zen")
         self.assertEqual(result["transport"], "openai_sdk_stream")
         self.assertEqual(
-            result["transport_revision"], "opencode_openai_compatible/5")
+            result["transport_revision"], "opencode_openai_compatible/6")
         self.assertEqual(
             result["request_url"],
             "https://opencode.ai/zen/go/v1/chat/completions")
         self.assertEqual(result["reasoning_effort"], "high")
         self.assertIs(result["stream_complete"], True)
-        self.assertEqual(len(result["_raw_stream_events"]), 4)
+        self.assertNotIn("_raw_stream_events", result)
         self.assertEqual(result["http_attempts_used"], 1)
         self.assertEqual(result["retry_count"], 0)
         self.assertEqual(result["cost_currency"], "USD")
@@ -1920,10 +1946,15 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(events[0]["record_type"], "attempt_start")
         self.assertEqual(events[-1]["record_type"], "attempt_end")
         self.assertEqual(
-            sum(event["record_type"] == "sdk_stream_event"
-                for event in events),
-            4,
+            [event["record_type"] for event in events],
+            [
+                "attempt_start", "stream_checkpoint", "stream_checkpoint",
+                "stream_checkpoint", "stream_checkpoint", "stream_summary",
+                "attempt_end",
+            ],
         )
+        self.assertEqual(
+            result["transport_attempts"][0]["stream_event_count"], 4)
 
     def test_finish_chunk_usage_and_empty_trailer_are_complete(self):
         captures = []
@@ -1940,6 +1971,26 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertTrue(attempt["message_stop_seen"])
         self.assertTrue(attempt["final_usage_seen"])
         self.assertTrue(attempt["terminal_sequence_valid"])
+
+    def test_fifty_thousand_chunks_emit_bounded_compact_evidence(self):
+        captures = []
+        payload = _official_payload(content="x", finish_reason="stop")
+        template = _stream_chunks_from_payload(payload)
+        chunks = [template[0], *([template[1]] * 50_000), *template[2:]]
+
+        result, events = self._generate([chunks], captures)
+
+        self.assertEqual(result["message"], "x" * 50_000)
+        self.assertNotIn("_raw_stream_events", result)
+        self.assertLessEqual(len(events), 8)
+        self.assertNotIn(
+            "sdk_stream_event",
+            [event["record_type"] for event in events],
+        )
+        attempt = result["transport_attempts"][0]
+        self.assertEqual(attempt["stream_event_count"], 50_003)
+        self.assertEqual(attempt["text_delta_count"], 50_000)
+        self.assertRegex(attempt["stream_event_sha256"], r"^[0-9a-f]{64}$")
 
     def test_duplicate_usage_after_finish_chunk_is_incomplete(self):
         captures = []
@@ -2035,11 +2086,11 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             [item["status"] for item in result["transport_attempts"]],
             ["retryable_error", "success"],
         )
-        self.assertEqual(
-            [event["record_type"] for event in events
-             if event["record_type"] != "sdk_stream_event"],
-            ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
-        )
+        event_types = [event["record_type"] for event in events]
+        self.assertEqual(event_types.count("attempt_start"), 2)
+        self.assertEqual(event_types.count("stream_summary"), 2)
+        self.assertEqual(event_types.count("attempt_end"), 2)
+        self.assertNotIn("sdk_stream_event", event_types)
 
     def test_openai_connection_error_is_retried_and_recorded(self):
         captures = []
@@ -2396,11 +2447,30 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             )
         self.assertEqual(config["provider"], "opencode_zen")
         self.assertEqual(
-            config["transport_revision"], "opencode_openai_compatible/5")
+            config["transport_revision"], "opencode_openai_compatible/6")
         self.assertEqual(config["transport"], "openai_sdk_stream")
         self.assertEqual(config["reasoning_effort"], "high")
         with self.assertRaises(ValueError):
             model_openai._effective_reasoning_effort("ultra")
+        captures = []
+        fake_cls = _official_client_factory(
+            [_official_payload(content="unused")], captures)
+        with mock.patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "unit-test-key",
+                    "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+                },
+                clear=False), mock.patch.object(
+                    model_openai, "OpenAI", fake_cls):
+            with self.assertRaisesRegex(ValueError, "requires reasoning_effort"):
+                model_openai.OpenAI_Model().generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="deepseek-v4-flash",
+                    max_tokens=20000,
+                    return_metadata=True,
+                )
+        self.assertFalse(any("model" in item for item in captures))
 
     def test_opencode_zen_rejects_inherited_azure_client_environment(self):
         with mock.patch.dict(os.environ, {

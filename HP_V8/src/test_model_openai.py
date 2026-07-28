@@ -1474,7 +1474,7 @@ class IntegrationContractTests(unittest.TestCase):
                     mock.patch.object(
                         paired_dispatch, "inspect_campaign",
                         return_value={"errors": [], "api_calls": 2,
-                                      "preservation_violations": 0}), \
+                                      "preservation_violations": 0}) as inspect, \
                     mock.patch.object(
                         paired_dispatch, "_authorize_workers"), \
                     mock.patch.object(
@@ -1512,6 +1512,8 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(
                 dispatch_rows[-1]["infrastructure_incomplete_samples"],
                 ["sample-a"])
+            self.assertTrue(
+                inspect.call_args.kwargs["require_terminal_provenance"])
 
     def test_confirmation_queue_isolates_incomplete_and_preservation_stops(self):
         samples = ["sample-a", "sample-b", "sample-c"]
@@ -1800,6 +1802,341 @@ class IntegrationContractTests(unittest.TestCase):
             [set(), {"sample-b", "sample-c"}, {"sample-x"}],
         )
         self.assertEqual(write_active.call_count, 4)
+
+    def test_worker_queue_idle_polls_do_not_run_full_inspection(self):
+        class FakeProcess:
+            pid = 101
+            returncode = None
+
+            def __init__(self):
+                self.polls = [None, None, 0]
+
+            def poll(self):
+                self.returncode = self.polls.pop(0)
+                return self.returncode
+
+        def fake_launch(_args, _out_dir, _manifest, _plans, _keys,
+                        batch, _authorizations, _dispatch_log, running):
+            item = batch[0]
+            running[item["sample"]] = {
+                **item,
+                "process": FakeProcess(),
+                "log": mock.Mock(),
+                "worker_launch_id": "worker-sample-a",
+                "exit_recorded": False,
+            }
+            return [item["sample"]]
+
+        def fake_exit(_out_dir, running, sample, _item, returncode,
+                      _dispatch_log):
+            self.assertEqual(returncode, 0)
+            del running[sample]
+            return "finished"
+
+        args = mock.Mock(
+            campaign_role="full234", poll_interval=0,
+            progress_interval=9999,
+        )
+        inspection = {
+            "errors": [], "api_calls": 2, "preservation_violations": 0,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    side_effect=fake_launch), \
+                mock.patch.object(
+                    paired_dispatch, "_record_worker_exit",
+                    side_effect=fake_exit), \
+                mock.patch.object(
+                    paired_dispatch, "inspect_campaign",
+                    return_value=inspection) as inspect, \
+                mock.patch.object(
+                    paired_dispatch, "_write_active_worker_set"), \
+                mock.patch.object(paired_dispatch.time, "sleep"):
+            paired_dispatch._run_worker_queue(
+                args,
+                out_dir,
+                {"run_git_commit": "1" * 40},
+                {},
+                {},
+                [{
+                    "sample": "sample-a", "key_label": "KEY_01",
+                    "methods": ["hybridpatch", "fullrewrite"],
+                }],
+                {},
+                os.path.join(out_dir, "dispatch_log.jsonl"),
+                {},
+                set(),
+                set(),
+                set(),
+                1,
+                1,
+            )
+
+        inspect.assert_called_once()
+        self.assertEqual(
+            inspect.call_args.kwargs["required_complete_samples"],
+            {"sample-a"},
+        )
+
+    def test_worker_queue_audit_failure_does_not_refill_released_slot(self):
+        class FakeProcess:
+            pid = 101
+            returncode = None
+
+            def poll(self):
+                self.returncode = 0
+                return self.returncode
+
+        launched = []
+
+        def fake_launch(_args, _out_dir, _manifest, _plans, _keys,
+                        batch, _authorizations, _dispatch_log, running):
+            launched.extend(item["sample"] for item in batch)
+            for item in batch:
+                running[item["sample"]] = {
+                    **item,
+                    "process": FakeProcess(),
+                    "log": mock.Mock(),
+                    "worker_launch_id": f"worker-{item['sample']}",
+                    "exit_recorded": False,
+                }
+            return [item["sample"] for item in batch]
+
+        def fake_exit(_out_dir, running, sample, _item, returncode,
+                      _dispatch_log):
+            self.assertEqual(returncode, 0)
+            del running[sample]
+            return "finished"
+
+        args = mock.Mock(
+            campaign_role="full234", poll_interval=0,
+            progress_interval=9999,
+        )
+        assignments = [
+            {
+                "sample": "sample-a", "key_label": "KEY_01",
+                "methods": ["hybridpatch", "fullrewrite"],
+            },
+            {
+                "sample": "sample-b", "key_label": "KEY_01",
+                "methods": ["fullrewrite", "hybridpatch"],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    side_effect=fake_launch), \
+                mock.patch.object(
+                    paired_dispatch, "_record_worker_exit",
+                    side_effect=fake_exit), \
+                mock.patch.object(
+                    paired_dispatch, "inspect_campaign",
+                    return_value={
+                        "errors": ["post-exit audit failure"],
+                        "api_calls": 0,
+                        "preservation_violations": 0,
+                    }) as inspect, \
+                mock.patch.object(
+                    paired_dispatch, "_write_active_worker_set"), \
+                mock.patch.object(paired_dispatch.time, "sleep"):
+            with self.assertRaisesRegex(
+                    RuntimeError, "post-exit audit failure"):
+                paired_dispatch._run_worker_queue(
+                    args, out_dir, {"run_git_commit": "1" * 40}, {}, {},
+                    assignments, {},
+                    os.path.join(out_dir, "dispatch_log.jsonl"), {},
+                    set(), set(), set(), len(assignments), 1,
+                )
+
+        self.assertEqual(launched, ["sample-a"])
+        inspect.assert_called_once()
+        self.assertEqual(
+            inspect.call_args.kwargs["required_complete_samples"],
+            {"sample-a"},
+        )
+
+    def test_worker_terminal_provenance_accepts_finished_and_local_incomplete(self):
+        launch = {"sample": "sample", "pid": 101}
+        created_at = "2026-07-29T12:00:00+08:00"
+        for status, returncode in (
+                ("finished", 0),
+                ("infrastructure_incomplete", 2),
+                ("evaluator_incomplete", 3)):
+            with self.subTest(status=status):
+                exit_row = {
+                    "sample": "sample",
+                    "pid": 101,
+                    "returncode": returncode,
+                    "disposition": status,
+                    "created_at": created_at,
+                }
+                if status != "finished":
+                    exit_row["evidence"] = {"verified": True}
+                proof = paired_dispatch._worker_terminal_provenance(
+                    launch,
+                    exit_row,
+                    [{
+                        "status": status,
+                        "worker_pid": 101,
+                        "samples": ["sample"],
+                    }],
+                )
+                self.assertTrue(proof["ordinary_ok"])
+
+        invalid = paired_dispatch._worker_terminal_provenance(
+            launch,
+            {
+                "sample": "sample",
+                "pid": 101,
+                "returncode": 2,
+                "disposition": "finished",
+                "created_at": created_at,
+                "evidence": {"verified": True},
+            },
+            [{
+                "status": "infrastructure_incomplete",
+                "worker_pid": 101,
+                "samples": ["sample"],
+            }],
+        )
+        self.assertFalse(invalid["ordinary_ok"])
+
+    def test_worker_queue_idle_poll_stops_on_campaign_latch(self):
+        class FakeProcess:
+            pid = 101
+            returncode = None
+
+            @staticmethod
+            def poll():
+                return None
+
+        def fake_launch(_args, _out_dir, _manifest, _plans, _keys,
+                        batch, _authorizations, _dispatch_log, running):
+            item = batch[0]
+            running[item["sample"]] = {
+                **item,
+                "process": FakeProcess(),
+                "log": mock.Mock(),
+                "worker_launch_id": "worker-sample-a",
+                "exit_recorded": False,
+            }
+            return [item["sample"]]
+
+        args = mock.Mock(
+            campaign_role="full234", poll_interval=0,
+            progress_interval=9999,
+        )
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    side_effect=fake_launch), \
+                mock.patch.object(
+                    paired_dispatch, "read_campaign_stop_conditions",
+                    return_value=[{"condition": "preservation_violation"}]), \
+                mock.patch.object(
+                    paired_dispatch, "inspect_campaign") as inspect, \
+                mock.patch.object(
+                    paired_dispatch, "_write_active_worker_set"), \
+                mock.patch.object(paired_dispatch.time, "sleep"):
+            with self.assertRaisesRegex(
+                    RuntimeError, "preservation_violation"):
+                paired_dispatch._run_worker_queue(
+                    args,
+                    out_dir,
+                    {"run_git_commit": "1" * 40},
+                    {},
+                    {},
+                    [{
+                        "sample": "sample-a", "key_label": "KEY_01",
+                        "methods": ["hybridpatch", "fullrewrite"],
+                    }],
+                    {},
+                    os.path.join(out_dir, "dispatch_log.jsonl"),
+                    {},
+                    set(),
+                    set(),
+                    set(),
+                    1,
+                    1,
+                )
+
+        inspect.assert_not_called()
+
+    def test_worker_queue_refill_boundary_stop_blocks_next_launch(self):
+        class FakeProcess:
+            pid = 101
+            returncode = None
+
+            @staticmethod
+            def poll():
+                return 0
+
+        launched = []
+
+        def fake_launch(_args, _out_dir, _manifest, _plans, _keys,
+                        batch, _authorizations, _dispatch_log, running):
+            launched.extend(item["sample"] for item in batch)
+            for item in batch:
+                running[item["sample"]] = {
+                    **item,
+                    "process": FakeProcess(),
+                    "log": mock.Mock(),
+                    "worker_launch_id": f"worker-{item['sample']}",
+                    "exit_recorded": False,
+                }
+            return [item["sample"] for item in batch]
+
+        def fake_exit(_out_dir, running, sample, _item, _returncode,
+                      _dispatch_log):
+            del running[sample]
+            return "finished"
+
+        args = mock.Mock(
+            campaign_role="full234", poll_interval=0,
+            progress_interval=9999,
+        )
+        assignments = [
+            {
+                "sample": "sample-a", "key_label": "KEY_01",
+                "methods": ["hybridpatch", "fullrewrite"],
+            },
+            {
+                "sample": "sample-b", "key_label": "KEY_01",
+                "methods": ["fullrewrite", "hybridpatch"],
+            },
+        ]
+        stop_checks = [[], [], [{"condition": "preservation_violation"}]]
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    side_effect=fake_launch), \
+                mock.patch.object(
+                    paired_dispatch, "_record_worker_exit",
+                    side_effect=fake_exit), \
+                mock.patch.object(
+                    paired_dispatch, "read_campaign_stop_conditions",
+                    side_effect=stop_checks), \
+                mock.patch.object(
+                    paired_dispatch, "inspect_campaign",
+                    return_value={
+                        "errors": [], "api_calls": 1,
+                        "preservation_violations": 0,
+                    }) as inspect, \
+                mock.patch.object(
+                    paired_dispatch, "_write_active_worker_set"), \
+                mock.patch.object(paired_dispatch.time, "sleep"):
+            with self.assertRaisesRegex(
+                    RuntimeError, "before worker queue refill.*preservation"):
+                paired_dispatch._run_worker_queue(
+                    args, out_dir, {"run_git_commit": "1" * 40}, {}, {},
+                    assignments, {},
+                    os.path.join(out_dir, "dispatch_log.jsonl"), {},
+                    set(), set(), set(), len(assignments), 1,
+                )
+
+        self.assertEqual(launched, ["sample-a"])
+        inspect.assert_called_once()
 
     def test_operator_pause_reconciles_terminal_active_workers_by_truth(self):
         expected_progress = {
@@ -5709,6 +6046,29 @@ class IntegrationContractTests(unittest.TestCase):
         self.assertEqual(phases, ["hybridpatch"])
         self.assertEqual(barriers, [])
 
+    def test_remaining134_incomplete_requires_terminal_worker_provenance(self):
+        states = {
+            "finished": {"sample-b"},
+            "infrastructure_incomplete": {"sample-a"},
+            "evaluator_incomplete": set(),
+            "missing": set(),
+        }
+        inspection = {
+            "errors": [], "api_calls": 1, "preservation_violations": 0,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                paired_dispatch, "inspect_campaign",
+                return_value=inspection) as inspect:
+            paired_dispatch._append_remaining134_incomplete(
+                out_dir,
+                {"run_git_commit": "1" * 40},
+                "hybridpatch",
+                states,
+            )
+
+        self.assertTrue(
+            inspect.call_args.kwargs["require_terminal_provenance"])
+
     def test_remaining134_hp_evaluator_incomplete_skips_only_its_fr(self):
         samples = ["sample-a", "sample-b"]
         assignments = [
@@ -6504,9 +6864,13 @@ class IntegrationContractTests(unittest.TestCase):
     def test_dispatch_retains_active_worker_until_lease_and_metadata_close(self):
         class FakeProcess:
             pid = 101
+            poll_failures = 1
 
-            @staticmethod
-            def poll():
+            @classmethod
+            def poll(cls):
+                if cls.poll_failures:
+                    cls.poll_failures -= 1
+                    raise RuntimeError("forced global integrity error")
                 return None
 
         def make_task_plans(out_dir, samples, *_args):
@@ -6526,6 +6890,7 @@ class IntegrationContractTests(unittest.TestCase):
         for hold_lease in (True, False):
             with self.subTest(hold_lease=hold_lease), \
                     tempfile.TemporaryDirectory() as out_dir:
+                FakeProcess.poll_failures = 1
                 args = mock.Mock(
                     campaign_role="smoke", smoke_dir=None,
                     samples=["sample"], key_labels=["KEY_01"],
@@ -6567,12 +6932,10 @@ class IntegrationContractTests(unittest.TestCase):
                         run_meta.read_campaign_stop_conditions(out_dir))
                     raise RuntimeError("terminate/kill failed")
 
-                inspections = iter([
-                    {"errors": [], "api_calls": 0,
-                     "preservation_violations": 0},
-                    {"errors": ["forced global integrity error"],
-                     "api_calls": 0, "preservation_violations": 0},
-                ])
+                inspections = iter([{
+                    "errors": [], "api_calls": 0,
+                    "preservation_violations": 0,
+                }])
                 try:
                     with mock.patch.object(
                             paired_dispatch,
@@ -9768,6 +10131,32 @@ class IntegrationContractTests(unittest.TestCase):
             self.assertEqual(observed["transient_failure_count"], 0)
             self.assertEqual(observed["http_attempts_used"], 0)
 
+    def test_raw_io_does_not_duplicate_critical_stream_events(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                paired_dispatch.DEEPSEEK_MODEL, mock.Mock())
+            recorder.set_step(1, "forward", "target")
+            meta = {
+                "_raw_request_body": {"stream": True},
+                "_raw_stream_events": [{"choices": [{"delta": {"content": "x"}}]}],
+                "_raw_response_full": {"message": "x"},
+            }
+
+            critical = recorder._dump_raw_io(
+                "critical", meta, stream_events_already_saved=True)
+            fallback = recorder._dump_raw_io("fallback", meta)
+
+            self.assertNotIn("sse", critical)
+            self.assertTrue(os.path.isfile(critical["request"]))
+            self.assertTrue(os.path.isfile(critical["response_full"]))
+            self.assertTrue(os.path.isfile(fallback["sse"]))
+            self.assertFalse(any(
+                name.endswith("critical.sse.jsonl")
+                for _root, _dirs, files in os.walk(out_dir)
+                for name in files
+            ))
+
     def test_api_log_schema_v4_and_secret_redaction(self):
         secret = "unit-test-secret-key"
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
@@ -9948,6 +10337,210 @@ class IntegrationContractTests(unittest.TestCase):
             ) as handle:
                 self.assertNotIn(secret, handle.read())
 
+    def test_deepseek_compact_sidecar_is_bounded_linked_and_not_duplicated(self):
+        stream_sha = "a" * 64
+        usage = {
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "total_tokens": 14,
+        }
+        attempt = {
+            "attempt_index": 1,
+            "status": "success",
+            "error_type": None,
+            "http_status": 200,
+            "stream_complete": True,
+            "message_start_seen": True,
+            "message_stop_seen": True,
+            "final_usage_seen": True,
+            "generation_delta_seen": True,
+            "terminal_sequence_valid": True,
+            "finish_reason": "stop",
+            "stream_event_count": 50_003,
+            "stream_event_canonical_bytes": 8_000_000,
+            "stream_event_sha256": stream_sha,
+            "text_delta_count": 1,
+            "text_delta_utf8_bytes": 13,
+            "reasoning_delta_count": 50_000,
+            "reasoning_delta_utf8_bytes": 7_000_000,
+            "tool_delta_count": 0,
+            "tool_delta_utf8_bytes": 0,
+        }
+
+        def fake_generate(*_args, **kwargs):
+            sink = kwargs["_raw_event_sink"]
+            sink({
+                "record_type": "attempt_start",
+                "attempt_index": 1,
+                "attempt_kind": "openai_compatible_initial",
+            })
+            sink({
+                "record_type": "stream_checkpoint",
+                "attempt_index": 1,
+                "checkpoint": "first_chunk",
+                "stream_event_count": 1,
+            })
+            sink({
+                "record_type": "stream_checkpoint",
+                "attempt_index": 1,
+                "checkpoint": "generation_started",
+                "stream_event_count": 1,
+                "text_delta_seen": False,
+                "thinking_delta_seen": True,
+                "tool_delta_seen": False,
+            })
+            sink({
+                "record_type": "stream_checkpoint",
+                "attempt_index": 1,
+                "checkpoint": "finish_seen",
+                "stream_event_count": 50_002,
+                "finish_reason": "stop",
+            })
+            sink({
+                "record_type": "stream_checkpoint",
+                "attempt_index": 1,
+                "checkpoint": "usage_seen",
+                "stream_event_count": 50_003,
+                "usage": usage,
+            })
+            sink({
+                "record_type": "stream_summary",
+                "attempt_index": 1,
+                **{
+                    key: value for key, value in attempt.items()
+                    if key not in {
+                        "attempt_index", "status", "error_type",
+                        "http_status", "stream_complete",
+                    }
+                },
+                "usage": usage,
+            })
+            sink({
+                "record_type": "attempt_end",
+                "attempt_index": 1,
+                "attempt": attempt,
+            })
+            return {
+                "message": "VISIBLE_FINAL",
+                "http_status": 200,
+                "stream_complete": True,
+                "finish_reason": "stop",
+                "stop_reason": "stop",
+                "response_classification": "normal",
+                "prompt_tokens": 10,
+                "completion_tokens": 4,
+                "total_tokens": 14,
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "transport_attempts": [attempt],
+                "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                "transport_revision": paired_dispatch.DEEPSEEK_TRANSPORT_REVISION,
+                "reasoning_effort": "high",
+                "provider": "opencode_zen",
+                "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                "request_url": (
+                    paired_dispatch.DEEPSEEK_BASE_URL + "/chat/completions"),
+                "_raw_request_body": {"stream": True},
+            }
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
+            os.environ,
+            {
+                "OPENAI_API_KEY": "unit-test-key",
+                "OPENAI_BASE_URL": paired_dispatch.DEEPSEEK_BASE_URL,
+            },
+            clear=False,
+        ):
+            recorder = run_meta.ApiCallRecorder(
+                out_dir, "hybridpatch", "sample", None,
+                paired_dispatch.DEEPSEEK_MODEL, fake_generate)
+            recorder.set_step(1, "forward", "target")
+            recorder.generate(
+                [{"role": "user", "content": "Hello"}],
+                model=paired_dispatch.DEEPSEEK_MODEL,
+                max_tokens=paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                reasoning_effort="high",
+                call_kind="hybridpatch_primary",
+            )
+            record = next(iter(recorder.records_by_id.values()))
+            sidecar = record["raw_sse_saved_path"]
+
+            self.assertTrue(sidecar.endswith(".transport.jsonl"))
+            self.assertLess(os.path.getsize(sidecar), 32 * 1024)
+            self.assertEqual(record["transport_sidecar_record_count"], 8)
+            self.assertTrue(record["transport_sidecar_sha256"])
+            self.assertTrue(paired_dispatch._valid_deepseek_transport_sidecar(
+                out_dir, record))
+            with open(sidecar, encoding="utf-8") as handle:
+                sidecar_text = handle.read()
+            self.assertNotIn("VISIBLE_FINAL", sidecar_text)
+            self.assertFalse(any(
+                name.endswith(".sse.jsonl")
+                for _root, _dirs, files in os.walk(out_dir)
+                for name in files
+            ))
+            tampered = dict(record, transport_sidecar_size_bytes=1)
+            self.assertFalse(paired_dispatch._valid_deepseek_transport_sidecar(
+                out_dir, tampered))
+
+            with open(sidecar, encoding="utf-8") as handle:
+                compact_rows = [json.loads(line) for line in handle if line.strip()]
+            summary_row = next(
+                row for row in compact_rows
+                if row.get("record_type") == "stream_summary")
+            summary_row["raw_chunk"] = "must-not-be-accepted"
+            with open(sidecar, "w", encoding="utf-8", newline="") as handle:
+                for row in compact_rows:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            unexpected_field = dict(record)
+            unexpected_field.update(run_meta._transport_sidecar_facts(sidecar))
+            self.assertFalse(paired_dispatch._valid_deepseek_transport_sidecar(
+                out_dir, unexpected_field))
+
+            compact_rows = [
+                json.loads(line) for line in sidecar_text.splitlines()
+                if line.strip()
+            ]
+            usage_checkpoint = next(
+                row for row in compact_rows
+                if row.get("record_type") == "stream_checkpoint"
+                and row.get("checkpoint") == "usage_seen")
+            usage_checkpoint["stream_event_count"] = 0
+            with open(sidecar, "w", encoding="utf-8", newline="") as handle:
+                for row in compact_rows:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            regressed_checkpoint = dict(record)
+            regressed_checkpoint.update(
+                run_meta._transport_sidecar_facts(sidecar))
+            self.assertFalse(paired_dispatch._valid_deepseek_transport_sidecar(
+                out_dir, regressed_checkpoint))
+
+            compact_rows = [
+                json.loads(line) for line in sidecar_text.splitlines()
+                if line.strip()
+            ]
+            next(row for row in compact_rows
+                 if row.get("record_type") == "stream_summary")[
+                     "finish_reason"] = None
+            next(row for row in compact_rows
+                 if row.get("record_type") == "stream_checkpoint"
+                 and row.get("checkpoint") == "finish_seen")[
+                     "finish_reason"] = None
+            end_attempt = next(
+                row for row in compact_rows
+                if row.get("record_type") == "attempt_end")["attempt"]
+            end_attempt["finish_reason"] = None
+            with open(sidecar, "w", encoding="utf-8", newline="") as handle:
+                for row in compact_rows:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            blank_finish = dict(record)
+            blank_finish["transport_attempts"] = [end_attempt]
+            blank_finish.update(run_meta._transport_sidecar_facts(sidecar))
+            self.assertFalse(paired_dispatch._valid_deepseek_transport_sidecar(
+                out_dir, blank_finish))
+
     def test_deepseek_sidecar_write_failure_aborts_before_success_commit(self):
         real_open = open
 
@@ -9980,6 +10573,7 @@ class IntegrationContractTests(unittest.TestCase):
                 {
                     "record_type": "attempt_start",
                     "attempt_index": 1,
+                    "attempt_kind": "openai_compatible_initial",
                 },
             )
             self.fail("provider call continued after sidecar write failure")
@@ -10264,13 +10858,13 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(result["provider"], "opencode_zen")
         self.assertEqual(result["transport"], "openai_sdk_stream")
         self.assertEqual(
-            result["transport_revision"], "opencode_openai_compatible/5")
+            result["transport_revision"], "opencode_openai_compatible/6")
         self.assertEqual(
             result["request_url"],
             "https://opencode.ai/zen/go/v1/chat/completions")
         self.assertEqual(result["reasoning_effort"], "high")
         self.assertIs(result["stream_complete"], True)
-        self.assertEqual(len(result["_raw_stream_events"]), 4)
+        self.assertNotIn("_raw_stream_events", result)
         self.assertEqual(result["http_attempts_used"], 1)
         self.assertEqual(result["retry_count"], 0)
         self.assertEqual(result["cost_currency"], "USD")
@@ -10279,10 +10873,15 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(events[0]["record_type"], "attempt_start")
         self.assertEqual(events[-1]["record_type"], "attempt_end")
         self.assertEqual(
-            sum(event["record_type"] == "sdk_stream_event"
-                for event in events),
-            4,
+            [event["record_type"] for event in events],
+            [
+                "attempt_start", "stream_checkpoint", "stream_checkpoint",
+                "stream_checkpoint", "stream_checkpoint", "stream_summary",
+                "attempt_end",
+            ],
         )
+        self.assertEqual(
+            result["transport_attempts"][0]["stream_event_count"], 4)
 
     def test_finish_chunk_usage_and_empty_trailer_are_complete(self):
         captures = []
@@ -10299,6 +10898,26 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertTrue(attempt["message_stop_seen"])
         self.assertTrue(attempt["final_usage_seen"])
         self.assertTrue(attempt["terminal_sequence_valid"])
+
+    def test_fifty_thousand_chunks_emit_bounded_compact_evidence(self):
+        captures = []
+        payload = _official_payload(content="x", finish_reason="stop")
+        template = _stream_chunks_from_payload(payload)
+        chunks = [template[0], *([template[1]] * 50_000), *template[2:]]
+
+        result, events = self._generate([chunks], captures)
+
+        self.assertEqual(result["message"], "x" * 50_000)
+        self.assertNotIn("_raw_stream_events", result)
+        self.assertLessEqual(len(events), 8)
+        self.assertNotIn(
+            "sdk_stream_event",
+            [event["record_type"] for event in events],
+        )
+        attempt = result["transport_attempts"][0]
+        self.assertEqual(attempt["stream_event_count"], 50_003)
+        self.assertEqual(attempt["text_delta_count"], 50_000)
+        self.assertRegex(attempt["stream_event_sha256"], r"^[0-9a-f]{64}$")
 
     def test_duplicate_usage_after_finish_chunk_is_incomplete(self):
         captures = []
@@ -10394,11 +11013,11 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             [item["status"] for item in result["transport_attempts"]],
             ["retryable_error", "success"],
         )
-        self.assertEqual(
-            [event["record_type"] for event in events
-             if event["record_type"] != "sdk_stream_event"],
-            ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
-        )
+        event_types = [event["record_type"] for event in events]
+        self.assertEqual(event_types.count("attempt_start"), 2)
+        self.assertEqual(event_types.count("stream_summary"), 2)
+        self.assertEqual(event_types.count("attempt_end"), 2)
+        self.assertNotIn("sdk_stream_event", event_types)
 
     def test_openai_connection_error_is_retried_and_recorded(self):
         captures = []
@@ -10755,11 +11374,30 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             )
         self.assertEqual(config["provider"], "opencode_zen")
         self.assertEqual(
-            config["transport_revision"], "opencode_openai_compatible/5")
+            config["transport_revision"], "opencode_openai_compatible/6")
         self.assertEqual(config["transport"], "openai_sdk_stream")
         self.assertEqual(config["reasoning_effort"], "high")
         with self.assertRaises(ValueError):
             model_openai._effective_reasoning_effort("ultra")
+        captures = []
+        fake_cls = _official_client_factory(
+            [_official_payload(content="unused")], captures)
+        with mock.patch.dict(
+                os.environ,
+                {
+                    "OPENAI_API_KEY": "unit-test-key",
+                    "OPENAI_BASE_URL": "https://opencode.ai/zen/go/v1",
+                },
+                clear=False), mock.patch.object(
+                    model_openai, "OpenAI", fake_cls):
+            with self.assertRaisesRegex(ValueError, "requires reasoning_effort"):
+                model_openai.OpenAI_Model().generate(
+                    [{"role": "user", "content": "Hello"}],
+                    model="deepseek-v4-flash",
+                    max_tokens=20000,
+                    return_metadata=True,
+                )
+        self.assertFalse(any("model" in item for item in captures))
 
     def test_opencode_zen_rejects_inherited_azure_client_environment(self):
         with mock.patch.dict(os.environ, {
@@ -11099,21 +11737,86 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "content_blocks_stopped": 0,
             "content_blocks_balanced": True,
             "terminal_sequence_valid": True,
+            "finish_reason": "stop",
+            "stream_event_count": 1,
+            "stream_event_canonical_bytes": 100,
+            "stream_event_sha256": "a" * 64,
+            "text_delta_count": 1,
+            "text_delta_utf8_bytes": 7,
+            "reasoning_delta_count": 0,
+            "reasoning_delta_utf8_bytes": 0,
+            "tool_delta_count": 0,
+            "tool_delta_utf8_bytes": 0,
+        }
+        usage = {
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
         }
         for event in (
                 {
-                    "record_type": "attempt_start",
-                    "attempt_index": 1,
+                    "transport_event_schema": "anchorpatch.transport_event/2",
+                    "record_type": "transport_header",
+                    "transport_revision": (
+                        paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                    "call_id": request_id,
+                    "worker_launch_id": worker_id,
+                    "worker_pid": worker_pid,
+                    "sample": sample,
+                    "method": method,
+                    "rt_index": 1,
+                    "direction": direction,
                 },
                 {
-                    "record_type": "sdk_stream_event",
+                    "record_type": "attempt_start",
                     "attempt_index": 1,
-                    "event": {
-                        "choices": [{
-                            "delta": {"content": "fixture"},
-                            "finish_reason": None,
-                        }],
+                    "attempt_kind": "openai_compatible_initial",
+                },
+                {
+                    "record_type": "stream_checkpoint",
+                    "attempt_index": 1,
+                    "checkpoint": "first_chunk",
+                    "stream_event_count": 1,
+                },
+                {
+                    "record_type": "stream_checkpoint",
+                    "attempt_index": 1,
+                    "checkpoint": "generation_started",
+                    "stream_event_count": 1,
+                    "text_delta_seen": True,
+                    "thinking_delta_seen": False,
+                    "tool_delta_seen": False,
+                },
+                {
+                    "record_type": "stream_checkpoint",
+                    "attempt_index": 1,
+                    "checkpoint": "finish_seen",
+                    "stream_event_count": 1,
+                    "finish_reason": "stop",
+                },
+                {
+                    "record_type": "stream_checkpoint",
+                    "attempt_index": 1,
+                    "checkpoint": "usage_seen",
+                    "stream_event_count": 1,
+                    "usage": usage,
+                },
+                {
+                    "record_type": "stream_summary",
+                    "attempt_index": 1,
+                    **{
+                        key: value for key, value in attempt.items()
+                        if key not in {
+                            "attempt_index", "status", "error_type",
+                            "http_status", "response_started_http_status",
+                            "stream_complete", "message_delta_seen",
+                            "thinking_delta_seen", "text_delta_seen",
+                            "tool_delta_seen", "content_blocks_started",
+                            "content_blocks_stopped",
+                            "content_blocks_balanced",
+                        }
                     },
+                    "usage": usage,
                 },
                 {
                     "record_type": "attempt_end",
@@ -11121,7 +11824,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                     "attempt": attempt,
                 }):
             run_meta.append_jsonl_locked(sidecar_path, event)
-        return {
+        row = {
             "schema": paired_dispatch.API_CALL_SCHEMA,
             "request_id": request_id,
             "semantic_call_id": f"semantic-{direction}",
@@ -11150,6 +11853,9 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "response_classification": "normal",
             "stream_complete": True,
             "http_status": 200,
+            "prompt_tokens": 1,
+            "completion_tokens": 1,
+            "total_tokens": 2,
             "input_tokens": 1,
             "output_tokens": 1,
             "transport_attempts": [attempt],
@@ -11160,6 +11866,8 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "raw_request_saved_path": raw_path,
             "raw_sse_saved_path": sidecar_path,
         }
+        row.update(run_meta._transport_sidecar_facts(sidecar_path))
+        return row
 
     @staticmethod
     def _deepseek_failed_api_row(
@@ -11187,22 +11895,79 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "terminal_sequence_valid": False,
                 "retry_budget_consumed": True,
                 "retry_budget_attempt_index": index,
+                "finish_reason": None,
+                "stream_event_count": 0,
+                "stream_event_canonical_bytes": 0,
+                "stream_event_sha256": hashlib.sha256(b"").hexdigest(),
+                "text_delta_count": 0,
+                "text_delta_utf8_bytes": 0,
+                "reasoning_delta_count": 0,
+                "reasoning_delta_utf8_bytes": 0,
+                "tool_delta_count": 0,
+                "tool_delta_utf8_bytes": 0,
             }
             for index in range(1, 4)
         ]
+        raw_path = os.path.join(
+            out_dir, "api_raw", f"{request_id}.request.json")
         sidecar_path = os.path.join(
             out_dir, "api_raw", f"{request_id}.transport.jsonl")
+        run_meta.write_json_atomic(raw_path, {
+            "request_body": {
+                "model": paired_dispatch.DEEPSEEK_MODEL,
+                "reasoning_effort": (
+                    paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                "max_completion_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                "stream": True,
+                "stream_options": {"include_usage": True},
+            },
+        })
+        run_meta.append_jsonl_locked(sidecar_path, {
+            "transport_event_schema": "anchorpatch.transport_event/2",
+            "record_type": "transport_header",
+            "transport_revision": paired_dispatch.DEEPSEEK_TRANSPORT_REVISION,
+            "call_id": request_id,
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+            "sample": sample,
+            "method": method,
+            "rt_index": 1,
+            "direction": direction,
+        })
         for attempt in attempts:
             run_meta.append_jsonl_locked(sidecar_path, {
                 "record_type": "attempt_start",
                 "attempt_index": attempt["attempt_index"],
+                "attempt_kind": (
+                    "openai_compatible_initial"
+                    if attempt["attempt_index"] == 1
+                    else "openai_compatible_retry"
+                ),
+            })
+            run_meta.append_jsonl_locked(sidecar_path, {
+                "record_type": "stream_summary",
+                "attempt_index": attempt["attempt_index"],
+                **{
+                    key: value for key, value in attempt.items()
+                    if key not in {
+                        "attempt_index", "status", "error_type",
+                        "http_status", "response_started_http_status",
+                        "stream_complete", "message_delta_seen",
+                        "thinking_delta_seen", "text_delta_seen",
+                        "tool_delta_seen", "content_blocks_started",
+                        "content_blocks_stopped", "content_blocks_balanced",
+                        "retry_budget_consumed",
+                        "retry_budget_attempt_index",
+                    }
+                },
+                "usage": None,
             })
             run_meta.append_jsonl_locked(sidecar_path, {
                 "record_type": "attempt_end",
                 "attempt_index": attempt["attempt_index"],
                 "attempt": attempt,
             })
-        return {
+        row = {
             "schema": paired_dispatch.API_CALL_SCHEMA,
             "request_id": request_id,
             "semantic_call_id": f"semantic-{request_id}",
@@ -11241,9 +12006,11 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "retry_count": 2,
             "failed_attempt_count": 3,
             "max_retries": 3,
-            "raw_request_saved_path": None,
+            "raw_request_saved_path": raw_path,
             "raw_sse_saved_path": sidecar_path,
         }
+        row.update(run_meta._transport_sidecar_facts(sidecar_path))
+        return row
 
     @staticmethod
     def _deepseek_infrastructure_outcome(
@@ -11386,89 +12153,14 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as out_dir:
             manifest, sample, worker_id, worker_pid = (
                 self._write_inspection_fixture(out_dir))
-            attempts = [
-                {
-                    "attempt_index": index,
-                    "status": "retryable_error",
-                    "error_type": "server_error",
-                    "http_status": 502,
-                    "response_started_http_status": None,
-                    "stream_complete": False,
-                    "message_start_seen": False,
-                    "message_delta_seen": False,
-                    "message_stop_seen": False,
-                    "final_usage_seen": False,
-                    "generation_delta_seen": False,
-                    "thinking_delta_seen": False,
-                    "text_delta_seen": False,
-                    "tool_delta_seen": False,
-                    "content_blocks_started": 0,
-                    "content_blocks_stopped": 0,
-                    "content_blocks_balanced": False,
-                    "terminal_sequence_valid": False,
-                    "retry_budget_consumed": True,
-                    "retry_budget_attempt_index": index,
-                }
-                for index in range(1, 4)
-            ]
             request_id = "call-provisional-failure"
-            sidecar_path = os.path.join(
-                out_dir, "api_raw",
-                f"{request_id}.transport.jsonl")
-            for attempt in attempts:
-                run_meta.append_jsonl_locked(sidecar_path, {
-                    "record_type": "attempt_start",
-                    "attempt_index": attempt["attempt_index"],
-                })
-                run_meta.append_jsonl_locked(sidecar_path, {
-                    "record_type": "attempt_end",
-                    "attempt_index": attempt["attempt_index"],
-                    "attempt": attempt,
-                })
+            api_row = self._deepseek_failed_api_row(
+                out_dir, sample, worker_id, worker_pid,
+                method="fullrewrite", direction="forward",
+                call_kind="fullrewrite_primary", request_id=request_id)
+            api_row["semantic_call_id"] = "semantic-provisional"
             run_meta.append_jsonl_locked(
-                os.path.join(out_dir, "api_calls.jsonl"), {
-                    "schema": paired_dispatch.API_CALL_SCHEMA,
-                    "request_id": request_id,
-                    "semantic_call_id": "semantic-provisional",
-                    "sample": sample,
-                    "method": "fullrewrite",
-                    "rt_index": 1,
-                    "direction": "forward",
-                    "call_kind": "fullrewrite_primary",
-                    "worker_launch_id": worker_id,
-                    "worker_pid": worker_pid,
-                    "model": paired_dispatch.DEEPSEEK_MODEL,
-                    "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
-                    "request_url": (
-                        f"{paired_dispatch.DEEPSEEK_BASE_URL}"
-                        "/chat/completions"),
-                    "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
-                    "transport_revision": (
-                        paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
-                    "transport_resume_policy": None,
-                    "reasoning_effort": (
-                        paired_dispatch.DEEPSEEK_REASONING_EFFORT),
-                    "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
-                    "provider_called": True,
-                    "response_replayed": False,
-                    "generation_index": 0,
-                    "classification": "provider/API failure",
-                    "response_classification": None,
-                    "error_type": "server_error",
-                    "http_status": 502,
-                    "raw_content_length": 0,
-                    "stream_complete": False,
-                    "count_as_method_failure": False,
-                    "input_tokens": None,
-                    "output_tokens": None,
-                    "transport_attempts": attempts,
-                    "http_attempts_used": 3,
-                    "retry_count": 2,
-                    "failed_attempt_count": 3,
-                    "max_retries": 3,
-                    "raw_request_saved_path": None,
-                    "raw_sse_saved_path": sidecar_path,
-                })
+                os.path.join(out_dir, "api_calls.jsonl"), api_row)
             with mock.patch.object(
                     paired_dispatch, "_git_identity",
                     return_value=("1" * 40, "clean")):
@@ -11725,13 +12417,57 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 retry_budget_consumed=True,
                 retry_budget_attempt_index=1,
                 error_message="Connection error.",
+                finish_reason=None,
+                stream_event_count=0,
+                stream_event_canonical_bytes=0,
+                stream_event_sha256=hashlib.sha256(b"").hexdigest(),
+                text_delta_count=0,
+                text_delta_utf8_bytes=0,
+                reasoning_delta_count=0,
+                reasoning_delta_utf8_bytes=0,
+                tool_delta_count=0,
+                tool_delta_utf8_bytes=0,
             )
             disconnect_sidecar = os.path.join(
                 out_dir, "api_raw",
                 "call-disconnect.failure.transport.jsonl")
             for event in ({
+                    "transport_event_schema": (
+                        "anchorpatch.transport_event/2"),
+                    "record_type": "transport_header",
+                    "transport_revision": (
+                        paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                    "call_id": disconnect["request_id"],
+                    "worker_launch_id": worker_id,
+                    "worker_pid": worker_pid,
+                    "sample": sample,
+                    "method": disconnect["method"],
+                    "rt_index": disconnect["rt_index"],
+                    "direction": disconnect["direction"],
+            }, {
                     "record_type": "attempt_start",
                     "attempt_index": 1,
+                    "attempt_kind": "openai_compatible_initial",
+            }, {
+                    "record_type": "stream_summary",
+                    "attempt_index": 1,
+                    **{
+                        key: value
+                        for key, value in disconnect_attempt.items()
+                        if key not in {
+                            "attempt_index", "status", "error_type",
+                            "http_status", "response_started_http_status",
+                            "stream_complete", "message_delta_seen",
+                            "thinking_delta_seen", "text_delta_seen",
+                            "tool_delta_seen", "content_blocks_started",
+                            "content_blocks_stopped",
+                            "content_blocks_balanced",
+                            "retry_budget_consumed",
+                            "retry_budget_attempt_index",
+                            "error_message",
+                        }
+                    },
+                    "usage": None,
             }, {
                     "record_type": "attempt_end",
                     "attempt_index": 1,
@@ -11751,17 +12487,19 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "http_attempts_used": 1,
                 "retry_count": 0,
                 "failed_attempt_count": 1,
-                "raw_request_saved_path": None,
                 "raw_sse_saved_path": disconnect_sidecar,
                 "runner_exception": (
                     "OpenAICompatibleTransportError: OpenAI-compatible "
                     "provider failed after 1 attempt(s)"
                 ),
             })
+            disconnect.update(
+                run_meta._transport_sidecar_facts(disconnect_sidecar))
 
             stopped = self._deepseek_api_row(
                 out_dir, sample, worker_id, worker_pid, "backward",
                 request_id="call-dispatcher-stopped")
+            stopped_success_attempt = stopped["transport_attempts"][0]
             stopped.update({
                 "classification": "runner_exception",
                 "response_classification": None,
@@ -11781,49 +12519,91 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                     "worker_fatal_error"
                 ),
             })
-            partial_attempt = {
-                "attempt_index": 1,
-                "status": "retryable_error",
-                "http_status": 200,
-                "error_type": "incomplete_stream",
-                "error_message": (
+            partial_attempt = dict(
+                stopped_success_attempt,
+                status="retryable_error",
+                http_status=200,
+                error_type="incomplete_stream",
+                error_message=(
                     "OpenAI-compatible stream ended without finish_reason "
                     "and final_usage"
                 ),
-                "response_started_http_status": 200,
-                "stream_complete": False,
-                "message_start_seen": True,
-                "message_stop_seen": False,
-                "final_usage_seen": False,
-                "generation_delta_seen": True,
-                "terminal_sequence_valid": False,
-                "retry_budget_consumed": True,
-                "retry_budget_attempt_index": 1,
-            }
+                response_started_http_status=200,
+                stream_complete=False,
+                message_start_seen=True,
+                message_stop_seen=False,
+                final_usage_seen=False,
+                generation_delta_seen=True,
+                terminal_sequence_valid=False,
+                retry_budget_consumed=True,
+                retry_budget_attempt_index=1,
+                finish_reason=None,
+                stream_event_count=1,
+                stream_event_canonical_bytes=10,
+                stream_event_sha256="b" * 64,
+                text_delta_count=1,
+                text_delta_utf8_bytes=1,
+                reasoning_delta_count=0,
+                reasoning_delta_utf8_bytes=0,
+                tool_delta_count=0,
+                tool_delta_utf8_bytes=0,
+            )
             partial_sidecar = os.path.join(
                 out_dir, "api_raw",
                 "call-dispatcher-stopped.partial.transport.jsonl")
             linkage = {
                 "transport_event_schema": (
-                    "anchorpatch.transport_event/1"),
+                    "anchorpatch.transport_event/2"),
+                "record_type": "transport_header",
+                "transport_revision": (
+                    paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
                 "call_id": stopped["request_id"],
                 "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
                 "sample": sample,
                 "method": stopped["method"],
                 "rt_index": stopped["rt_index"],
                 "direction": stopped["direction"],
-                "attempt_index": 1,
             }
             for event in ({
                     **linkage,
+            }, {
                     "record_type": "attempt_start",
+                    "attempt_index": 1,
+                    "attempt_kind": "openai_compatible_initial",
             }, {
-                    **linkage,
-                    "record_type": "sdk_stream_event",
-                    "event": {"choices": [{"delta": {"content": "x"}}]},
+                    "record_type": "stream_checkpoint",
+                    "attempt_index": 1,
+                    "checkpoint": "first_chunk",
+                    "stream_event_count": 1,
             }, {
-                    **linkage,
+                    "record_type": "stream_checkpoint",
+                    "attempt_index": 1,
+                    "checkpoint": "generation_started",
+                    "stream_event_count": 1,
+                    "text_delta_seen": True,
+                    "thinking_delta_seen": False,
+                    "tool_delta_seen": False,
+            }, {
+                    "record_type": "stream_summary",
+                    "attempt_index": 1,
+                    **{
+                        key: value for key, value in partial_attempt.items()
+                        if key not in {
+                            "attempt_index", "status", "error_type",
+                            "http_status", "response_started_http_status",
+                            "stream_complete", "message_delta_seen",
+                            "thinking_delta_seen", "text_delta_seen",
+                            "tool_delta_seen", "content_blocks_started",
+                            "content_blocks_stopped", "content_blocks_balanced",
+                            "retry_budget_consumed",
+                            "retry_budget_attempt_index", "error_message",
+                        }
+                    },
+                    "usage": None,
+            }, {
                     "record_type": "attempt_end",
+                    "attempt_index": 1,
                     "attempt": partial_attempt,
             }):
                 run_meta.append_jsonl_locked(partial_sidecar, event)
@@ -11918,6 +12698,188 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "DeepSeek transport sidecar invalid at row 2",
                 rejected["errors"],
             )
+
+    def test_current_dispatcher_stopped_sidecar_rejects_event1_downgrade(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            _manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            row = self._deepseek_api_row(
+                out_dir, sample, worker_id, worker_pid, "forward",
+                request_id="call-schema-downgrade")
+            path = os.path.join(
+                out_dir, "api_raw", "schema-downgrade.transport.jsonl")
+            linkage = {
+                "transport_event_schema": "anchorpatch.transport_event/1",
+                "call_id": row["request_id"],
+                "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
+                "sample": sample,
+                "method": row["method"],
+                "rt_index": row["rt_index"],
+                "direction": row["direction"],
+                "attempt_index": 1,
+            }
+            for event in ({
+                    **linkage,
+                    "record_type": "attempt_start",
+            }, {
+                    **linkage,
+                    "record_type": "sdk_stream_event",
+                    "event": {"choices": [{"delta": {"content": "x"}}]},
+            }, {
+                    **linkage,
+                    "record_type": "attempt_end",
+                    "attempt": row["transport_attempts"][0],
+            }):
+                run_meta.append_jsonl_locked(path, event)
+            row["raw_sse_saved_path"] = path
+            with self.assertRaisesRegex(RuntimeError, "was downgraded"):
+                run_meta._deepseek_dispatcher_stopped_sidecar_evidence(
+                    out_dir, row)
+
+    def test_compact_recovery_parser_distinguishes_closed_and_open_prefixes(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            _manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            row = self._deepseek_api_row(
+                out_dir, sample, worker_id, worker_pid, "forward",
+                request_id="call-compact-parser")
+            records = run_meta._read_deepseek_transport_sidecar(
+                row["raw_sse_saved_path"])["rows"]
+            linkage = {
+                "call_id": row["request_id"],
+                "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
+                "sample": sample,
+                "method": row["method"],
+                "rt_index": row["rt_index"],
+                "direction": row["direction"],
+            }
+            closed = run_meta._validate_deepseek_compact_records(
+                records, expected_linkage=linkage)
+            self.assertEqual(
+                closed["recovery_state"], "complete_unpublished_response")
+
+            header_only = run_meta._validate_deepseek_compact_records(
+                records[:1], expected_linkage=linkage,
+                allow_open_final=True)
+            self.assertEqual(
+                header_only["recovery_state"], "pre_attempt_no_post")
+            with self.assertRaisesRegex(RuntimeError, "not closed"):
+                run_meta._validate_deepseek_compact_records(
+                    records[:1], expected_linkage=linkage)
+
+            complete_summary = run_meta._validate_deepseek_compact_records(
+                records[:-1], expected_linkage=linkage,
+                allow_open_final=True)
+            self.assertEqual(
+                complete_summary["recovery_state"],
+                "complete_unpublished_response")
+
+            empty_terminal_summary = copy.deepcopy(records[-2])
+            empty_terminal_summary.update({
+                "stream_event_count": 0,
+                "stream_event_canonical_bytes": 0,
+                "stream_event_sha256": hashlib.sha256(b"").hexdigest(),
+                "text_delta_count": 0,
+                "text_delta_utf8_bytes": 0,
+                "reasoning_delta_count": 0,
+                "reasoning_delta_utf8_bytes": 0,
+                "tool_delta_count": 0,
+                "tool_delta_utf8_bytes": 0,
+                "message_start_seen": False,
+                "generation_delta_seen": False,
+            })
+            empty_terminal_records = [
+                records[0],
+                records[1],
+                {
+                    **records[4],
+                    "stream_event_count": 0,
+                },
+                {
+                    **records[5],
+                    "stream_event_count": 0,
+                },
+                empty_terminal_summary,
+            ]
+            with self.assertRaisesRegex(
+                    RuntimeError, "complete summary is invalid"):
+                run_meta._validate_deepseek_compact_records(
+                    empty_terminal_records,
+                    expected_linkage=linkage,
+                    allow_open_final=True,
+                )
+
+            invalid_usage = [
+                records[0], records[1], {
+                    "record_type": "stream_checkpoint",
+                    "attempt_index": 1,
+                    "checkpoint": "usage_seen",
+                    "stream_event_count": 1,
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 99,
+                    },
+                },
+            ]
+            with self.assertRaisesRegex(RuntimeError, "usage checkpoint"):
+                run_meta._validate_deepseek_compact_records(
+                    invalid_usage, expected_linkage=linkage,
+                    allow_open_final=True)
+
+            failed_out_of_order = copy.deepcopy(records)
+            checkpoint_indexes = [
+                index for index, item in enumerate(failed_out_of_order)
+                if item.get("record_type") == "stream_checkpoint"
+            ]
+            generation_index = next(
+                index for index in checkpoint_indexes
+                if failed_out_of_order[index].get("checkpoint")
+                == "generation_started"
+            )
+            finish_index = next(
+                index for index in checkpoint_indexes
+                if failed_out_of_order[index].get("checkpoint")
+                == "finish_seen"
+            )
+            failed_out_of_order[generation_index], failed_out_of_order[
+                finish_index] = (
+                    failed_out_of_order[finish_index],
+                    failed_out_of_order[generation_index],
+                )
+            for index in checkpoint_indexes:
+                failed_out_of_order[index]["stream_event_count"] = 1
+            failed_summary = next(
+                item for item in failed_out_of_order
+                if item.get("record_type") == "stream_summary"
+            )
+            failed_summary["terminal_sequence_valid"] = False
+            failed_attempt = next(
+                item["attempt"] for item in failed_out_of_order
+                if item.get("record_type") == "attempt_end"
+            )
+            failed_attempt.update({
+                "status": "retryable_error",
+                "http_status": 502,
+                "error_type": "http_502",
+                "stream_complete": False,
+                "terminal_sequence_valid": False,
+                "retry_budget_consumed": True,
+                "retry_budget_attempt_index": 1,
+            })
+            with self.assertRaisesRegex(RuntimeError, "checkpoint order"):
+                run_meta._validate_deepseek_compact_records(
+                    failed_out_of_order,
+                    expected_linkage=linkage,
+                )
+
+            with self.assertRaisesRegex(RuntimeError, "attempt_start"):
+                run_meta._validate_deepseek_compact_records(
+                    [records[0], records[-1]],
+                    expected_linkage=linkage,
+                    allow_open_final=True)
 
     def test_recovery_file_prefix_allows_append_but_rejects_mutation(self):
         with tempfile.TemporaryDirectory() as out_dir:
@@ -12808,6 +13770,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "error_type": "server_error",
                 "http_status": 503,
                 "stream_complete": False,
+                "terminal_sequence_valid": False,
                 "generation_delta_seen": False,
                 "retry_budget_consumed": False,
                 "retry_budget_attempt_index": 0,
@@ -12824,6 +13787,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "message_stop_seen": True,
             "final_usage_seen": True,
             "terminal_sequence_valid": True,
+            "finish_reason": "stop",
         })
         self.assertTrue(paired_dispatch._valid_deepseek_retry_evidence({
             "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
@@ -12844,6 +13808,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "error_type": "rate_limit",
                 "http_status": 429,
                 "stream_complete": False,
+                "terminal_sequence_valid": False,
                 "generation_delta_seen": False,
                 "retry_budget_consumed": True,
                 "retry_budget_attempt_index": index,
@@ -12860,6 +13825,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "message_stop_seen": True,
             "final_usage_seen": True,
             "terminal_sequence_valid": True,
+            "finish_reason": "stop",
         })
         self.assertFalse(paired_dispatch._valid_deepseek_retry_evidence({
             "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
@@ -12883,6 +13849,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             "message_stop_seen": True,
             "final_usage_seen": True,
             "terminal_sequence_valid": True,
+            "finish_reason": "stop",
         }
         row = {
             "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
@@ -12894,6 +13861,7 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "error_type": "server_error",
                 "http_status": 503,
                 "stream_complete": False,
+                "terminal_sequence_valid": False,
                 "retry_budget_consumed": False,
                 "retry_budget_attempt_index": 0,
             }, success],
@@ -12982,6 +13950,71 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                     .DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
                 ),
             )
+
+    def test_linear_stream_revision_requires_exact_sidecar_linkage(self):
+        attempt = {
+            "attempt_index": 1,
+            "status": "success",
+            "http_status": 200,
+            "stream_complete": True,
+            "message_start_seen": True,
+            "message_stop_seen": True,
+            "final_usage_seen": True,
+            "terminal_sequence_valid": True,
+            "finish_reason": "stop",
+        }
+        row = {
+            "request_id": "call-linear",
+            "worker_launch_id": "worker-linear",
+            "worker_pid": 101,
+            "sample": "sample",
+            "method": "fullrewrite",
+            "rt_index": 1,
+            "direction": "forward",
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch.DEEPSEEK_LINEAR_STREAM_TRANSPORT_REVISION),
+            "transport_attempts": [attempt],
+        }
+        linkage = {
+            "transport_event_schema": "anchorpatch.transport_event/1",
+            "worker_launch_id": row["worker_launch_id"],
+            "worker_pid": row["worker_pid"],
+            "sample": row["sample"],
+            "method": row["method"],
+            "rt_index": row["rt_index"],
+            "direction": row["direction"],
+            "call_id": row["request_id"],
+            "attempt_index": 1,
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            sidecar = os.path.join(out_dir, "linear.transport.jsonl")
+            for event in (
+                    {**linkage, "record_type": "attempt_start"},
+                    {
+                        **linkage,
+                        "record_type": "sdk_stream_event",
+                        "event": {"choices": [{"finish_reason": "stop"}]},
+                    },
+                    {
+                        **linkage,
+                        "record_type": "attempt_end",
+                        "attempt": attempt,
+                    }):
+                run_meta.append_jsonl_locked(sidecar, event)
+            row["raw_sse_saved_path"] = sidecar
+            self.assertTrue(
+                paired_dispatch._valid_deepseek_transport_sidecar(
+                    out_dir, row))
+
+            forged = [
+                {**event, "call_id": "other-call"}
+                for event in run_meta._read_jsonl_records_with_retry(sidecar)
+            ]
+            run_meta._write_jsonl_atomic(sidecar, forged)
+            self.assertFalse(
+                paired_dispatch._valid_deepseek_transport_sidecar(
+                    out_dir, row))
 
     def test_partial_stream_exhaustion_routes_to_deepseek_sample_isolation(self):
         attempts = [
@@ -13891,6 +14924,245 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 out_dir,
                 ledger_recovery._DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
             )))
+
+    def test_parent_loss_preserves_prior_server_retry_incident_validation(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir, ["running"], record_stop=False)
+            manifest = fixture["manifest"]
+            worker = fixture["workers"][0]
+            prior_commit = fixture["commit"]
+            prior_fingerprint = fixture["fingerprint"]
+            recovery_commit = "5" * 40
+            recovery_fingerprint = dict(prior_fingerprint)
+            recovery_fingerprint["run_meta.py"] = "5" * 64
+            changed_paths = [
+                "HP_V8/src/authorize_ledger_lock_recovery.py",
+                "HP_V8/src/paired_campaign_dispatch.py",
+                "HP_V8/src/run_meta.py",
+            ]
+
+            metadata = run_meta.read_run_metadata_snapshot(out_dir)
+            metadata[0].update({
+                "status": "failed",
+                "finished_at": "2026-07-28T20:00:00+08:00",
+            })
+            run_meta._write_jsonl_atomic(
+                os.path.join(out_dir, "run_metadata.jsonl"), metadata)
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "dispatch_log.jsonl"), {
+                    "event": "worker_exit",
+                    "sample": worker["sample"],
+                    "worker_launch_id": worker["worker_launch_id"],
+                    "pid": worker["worker_pid"],
+                    "returncode": 1,
+                    "disposition": "campaign_fatal",
+                })
+            paired_dispatch._write_active_worker_set(out_dir, manifest, [])
+
+            server_row = self._deepseek_api_row(
+                out_dir,
+                worker["sample"],
+                worker["worker_launch_id"],
+                worker["worker_pid"],
+                "forward",
+                request_id="call-prior-server-retry",
+            )
+            server_attempts = [
+                {
+                    "attempt_index": index,
+                    "status": "retryable_error",
+                    "error_type": "server_error",
+                    "http_status": 502,
+                    "stream_complete": False,
+                    "generation_delta_seen": True,
+                    "terminal_sequence_valid": False,
+                    "retry_budget_consumed": True,
+                    "retry_budget_attempt_index": index,
+                }
+                for index in range(1, 4)
+            ]
+            server_row.update({
+                "classification": "provider/API failure",
+                "error_type": "server_error",
+                "http_status": 502,
+                "stream_complete": False,
+                "response_classification": None,
+                "count_as_method_failure": False,
+                "transport_attempts": server_attempts,
+                "http_attempts_used": len(server_attempts),
+                "retry_count": len(server_attempts) - 1,
+                "failed_attempt_count": len(server_attempts),
+            })
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), server_row)
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "campaign_stop.json"), {
+                    "schema": run_meta.STOP_CONDITION_SCHEMA,
+                    "condition": "dispatcher_integrity_failure",
+                    "error": (
+                        "worker failed without a supported sample-local "
+                        "outcome"),
+                })
+
+            git_result = mock.Mock(
+                stdout="\n".join(changed_paths) + "\n")
+            common_patches = (
+                mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(recovery_commit, "clean")),
+                mock.patch.object(
+                    ledger_recovery, "code_fingerprint",
+                    return_value=recovery_fingerprint),
+                mock.patch.object(
+                    ledger_recovery, "_git_changed_paths",
+                    return_value=changed_paths),
+                mock.patch.object(
+                    ledger_recovery, "_assert_worker_leases_free"),
+                mock.patch.object(
+                    run_meta, "_git_identity",
+                    return_value=(recovery_commit, "clean")),
+                mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value=recovery_fingerprint),
+                mock.patch.object(
+                    run_meta.subprocess, "run",
+                    return_value=git_result),
+            )
+            with contextlib.ExitStack() as stack:
+                for patcher in common_patches:
+                    stack.enter_context(patcher)
+                ledger_recovery.authorize(
+                    out_dir, deepseek_server_retry=True)
+                prior = run_meta.read_campaign_recovery_authorization(out_dir)
+
+            self.assertEqual(
+                prior["incident_api_rows"][0]["incident_kind"],
+                "deepseek_server_retry_exhaustion",
+            )
+            self.assertNotIn(
+                "transport_sidecar_path", prior["incident_api_rows"][0])
+            self.assertEqual(
+                prior["incident_api_rows"][0]["canonical_sha256"],
+                run_meta._canonical_record_sha256(server_row),
+            )
+
+            worker_id = "worker-after-server-retry"
+            worker_pid = os.getpid()
+            invocation_id = "invocation-after-server-retry"
+            dispatcher_pid = 54321
+            dispatcher_instance_id = "dispatcher-instance-after-retry"
+            paired_dispatch._write_active_worker_set(
+                out_dir, manifest, [{
+                    "sample": worker["sample"],
+                    "worker_launch_id": worker_id,
+                    "dispatcher_pid": dispatcher_pid,
+                    "dispatcher_instance_id": dispatcher_instance_id,
+                }])
+            dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+            intent = {
+                "event": "launch_intent",
+                "sample": worker["sample"],
+                "key_label": "KEY_1",
+                "methods": fixture["methods"],
+                "worker_launch_id": worker_id,
+                "console_log": "dispatch_logs/after-retry.console.log",
+                "method_phase": None,
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+            }
+            run_meta.append_jsonl_locked(dispatch_path, intent)
+            run_meta.append_jsonl_locked(dispatch_path, {
+                **intent,
+                "event": "launch",
+                "pid": worker_pid,
+            })
+            run_meta.append_jsonl_locked(dispatch_path, {
+                "event": "worker_authorized",
+                "worker_launch_id": worker_id,
+                "sample": worker["sample"],
+                "worker_pid": worker_pid,
+                "invocation_id": invocation_id,
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+            })
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "run_metadata.jsonl"), {
+                    "schema": run_meta.METADATA_SCHEMA,
+                    "invocation_id": invocation_id,
+                    "worker_launch_id": worker_id,
+                    "worker_pid": worker_pid,
+                    "dispatcher_pid": dispatcher_pid,
+                    "dispatcher_instance_id": dispatcher_instance_id,
+                    "samples": [worker["sample"]],
+                    "methods": fixture["methods"],
+                    "method_phase": None,
+                    "model": paired_dispatch.DEEPSEEK_MODEL,
+                    "provider": "opencode_zen",
+                    "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                    "transport_revision": (
+                        paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                    "transport_resume_policy": None,
+                    "base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+                    "reasoning_effort": (
+                        paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                    "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+                    "campaign_config": {
+                        "reasoning_effort": (
+                            paired_dispatch.DEEPSEEK_REASONING_EFFORT),
+                    },
+                    "run_git_commit": recovery_commit,
+                    "git_tree_state": "clean",
+                    "code_fingerprint": recovery_fingerprint,
+                    "status": "running",
+                    "finished_at": None,
+                })
+            current_row = self._deepseek_api_row(
+                out_dir,
+                worker["sample"],
+                worker_id,
+                worker_pid,
+                "forward",
+                request_id="call-current-parent-loss",
+            )
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), current_row)
+            with mock.patch.dict(
+                    os.environ,
+                    {"ANCHORPATCH_WORKER_LAUNCH_ID": worker_id},
+                    clear=False):
+                run_meta.record_campaign_stop_condition(
+                    out_dir,
+                    "dispatcher_process_lost",
+                    dispatcher_pid=dispatcher_pid,
+                    dispatcher_instance_id=dispatcher_instance_id,
+                )
+
+            with contextlib.ExitStack() as stack:
+                for patcher in common_patches:
+                    stack.enter_context(patcher)
+                ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+                combined = run_meta.read_campaign_recovery_authorization(
+                    out_dir)
+
+            incidents = {
+                item["incident_kind"]: item
+                for item in combined["incident_api_rows"]
+            }
+            self.assertEqual(set(incidents), {
+                "deepseek_server_retry_exhaustion",
+                "dispatcher_parent_loss_uncommitted_api",
+            })
+            self.assertNotIn(
+                "transport_sidecar_path",
+                incidents["deepseek_server_retry_exhaustion"],
+            )
+            self.assertEqual(
+                incidents["dispatcher_parent_loss_uncommitted_api"]
+                ["transport_sidecar_sha256"],
+                current_row["transport_sidecar_sha256"],
+            )
 
     def test_dispatcher_parent_loss_code_transition_rejects_scope_drift(
             self):

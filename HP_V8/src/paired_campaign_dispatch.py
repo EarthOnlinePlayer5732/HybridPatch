@@ -41,6 +41,8 @@ from run_meta import (
     _canonical_record_sha256,
     _deepseek_dispatcher_stopped_sidecar_evidence,
     _git_identity,
+    _validate_deepseek_compact_records,
+    _validate_deepseek_linear_records,
     _validated_transport_ledger_state,
     append_jsonl_locked,
     campaign_recovery_incident_evidence,
@@ -64,7 +66,8 @@ from utils_relay_plan import (
 SCHEMA = "anchorpatch.paired_campaign_manifest/1"
 TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
 DEEPSEEK_TRANSPORT = "openai_sdk_stream"
-DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/5"
+DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/6"
+DEEPSEEK_LINEAR_STREAM_TRANSPORT_REVISION = "opencode_openai_compatible/5"
 DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION = (
     "opencode_openai_compatible/4"
 )
@@ -1994,6 +1997,7 @@ def _valid_deepseek_failed_retry_evidence(row):
         row.get("transport"), row.get("transport_revision"))
     is_stream = runtime_identity in {
         (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+        (DEEPSEEK_TRANSPORT, DEEPSEEK_LINEAR_STREAM_TRANSPORT_REVISION),
         (
             DEEPSEEK_TRANSPORT,
             DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
@@ -2087,6 +2091,10 @@ def _deepseek_campaign_runtime_identity(out_dir):
     if ((config or {}).get("model") != DEEPSEEK_MODEL
             or identity not in {
                 (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+                (
+                    DEEPSEEK_TRANSPORT,
+                    DEEPSEEK_LINEAR_STREAM_TRANSPORT_REVISION,
+                ),
                 (
                     DEEPSEEK_TRANSPORT,
                     DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
@@ -4052,8 +4060,11 @@ def _valid_deepseek_retry_evidence(row):
     attempts = row.get("transport_attempts")
     runtime_identity = (
         row.get("transport"), row.get("transport_revision"))
+    is_current_compact = runtime_identity == (
+        DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION)
     is_stream = runtime_identity in {
         (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+        (DEEPSEEK_TRANSPORT, DEEPSEEK_LINEAR_STREAM_TRANSPORT_REVISION),
         (
             DEEPSEEK_TRANSPORT,
             DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
@@ -4075,6 +4086,10 @@ def _valid_deepseek_retry_evidence(row):
                 or terminal.get("message_stop_seen") is not True
                 or terminal.get("final_usage_seen") is not True
                 or terminal.get("terminal_sequence_valid") is not True
+                or (is_current_compact and (
+                    not isinstance(terminal.get("finish_reason"), str)
+                    or not terminal.get("finish_reason").strip()
+                ))
             )):
         return False
 
@@ -4085,6 +4100,12 @@ def _valid_deepseek_retry_evidence(row):
         if expected_index == len(attempts):
             continue
         if attempt.get("status") != "retryable_error":
+            return False
+        if (is_current_compact and (
+                attempt.get("stream_complete") is not False
+                or attempt.get("terminal_sequence_valid") is not False
+                or not isinstance(attempt.get("error_type"), str)
+                or not attempt.get("error_type"))):
             return False
         if (is_stream
                 and not isinstance(
@@ -4113,6 +4134,135 @@ def _valid_deepseek_retry_evidence(row):
     )
 
 
+def _exact_nonnegative_int(value):
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and value >= 0
+    )
+
+
+def _worker_terminal_provenance(launch, exit_row, worker_metadata):
+    """Return the shared launch/exit/metadata terminal-state proof."""
+    terminal = next((
+        record for record in reversed(worker_metadata or [])
+        if record.get("status") in {
+            "finished", "infrastructure_incomplete", "evaluator_incomplete",
+        }
+    ), (worker_metadata or [{}])[-1])
+    created_at = (
+        exit_row.get("created_at") if isinstance(exit_row, dict) else None
+    )
+    timestamp_ok = False
+    if isinstance(created_at, str):
+        try:
+            timestamp_ok = datetime.fromisoformat(created_at).tzinfo is not None
+        except ValueError:
+            timestamp_ok = False
+    basic_exit_ok = (
+        isinstance(exit_row, dict)
+        and exit_row.get("sample") == launch.get("sample")
+        and exit_row.get("pid") == launch.get("pid")
+        and isinstance(exit_row.get("returncode"), int)
+        and not isinstance(exit_row.get("returncode"), bool)
+        and isinstance(terminal, dict)
+        and terminal.get("worker_pid") == launch.get("pid")
+        and terminal.get("samples") == [launch.get("sample")]
+        and timestamp_ok
+    )
+    if basic_exit_ok and terminal.get("status") == "finished":
+        ordinary_ok = (
+            exit_row.get("returncode") == 0
+            and exit_row.get("disposition") == "finished"
+        )
+    elif (basic_exit_ok
+          and terminal.get("status") in {
+              "infrastructure_incomplete", "evaluator_incomplete"}):
+        ordinary_ok = (
+            exit_row.get("returncode") != 0
+            and exit_row.get("disposition") == terminal.get("status")
+            and isinstance(exit_row.get("evidence"), dict)
+        )
+    else:
+        ordinary_ok = False
+    return {
+        "terminal": terminal,
+        "timestamp_ok": timestamp_ok,
+        "basic_exit_ok": basic_exit_ok,
+        "ordinary_ok": ordinary_ok,
+    }
+
+
+def _valid_deepseek_compact_transport_sidecar(row, path):
+    digest = hashlib.sha256()
+    records = []
+    size_bytes = 0
+    try:
+        with open(path, "rb") as handle:
+            for raw_line in handle:
+                digest.update(raw_line)
+                size_bytes += len(raw_line)
+                if not raw_line.strip():
+                    continue
+                record = json.loads(raw_line.decode("utf-8"))
+                if not isinstance(record, dict):
+                    return False
+                records.append(record)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    if (not records
+            or row.get("transport_sidecar_sha256") != digest.hexdigest()
+            or row.get("transport_sidecar_size_bytes") != size_bytes
+            or row.get("transport_sidecar_record_count") != len(records)):
+        return False
+    header = records[0]
+    expected_header = {
+        "transport_event_schema": "anchorpatch.transport_event/2",
+        "record_type": "transport_header",
+        "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+        "worker_launch_id": row.get("worker_launch_id"),
+        "worker_pid": row.get("worker_pid"),
+        "sample": row.get("sample"),
+        "method": row.get("method"),
+        "rt_index": row.get("rt_index"),
+        "direction": row.get("direction"),
+        "call_id": row.get("request_id"),
+    }
+    if header != expected_header:
+        return False
+    attempts = row.get("transport_attempts")
+    if not isinstance(attempts, list) or not attempts:
+        return False
+    try:
+        shared = _validate_deepseek_compact_records(
+            records,
+            expected_linkage={
+                key: expected_header[key]
+                for key in (
+                    "worker_launch_id", "worker_pid", "sample", "method",
+                    "rt_index", "direction", "call_id",
+                )
+            },
+        )
+    except RuntimeError:
+        return False
+    if ([item["attempt"] for item in shared["closed_attempts"]]
+            != attempts):
+        return False
+    for item in shared["closed_attempts"]:
+        if item["attempt"].get("status") != "success":
+            continue
+        usage = item["summary"].get("usage")
+        if any((
+                row.get("prompt_tokens") != usage["prompt_tokens"],
+                row.get("completion_tokens") != usage["completion_tokens"],
+                row.get("total_tokens") != usage["total_tokens"],
+        )):
+            return False
+    return True
+
+
+
 def _valid_deepseek_transport_sidecar(out_dir, row):
     """Require current stream attempts to match the durable linear sidecar."""
     runtime_identity = (
@@ -4123,6 +4273,7 @@ def _valid_deepseek_transport_sidecar(out_dir, row):
         return True
     if runtime_identity not in {
         (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+        (DEEPSEEK_TRANSPORT, DEEPSEEK_LINEAR_STREAM_TRANSPORT_REVISION),
         (
             DEEPSEEK_TRANSPORT,
             DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
@@ -4137,49 +4288,43 @@ def _valid_deepseek_transport_sidecar(out_dir, row):
                 os.path.abspath(out_dir), os.path.abspath(path)
         )) != os.path.abspath(out_dir):
             return False
+        if runtime_identity == (
+                DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION):
+            return _valid_deepseek_compact_transport_sidecar(row, path)
         events = _read_jsonl(path)
     except (OSError, ValueError, RuntimeError):
         return False
     attempts = row.get("transport_attempts")
-    starts = [
-        event for event in events
-        if event.get("record_type") == "attempt_start"
-    ]
-    ends = [
-        event.get("attempt") for event in events
-        if event.get("record_type") == "attempt_end"
-        and isinstance(event.get("attempt"), dict)
-    ]
-    if (not isinstance(attempts, list) or not attempts
-            or len(starts) != len(attempts)
-            or len(ends) != len(attempts)):
+    if not isinstance(attempts, list) or not attempts:
         return False
-    for expected_index, (attempt, start, end) in enumerate(
-            zip(attempts, starts, ends), 1):
-        if (start.get("attempt_index") != expected_index
-                or end.get("attempt_index") != expected_index):
-            return False
-        if end != attempt:
-            return False
-        stream_events = [
-            event for event in events
-            if (
-                event.get("record_type") == "sdk_stream_event"
-                and event.get("attempt_index") == expected_index
-            )
-        ]
-        if (
-                attempt.get("status") == "success"
-                or attempt.get("message_start_seen") is True
-        ) and not stream_events:
-            return False
+    expected_linkage = {
+        "worker_launch_id": row.get("worker_launch_id"),
+        "worker_pid": row.get("worker_pid"),
+        "sample": row.get("sample"),
+        "method": row.get("method"),
+        "rt_index": row.get("rt_index"),
+        "direction": row.get("direction"),
+        "call_id": row.get("request_id"),
+    }
+    try:
+        _validate_deepseek_linear_records(
+            events,
+            expected_linkage=expected_linkage,
+            expected_attempts=attempts,
+        )
+    except RuntimeError:
+        return False
     return True
+
 
 
 def _inspect_deepseek_campaign(
         out_dir, manifest, *, require_complete=False,
-        active_samples=None, required_complete_samples=None):
-    """Audit a DeepSeek prefix, including frozen /3-/4 and current /5."""
+        require_terminal_provenance=None, active_samples=None,
+        required_complete_samples=None):
+    """Audit a DeepSeek prefix, including frozen /3-/4-/5 and current /6."""
+    if require_terminal_provenance is None:
+        require_terminal_provenance = require_complete
     config = manifest.get("config") or {}
     expected_samples = set(config.get("samples") or [])
     expected_methods = set(config.get("method_set") or [])
@@ -4201,6 +4346,10 @@ def _inspect_deepseek_campaign(
         (
             DEEPSEEK_TRANSPORT,
             DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
+        ),
+        (
+            DEEPSEEK_TRANSPORT,
+            DEEPSEEK_LINEAR_STREAM_TRANSPORT_REVISION,
         ),
         (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
     }
@@ -4670,13 +4819,16 @@ def _inspect_deepseek_campaign(
                 for sample in completion_samples):
             errors.append(
                 "not all required latest run_metadata invocations are finished")
-    if require_complete:
+    if require_terminal_provenance:
         if any(record.get("finished_at") is None for record in metadata):
             errors.append("campaign finished_at is incomplete")
         for worker_id, launch in launches.items():
             exit_row = exits.get(worker_id)
             worker_metadata = metadata_by_worker.get(worker_id) or []
-            terminal = worker_metadata[-1] if worker_metadata else {}
+            terminal_provenance = _worker_terminal_provenance(
+                launch, exit_row, worker_metadata)
+            terminal = terminal_provenance["terminal"]
+            ordinary_terminal = terminal_provenance["ordinary_ok"]
             recovered_terminal = (
                 worker_id in recovered_worker_ids
                 and isinstance(exit_row, dict)
@@ -4698,14 +4850,9 @@ def _inspect_deepseek_campaign(
                 and worker_id not in authorizations
                 and worker_id not in api_rows_by_worker
             )
-            if (not recovered_terminal
-                    and not recovered_preauthorization and (
-                    not isinstance(exit_row, dict)
-                    or exit_row.get("sample") != launch.get("sample")
-                    or exit_row.get("pid") != launch.get("pid")
-                    or exit_row.get("returncode") != 0
-                    or exit_row.get("disposition") != "finished"
-                    or terminal.get("status") != "finished")):
+            if (not ordinary_terminal
+                    and not recovered_terminal
+                    and not recovered_preauthorization):
                 errors.append(
                     f"worker exit provenance incomplete: {worker_id}")
 
@@ -4729,8 +4876,10 @@ def _inspect_deepseek_campaign(
 
 
 def inspect_campaign(out_dir, manifest, *, require_complete=False,
-                     active_samples=None, required_complete_samples=None,
-                     method_phase=None):
+                     require_terminal_provenance=None, active_samples=None,
+                     required_complete_samples=None, method_phase=None):
+    if require_terminal_provenance is None:
+        require_terminal_provenance = require_complete
     config = manifest["config"]
     if config.get("campaign_role") in DEEPSEEK_CAMPAIGN_ROLES:
         if method_phase is not None:
@@ -4738,6 +4887,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                 "DeepSeek campaigns do not support phased inspection")
         return _inspect_deepseek_campaign(
             out_dir, manifest, require_complete=require_complete,
+            require_terminal_provenance=require_terminal_provenance,
             active_samples=active_samples,
             required_complete_samples=required_complete_samples,
         )
@@ -4748,6 +4898,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         phase_results = [
             inspect_campaign(
                 out_dir, manifest, require_complete=require_complete,
+                require_terminal_provenance=require_terminal_provenance,
                 active_samples=active_samples,
                 required_complete_samples=required_complete_samples,
                 method_phase=phase,
@@ -5746,59 +5897,19 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             errors.append(
                 "not all required latest run_metadata invocations are finished"
             )
-        if require_complete and any(
-                record.get("finished_at") is None for record in metadata):
-            errors.append("campaign finished_at is incomplete")
-    if formal_manifest and require_complete:
+    if require_terminal_provenance and any(
+            record.get("finished_at") is None for record in metadata):
+        errors.append("campaign finished_at is incomplete")
+    if formal_manifest and require_terminal_provenance:
         for worker_id, launch in launches_by_worker.items():
             exit_row = exits_by_worker.get(worker_id)
             reconciliation = reconciliations_by_worker.get(worker_id)
-            created_at = (
-                exit_row.get("created_at")
-                if isinstance(exit_row, dict) else None
-            )
-            timestamp_ok = False
-            if isinstance(created_at, str):
-                try:
-                    timestamp_ok = (
-                        datetime.fromisoformat(created_at).tzinfo is not None
-                    )
-                except ValueError:
-                    timestamp_ok = False
-            terminal_metadata = None
-            for record in reversed(metadata_by_worker.get(worker_id, [])):
-                if record.get("status") in {
-                        "finished", "infrastructure_incomplete",
-                        "evaluator_incomplete"}:
-                    terminal_metadata = record
-                    break
-            basic_exit_ok = (
-                isinstance(exit_row, dict)
-                and exit_row.get("sample") == launch.get("sample")
-                and exit_row.get("pid") == launch.get("pid")
-                and isinstance(exit_row.get("returncode"), int)
-                and not isinstance(exit_row.get("returncode"), bool)
-                and isinstance(terminal_metadata, dict)
-                and terminal_metadata.get("worker_pid") == launch.get("pid")
-                and terminal_metadata.get("samples") == [launch.get("sample")]
-                and timestamp_ok
-            )
-            if basic_exit_ok and terminal_metadata.get("status") == "finished":
-                exit_ok = (
-                    exit_row.get("returncode") == 0
-                    and exit_row.get("disposition") == "finished"
-                )
-            elif (basic_exit_ok
-                  and terminal_metadata.get("status") in {
-                      "infrastructure_incomplete", "evaluator_incomplete"}):
-                exit_ok = (
-                    exit_row.get("returncode") != 0
-                    and exit_row.get("disposition")
-                    == terminal_metadata.get("status")
-                    and isinstance(exit_row.get("evidence"), dict)
-                )
-            else:
-                exit_ok = False
+            terminal_provenance = _worker_terminal_provenance(
+                launch, exit_row, metadata_by_worker.get(worker_id, []))
+            terminal_metadata = terminal_provenance["terminal"]
+            basic_exit_ok = terminal_provenance["basic_exit_ok"]
+            timestamp_ok = terminal_provenance["timestamp_ok"]
+            exit_ok = terminal_provenance["ordinary_ok"]
             reconciliation_time_ok = False
             if isinstance(reconciliation, dict):
                 try:
@@ -6535,6 +6646,20 @@ def _run_worker_queue(
     last_inspection = {
         "errors": [], "api_calls": 0, "preservation_violations": 0}
     while running or any(pending_by_key.values()):
+        # Recheck the durable stop latch at the refill boundary.  The check
+        # after each process poll protects already-running workers, while this
+        # one closes the narrow window between a clean post-exit inspection
+        # and launching replacement workers on the next loop iteration.
+        stop_records = read_campaign_stop_conditions(out_dir)
+        if stop_records:
+            conditions = sorted({
+                str(record.get("condition") or "unknown")
+                for record in stop_records
+            })
+            raise RuntimeError(
+                "campaign stop latch set before worker queue refill: "
+                + ", ".join(conditions)
+            )
         batch = _take_available_assignments(
             pending_by_key, running, slots_per_key)
         if batch:
@@ -6592,19 +6717,29 @@ def _run_worker_queue(
         if exited:
             _write_active_worker_set(
                 out_dir, inspection_manifest, running.values())
-        # One inspection covers every worker observed exiting in this poll.
-        # Re-reading the full append-only campaign ledgers once per sample
-        # serialized otherwise independent key queues and left healthy slots
-        # idle for minutes as campaigns grew.
-        last_inspection = inspect_campaign(
-            out_dir, inspection_manifest,
-            active_samples=set(running),
-            required_complete_samples=completed_in_poll,
-            method_phase=method_phase,
-        )
-        if last_inspection["errors"]:
-            raise RuntimeError("; ".join(last_inspection["errors"]))
+        stop_records = read_campaign_stop_conditions(out_dir)
+        if stop_records:
+            conditions = sorted({
+                str(record.get("condition") or "unknown")
+                for record in stop_records
+            })
+            raise RuntimeError(
+                "campaign stop latch set while worker queue is running: "
+                + ", ".join(conditions)
+            )
         if exited:
+            # One inspection covers every worker observed exiting in this poll.
+            # Idle polls only observe process state; repeatedly re-reading the
+            # full append-only campaign ledgers and transport sidecars made the
+            # control plane scale with elapsed time instead of completed work.
+            last_inspection = inspect_campaign(
+                out_dir, inspection_manifest,
+                active_samples=set(running),
+                required_complete_samples=completed_in_poll,
+                method_phase=method_phase,
+            )
+            if last_inspection["errors"]:
+                raise RuntimeError("; ".join(last_inspection["errors"]))
             append_jsonl_locked(
                 dispatch_log,
                 {
@@ -6649,6 +6784,7 @@ def _append_remaining134_incomplete(
         out_dir, manifest,
         required_complete_samples=states["finished"],
         method_phase=method_phase,
+        require_terminal_provenance=True,
     )
     if inspection["errors"]:
         raise RuntimeError("; ".join(inspection["errors"]))
@@ -7220,7 +7356,8 @@ def _launch_under_lease(args, out_dir):
         if incomplete_samples or evaluator_incomplete_samples:
             inspection = inspect_campaign(
                 out_dir, inspection_manifest,
-                required_complete_samples=completed_samples)
+                required_complete_samples=completed_samples,
+                require_terminal_provenance=True)
             if inspection["errors"]:
                 raise RuntimeError("; ".join(inspection["errors"]))
             append_jsonl_locked(

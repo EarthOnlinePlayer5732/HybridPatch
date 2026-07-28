@@ -49,6 +49,8 @@ METADATA_SCHEMA = "anchorpatch.run_metadata/3"
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
+DEEPSEEK_COMPACT_TRANSPORT_REVISION = "opencode_openai_compatible/6"
+DEEPSEEK_COMPACT_EVENT_SCHEMA = "anchorpatch.transport_event/2"
 
 
 def code_fingerprint():
@@ -204,6 +206,27 @@ def _sha256_text(text):
     if not isinstance(text, str):
         text = str(text)
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+
+
+def _transport_sidecar_facts(path):
+    if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return {
+            "transport_sidecar_sha256": None,
+            "transport_sidecar_size_bytes": None,
+            "transport_sidecar_record_count": None,
+        }
+    digest = hashlib.sha256()
+    record_count = 0
+    with io.open(path, "rb") as handle:
+        for line in handle:
+            digest.update(line)
+            if line.strip():
+                record_count += 1
+    return {
+        "transport_sidecar_sha256": digest.hexdigest(),
+        "transport_sidecar_size_bytes": os.path.getsize(path),
+        "transport_sidecar_record_count": record_count,
+    }
 
 
 _GENERATE_POSITIONAL_PARAMETERS = (
@@ -914,11 +937,13 @@ class ApiCallRecorder:
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, f"{rt}_{direction}_{call_id}.{ext}")
 
-    def _dump_raw_io(self, call_id, meta):
+    def _dump_raw_io(
+            self, call_id, meta, *, stream_events_already_saved=False):
         """Write the complete raw API log for one call: the request that was
-        sent and the full raw response (including thinking blocks and every SSE
-        event). Returns a dict of the paths written. Best-effort — a logging
-        failure never breaks the run."""
+        sent and the full raw response. Raw stream events are only duplicated
+        when no critical transport sidecar already owns them. Returns a dict of
+        the paths written. Best-effort — a logging failure never breaks the
+        run."""
         paths = {}
         try:
             req = {
@@ -934,7 +959,7 @@ class ApiCallRecorder:
             paths["request"] = os.path.abspath(rp)
 
             events = meta.get("_raw_stream_events")
-            if events:
+            if events and not stream_events_already_saved:
                 ep = self._raw_path(call_id, "sse.jsonl")
                 with open(ep, "w", encoding="utf-8", newline="") as f:
                     for ev in events:
@@ -973,6 +998,7 @@ class ApiCallRecorder:
             "generation_index": context["generation_index"],
             "parent_semantic_call_id": context["parent_semantic_call_id"],
             "worker_launch_id": self.worker_launch_id,
+            "worker_pid": os.getpid(),
         }
 
     def _semantic_root(self, call_kind):
@@ -1420,6 +1446,7 @@ class ApiCallRecorder:
             ) from exc
         transport_path = None
         transport_fh = None
+        transport_header_written = False
         semantic_lock_fh = None
         transport_lock = threading.Lock()
         progress_logged = set()
@@ -1834,22 +1861,50 @@ class ApiCallRecorder:
                     transport_path, "w", encoding="utf-8", newline="")
 
             def _openai_compatible_sink(payload):
-                nonlocal provider_post_started
+                nonlocal provider_post_started, transport_header_written
                 if prior_sink is not None:
                     prior_sink(payload)
                 if transport_fh is not None:
                     payload = dict(payload)
-                    payload.update({
-                        "transport_event_schema":
-                        "anchorpatch.transport_event/1",
-                        "worker_launch_id": self.worker_launch_id,
-                        "worker_pid": os.getpid(),
-                        "sample": self.sample_id,
-                        "method": self.method,
-                        "rt_index": self.rt_index,
-                        "direction": self.direction,
-                        "call_id": call_id,
-                    })
+                    if (provider_runtime.get("transport_revision")
+                            == DEEPSEEK_COMPACT_TRANSPORT_REVISION):
+                        if payload.get("record_type") not in {
+                                "attempt_start", "stream_checkpoint",
+                                "stream_summary", "attempt_end"}:
+                            raise RuntimeError(
+                                "compact DeepSeek transport received an "
+                                "unsupported event")
+                        if not transport_header_written:
+                            header = {
+                                "transport_event_schema":
+                                DEEPSEEK_COMPACT_EVENT_SCHEMA,
+                                "record_type": "transport_header",
+                                "transport_revision":
+                                DEEPSEEK_COMPACT_TRANSPORT_REVISION,
+                                "worker_launch_id": self.worker_launch_id,
+                                "worker_pid": os.getpid(),
+                                "sample": self.sample_id,
+                                "method": self.method,
+                                "rt_index": self.rt_index,
+                                "direction": self.direction,
+                                "call_id": call_id,
+                            }
+                            transport_fh.write(
+                                json.dumps(header, ensure_ascii=False) + "\n")
+                            transport_fh.flush()
+                            transport_header_written = True
+                    else:
+                        payload.update({
+                            "transport_event_schema":
+                            "anchorpatch.transport_event/1",
+                            "worker_launch_id": self.worker_launch_id,
+                            "worker_pid": os.getpid(),
+                            "sample": self.sample_id,
+                            "method": self.method,
+                            "rt_index": self.rt_index,
+                            "direction": self.direction,
+                            "call_id": call_id,
+                        })
                     line = json.dumps(
                         payload, ensure_ascii=False, default=str)
                     for secret in secrets:
@@ -1892,6 +1947,7 @@ class ApiCallRecorder:
                 out = self.generate_fn(*args, **kwargs)
         except Exception as exc:
             _close_transport()
+            transport_facts = _transport_sidecar_facts(transport_path)
             latency_ms = int((time.time() - t0) * 1000)
             classification = "provider/API failure" if _is_provider_exception(exc) else "runner_exception"
             attempts = list(getattr(exc, "transport_attempts", None) or [])
@@ -1943,6 +1999,7 @@ class ApiCallRecorder:
                     os.path.abspath(transport_path)
                     if transport_path and os.path.getsize(transport_path) else None
                 ),
+                **transport_facts,
                 "runner_exception": error_message,
                 "classification": classification,
                 "subagent_audit_required": True,
@@ -2019,14 +2076,25 @@ class ApiCallRecorder:
             _release_semantic_lock()
             raise
         _close_transport()
+        transport_facts = _transport_sidecar_facts(transport_path)
 
         meta = out if isinstance(out, dict) else {}
         raw = meta.get("message") if isinstance(out, dict) else str(out)
         raw_path = self._raw_path(call_id)
         with open(raw_path, "w", encoding="utf-8", newline="") as f:
             f.write(raw if isinstance(raw, str) else str(raw))
-        # Complete raw API log (request + full response incl. thinking + SSE).
-        raw_io_paths = self._dump_raw_io(call_id, meta)
+        transport_saved_path = (
+            os.path.abspath(transport_path)
+            if transport_path and os.path.getsize(transport_path) else None
+        )
+        # Complete raw API log. A critical DeepSeek sidecar already owns the
+        # stream evidence (compact summaries in /6, linear events in /4-/5), so
+        # never write a second .sse.jsonl copy of the same transport evidence.
+        raw_io_paths = self._dump_raw_io(
+            call_id,
+            meta,
+            stream_events_already_saved=bool(transport_saved_path),
+        )
 
         classification, error_type = _empty_classification(meta, raw)
         latency_ms = int((meta.get("elapsed_time") or (time.time() - t0)) * 1000)
@@ -2073,10 +2141,9 @@ class ApiCallRecorder:
             "raw_request_saved_path": raw_io_paths.get("request"),
             "raw_response_full_saved_path": raw_io_paths.get("response_full"),
             "raw_sse_saved_path": (
-                os.path.abspath(transport_path)
-                if transport_path and os.path.getsize(transport_path)
-                else raw_io_paths.get("sse")
+                transport_saved_path or raw_io_paths.get("sse")
             ),
+            **transport_facts,
             "runner_exception": None,
             "classification": classification,
             "subagent_audit_required": False,

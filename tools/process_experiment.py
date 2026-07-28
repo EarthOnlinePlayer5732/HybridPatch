@@ -1629,6 +1629,15 @@ def finalize_experiment(
         if private_record_bundle is not None:
             restore_generated(snapshots)
 
+    public_record_sha256 = None
+    if private_record_bundle is None:
+        public_report = record_directory / "report.md"
+        if not public_report.is_file():
+            raise RuntimeError(
+                "finalizer did not publish the canonical public report"
+            )
+        public_record_sha256 = sha256_file(public_report)
+
     write_atomic(
         analysis / "process_state.json",
         stable_json(
@@ -1646,6 +1655,7 @@ def finalize_experiment(
                     if private_record_bundle is not None
                     else f"{owner}/records/{archive.name}/report.md"
                 ),
+                "public_record_sha256": public_record_sha256,
                 "private_record_bundle_sha256": private_bundle_sha256,
             }
         ),

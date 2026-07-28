@@ -57,6 +57,8 @@ EMERGENCY_STOP_DIRECTORY = "campaign_stop_emergency"
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
+DEEPSEEK_COMPACT_TRANSPORT_REVISION = "opencode_openai_compatible/6"
+DEEPSEEK_COMPACT_EVENT_SCHEMA = "anchorpatch.transport_event/2"
 SAMPLE_OUTCOME_SCHEMA = "anchorpatch.sample_outcome/1"
 CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA = (
     "anchorpatch.campaign_recovery_authorization/1"
@@ -794,6 +796,598 @@ def _sha256_text(text):
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _transport_sidecar_facts(path):
+    if not path or not os.path.isfile(path) or os.path.getsize(path) == 0:
+        return {
+            "transport_sidecar_sha256": None,
+            "transport_sidecar_size_bytes": None,
+            "transport_sidecar_record_count": None,
+        }
+    digest = hashlib.sha256()
+    record_count = 0
+    with io.open(path, "rb") as handle:
+        for line in handle:
+            digest.update(line)
+            if line.strip():
+                record_count += 1
+    return {
+        "transport_sidecar_sha256": digest.hexdigest(),
+        "transport_sidecar_size_bytes": os.path.getsize(path),
+        "transport_sidecar_record_count": record_count,
+    }
+
+
+def _read_deepseek_transport_sidecar(path):
+    rows = _read_jsonl_records_with_retry(path)
+    compact = bool(
+        rows
+        and rows[0].get("record_type") == "transport_header"
+        and rows[0].get("transport_event_schema")
+        == DEEPSEEK_COMPACT_EVENT_SCHEMA
+    )
+    header = rows[0] if compact else None
+    body = rows[1:] if compact else rows
+    starts = [
+        row for row in body if row.get("record_type") == "attempt_start"
+    ]
+    ends = [
+        row for row in body if row.get("record_type") == "attempt_end"
+    ]
+    summaries = [
+        row for row in body if row.get("record_type") == "stream_summary"
+    ]
+    if compact:
+        stream_attempt_indexes = {
+            row.get("attempt_index")
+            for row in body
+            if (
+                row.get("record_type") == "stream_checkpoint"
+                and row.get("checkpoint") == "first_chunk"
+            ) or (
+                row.get("record_type") == "stream_summary"
+                and _exact_nonnegative_int(row.get("stream_event_count"))
+                and row.get("stream_event_count") > 0
+            )
+        }
+        generation_attempt_indexes = {
+            row.get("attempt_index")
+            for row in body
+            if (
+                row.get("record_type") == "stream_checkpoint"
+                and row.get("checkpoint") == "generation_started"
+            ) or (
+                row.get("record_type") == "stream_summary"
+                and row.get("generation_delta_seen") is True
+            )
+        }
+    else:
+        stream_attempt_indexes = {
+            row.get("attempt_index")
+            for row in body
+            if row.get("record_type") == "sdk_stream_event"
+        }
+        generation_attempt_indexes = set(stream_attempt_indexes)
+    return {
+        "rows": rows,
+        "body": body,
+        "compact": compact,
+        "header": header,
+        "identity_rows": [header] if compact else rows,
+        "starts": starts,
+        "ends": ends,
+        "summaries": summaries,
+        "stream_attempt_indexes": stream_attempt_indexes,
+        "generation_attempt_indexes": generation_attempt_indexes,
+    }
+
+
+def _validate_deepseek_compact_records(
+        rows, *, expected_linkage=None, allow_open_final=False):
+    """Validate the one canonical /6 grammar for inspector and recovery."""
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("compact DeepSeek sidecar is empty")
+    header = rows[0]
+    header_keys = {
+        "transport_event_schema", "record_type", "transport_revision",
+        "worker_launch_id", "worker_pid", "sample", "method", "rt_index",
+        "direction", "call_id",
+    }
+    if (not isinstance(header, dict)
+            or set(header) != header_keys
+            or header.get("transport_event_schema")
+            != DEEPSEEK_COMPACT_EVENT_SCHEMA
+            or header.get("record_type") != "transport_header"
+            or header.get("transport_revision")
+            != DEEPSEEK_COMPACT_TRANSPORT_REVISION
+            or not isinstance(header.get("worker_launch_id"), str)
+            or not header.get("worker_launch_id")
+            or not isinstance(header.get("worker_pid"), int)
+            or isinstance(header.get("worker_pid"), bool)
+            or header.get("worker_pid") <= 0
+            or not isinstance(header.get("sample"), str)
+            or not header.get("sample")
+            or header.get("method") not in {"hybridpatch", "fullrewrite"}
+            or not isinstance(header.get("rt_index"), int)
+            or isinstance(header.get("rt_index"), bool)
+            or header.get("rt_index") <= 0
+            or header.get("direction") not in {"forward", "backward"}
+            or not isinstance(header.get("call_id"), str)
+            or not header.get("call_id")):
+        raise RuntimeError("compact DeepSeek header is invalid")
+    if expected_linkage is not None and any(
+            header.get(key) != value
+            for key, value in expected_linkage.items()):
+        raise RuntimeError("compact DeepSeek header linkage mismatch")
+
+    summary_keys = {
+        "record_type", "attempt_index", "stream_event_count",
+        "stream_event_canonical_bytes", "stream_event_sha256",
+        "text_delta_count", "text_delta_utf8_bytes",
+        "reasoning_delta_count", "reasoning_delta_utf8_bytes",
+        "tool_delta_count", "tool_delta_utf8_bytes", "message_start_seen",
+        "message_stop_seen", "final_usage_seen", "generation_delta_seen",
+        "terminal_sequence_valid", "finish_reason", "usage",
+    }
+    checkpoint_order = {
+        "first_chunk": 1,
+        "generation_started": 2,
+        "finish_seen": 3,
+        "usage_seen": 4,
+    }
+
+    def _valid_usage(value):
+        return (
+            isinstance(value, dict)
+            and all(
+                _exact_nonnegative_int(value.get(key))
+                for key in (
+                    "prompt_tokens", "completion_tokens", "total_tokens")
+            )
+            and value["total_tokens"]
+            == value["prompt_tokens"] + value["completion_tokens"]
+        )
+
+    def _successful_summary_is_complete(
+            summary, event_count, checkpoint_sequence):
+        finish_reason = summary.get("finish_reason")
+        return (
+            event_count > 0
+            and summary.get("message_start_seen") is True
+            and summary.get("message_stop_seen") is True
+            and summary.get("final_usage_seen") is True
+            and summary.get("terminal_sequence_valid") is True
+            and isinstance(finish_reason, str)
+            and bool(finish_reason.strip())
+            and _valid_usage(summary.get("usage"))
+            and checkpoint_sequence == sorted(checkpoint_sequence)
+        )
+
+    def _validate_checkpoint_payload(name, checkpoint):
+        if (name == "first_chunk"
+                and checkpoint["stream_event_count"] != 1):
+            raise RuntimeError(
+                "compact DeepSeek first-chunk checkpoint is invalid")
+        if name == "generation_started":
+            flags = [
+                checkpoint.get("text_delta_seen"),
+                checkpoint.get("thinking_delta_seen"),
+                checkpoint.get("tool_delta_seen"),
+            ]
+            if (any(not isinstance(value, bool) for value in flags)
+                    or not any(flags)):
+                raise RuntimeError(
+                    "compact DeepSeek generation checkpoint is invalid")
+        if name == "finish_seen":
+            finish_reason = checkpoint.get("finish_reason")
+            if (not isinstance(finish_reason, str)
+                    or not finish_reason.strip()):
+                raise RuntimeError(
+                    "compact DeepSeek finish checkpoint is invalid")
+        if name == "usage_seen" and not _valid_usage(
+                checkpoint.get("usage")):
+            raise RuntimeError(
+                "compact DeepSeek usage checkpoint is invalid")
+
+    closed_attempts = []
+    retry_budget_attempt_index = 0
+    cursor = 1
+    expected_index = 1
+    open_attempt = (
+        {
+            "attempt_index": 1,
+            "start": None,
+            "checkpoints": {},
+            "summary": None,
+        }
+        if allow_open_final and len(rows) == 1 else None
+    )
+    while cursor < len(rows):
+        if (closed_attempts
+                and closed_attempts[-1]["attempt"].get("status")
+                != "retryable_error"):
+            raise RuntimeError(
+                "compact DeepSeek terminal attempt has trailing records")
+        start = rows[cursor]
+        cursor += 1
+        if (not isinstance(start, dict)
+                or set(start) != {
+                    "record_type", "attempt_index", "attempt_kind"}
+                or start.get("record_type") != "attempt_start"
+                or start.get("attempt_index") != expected_index
+                or start.get("attempt_kind") != (
+                    "openai_compatible_initial"
+                    if expected_index == 1
+                    else "openai_compatible_retry")):
+            raise RuntimeError("compact DeepSeek attempt_start is invalid")
+
+        checkpoints = {}
+        checkpoint_sequence = []
+        prior_event_count = 0
+        while (cursor < len(rows)
+               and rows[cursor].get("record_type") == "stream_checkpoint"):
+            checkpoint = rows[cursor]
+            cursor += 1
+            name = checkpoint.get("checkpoint")
+            order = checkpoint_order.get(name)
+            allowed_keys = {
+                "record_type", "attempt_index", "checkpoint",
+                "stream_event_count",
+            }
+            if name == "generation_started":
+                allowed_keys.update({
+                    "text_delta_seen", "thinking_delta_seen",
+                    "tool_delta_seen",
+                })
+            elif name == "finish_seen":
+                allowed_keys.add("finish_reason")
+            elif name == "usage_seen":
+                allowed_keys.add("usage")
+            event_count = checkpoint.get("stream_event_count")
+            if (order is None or name in checkpoints
+                    or set(checkpoint) != allowed_keys
+                    or checkpoint.get("attempt_index") != expected_index
+                    or not _exact_nonnegative_int(event_count)
+                    or event_count < prior_event_count):
+                raise RuntimeError("compact DeepSeek checkpoint is invalid")
+            checkpoints[name] = checkpoint
+            checkpoint_sequence.append(order)
+            prior_event_count = event_count
+            _validate_checkpoint_payload(name, checkpoint)
+
+        if checkpoint_sequence != sorted(checkpoint_sequence):
+            raise RuntimeError(
+                "compact DeepSeek checkpoint order is invalid")
+
+        if (cursor >= len(rows)
+                or rows[cursor].get("record_type") != "stream_summary"):
+            if allow_open_final and cursor == len(rows):
+                open_attempt = {
+                    "attempt_index": expected_index,
+                    "start": start,
+                    "checkpoints": checkpoints,
+                    "summary": None,
+                }
+                break
+            raise RuntimeError("compact DeepSeek stream_summary is missing")
+        summary = rows[cursor]
+        cursor += 1
+        if (set(summary) != summary_keys
+                or summary.get("attempt_index") != expected_index):
+            raise RuntimeError("compact DeepSeek stream_summary is invalid")
+        for key in (
+                "stream_event_count", "stream_event_canonical_bytes",
+                "text_delta_count", "text_delta_utf8_bytes",
+                "reasoning_delta_count", "reasoning_delta_utf8_bytes",
+                "tool_delta_count", "tool_delta_utf8_bytes"):
+            if not _exact_nonnegative_int(summary.get(key)):
+                raise RuntimeError("compact DeepSeek summary counter is invalid")
+        for key in (
+                "message_start_seen", "message_stop_seen", "final_usage_seen",
+                "generation_delta_seen", "terminal_sequence_valid"):
+            if not isinstance(summary.get(key), bool):
+                raise RuntimeError("compact DeepSeek summary state is invalid")
+        stream_sha = summary.get("stream_event_sha256")
+        finish_reason = summary.get("finish_reason")
+        event_count = summary["stream_event_count"]
+        canonical_bytes = summary["stream_event_canonical_bytes"]
+        delta_counts = [
+            summary["text_delta_count"], summary["reasoning_delta_count"],
+            summary["tool_delta_count"],
+        ]
+        delta_bytes = [
+            summary["text_delta_utf8_bytes"],
+            summary["reasoning_delta_utf8_bytes"],
+            summary["tool_delta_utf8_bytes"],
+        ]
+        if (not isinstance(stream_sha, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", stream_sha)
+                or summary["message_start_seen"] is not (event_count > 0)
+                or summary["message_stop_seen"] is not (
+                    isinstance(finish_reason, str)
+                    and bool(finish_reason.strip()))
+                or summary["generation_delta_seen"] is not any(
+                    count > 0 for count in delta_counts)
+                or (
+                    summary["terminal_sequence_valid"]
+                    and (
+                        summary["message_stop_seen"] is not True
+                        or summary["final_usage_seen"] is not True
+                    )
+                )
+                or any(
+                    (count == 0) is not (byte_count == 0)
+                    for count, byte_count in zip(delta_counts, delta_bytes)
+                )
+                or (event_count == 0) is not (canonical_bytes == 0)
+                or (event_count == 0) is not (
+                    stream_sha == hashlib.sha256(b"").hexdigest())):
+            raise RuntimeError("compact DeepSeek summary invariants are invalid")
+        expected_checkpoints = {
+            "first_chunk": event_count > 0,
+            "generation_started": summary["generation_delta_seen"],
+            "finish_seen": summary["message_stop_seen"],
+            "usage_seen": summary["final_usage_seen"],
+        }
+        if (any(
+                (name in checkpoints) is not expected
+                for name, expected in expected_checkpoints.items())
+                or (checkpoints and any(
+                    checkpoint["stream_event_count"] > event_count
+                    for checkpoint in checkpoints.values()
+                ))
+                or checkpoints.get("first_chunk", {}).get(
+                    "stream_event_count") != (1 if event_count else None)):
+            raise RuntimeError("compact DeepSeek checkpoint coverage is invalid")
+        generation = checkpoints.get("generation_started")
+        if generation is not None:
+            flags = [
+                generation.get("text_delta_seen"),
+                generation.get("thinking_delta_seen"),
+                generation.get("tool_delta_seen"),
+            ]
+            if (any(not isinstance(value, bool) for value in flags)
+                    or not any(flags)
+                    or (flags[0] and summary["text_delta_count"] == 0)
+                    or (flags[1] and summary["reasoning_delta_count"] == 0)
+                    or (flags[2] and summary["tool_delta_count"] == 0)):
+                raise RuntimeError(
+                    "compact DeepSeek generation checkpoint is invalid")
+        if ("finish_seen" in checkpoints
+                and checkpoints["finish_seen"].get("finish_reason")
+                != finish_reason):
+            raise RuntimeError("compact DeepSeek finish checkpoint is invalid")
+        usage = summary.get("usage")
+        if ("usage_seen" in checkpoints
+                and checkpoints["usage_seen"].get("usage") != usage):
+            raise RuntimeError("compact DeepSeek usage checkpoint is invalid")
+        if summary["final_usage_seen"]:
+            if not _valid_usage(usage):
+                raise RuntimeError("compact DeepSeek terminal usage is invalid")
+        elif usage is not None:
+            raise RuntimeError("compact DeepSeek nonterminal usage is invalid")
+
+        if (cursor >= len(rows)
+                or rows[cursor].get("record_type") != "attempt_end"):
+            if allow_open_final and cursor == len(rows):
+                open_attempt = {
+                    "attempt_index": expected_index,
+                    "start": start,
+                    "checkpoints": checkpoints,
+                    "summary": summary,
+                }
+                break
+            raise RuntimeError("compact DeepSeek attempt_end is missing")
+        end_row = rows[cursor]
+        cursor += 1
+        attempt = end_row.get("attempt")
+        if (set(end_row) != {"record_type", "attempt_index", "attempt"}
+                or end_row.get("attempt_index") != expected_index
+                or not isinstance(attempt, dict)
+                or attempt.get("attempt_index") != expected_index):
+            raise RuntimeError("compact DeepSeek attempt_end is invalid")
+        mirrored_keys = (
+                "stream_event_count", "stream_event_canonical_bytes",
+                "stream_event_sha256", "text_delta_count",
+                "text_delta_utf8_bytes", "reasoning_delta_count",
+                "reasoning_delta_utf8_bytes", "tool_delta_count",
+                "tool_delta_utf8_bytes", "message_start_seen",
+                "message_stop_seen", "final_usage_seen",
+                "generation_delta_seen", "terminal_sequence_valid",
+                "finish_reason")
+        for key in mirrored_keys:
+            if key not in attempt or attempt.get(key) != summary.get(key):
+                raise RuntimeError(
+                    "compact DeepSeek summary/attempt mismatch")
+        status = attempt.get("status")
+        if status == "success":
+            if (attempt.get("http_status") != 200
+                    or attempt.get("error_type") is not None
+                    or attempt.get("stream_complete") is not True
+                    or not _successful_summary_is_complete(
+                        summary, event_count, checkpoint_sequence)):
+                raise RuntimeError(
+                    "compact DeepSeek successful attempt is invalid")
+        elif status in {"retryable_error", "fatal_error"}:
+            free_503 = (
+                attempt.get("http_status") == 503
+                and summary["generation_delta_seen"] is False
+            )
+            if not free_503:
+                retry_budget_attempt_index += 1
+            if (attempt.get("stream_complete") is not False
+                    or summary["terminal_sequence_valid"] is not False
+                    or not isinstance(attempt.get("error_type"), str)
+                    or not attempt.get("error_type")
+                    or not isinstance(
+                        attempt.get("retry_budget_consumed"), bool)
+                    or attempt.get("retry_budget_consumed")
+                    is not (not free_503)
+                    or not _exact_nonnegative_int(
+                        attempt.get("retry_budget_attempt_index"))
+                    or attempt.get("retry_budget_attempt_index")
+                    != retry_budget_attempt_index):
+                raise RuntimeError(
+                    "compact DeepSeek failed attempt is invalid")
+        else:
+            raise RuntimeError("compact DeepSeek attempt status is invalid")
+        closed_attempts.append({
+            "start": start,
+            "checkpoints": checkpoints,
+            "summary": summary,
+            "end": end_row,
+            "attempt": attempt,
+        })
+        expected_index += 1
+
+    if cursor != len(rows):
+        raise RuntimeError("compact DeepSeek sidecar has trailing records")
+    if not allow_open_final and (not closed_attempts or open_attempt is not None):
+        raise RuntimeError("compact DeepSeek sidecar is not closed")
+    if open_attempt is not None:
+        if (open_attempt["summary"] is not None
+                and open_attempt["summary"][
+                    "terminal_sequence_valid"] is True):
+            open_summary = open_attempt["summary"]
+            open_checkpoint_sequence = [
+                checkpoint_order[name]
+                for name in open_attempt["checkpoints"]
+            ]
+            if not _successful_summary_is_complete(
+                    open_summary,
+                    open_summary["stream_event_count"],
+                    open_checkpoint_sequence):
+                raise RuntimeError(
+                    "compact DeepSeek complete summary is invalid")
+            recovery_state = "complete_unpublished_response"
+        else:
+            recovery_state = (
+                "pre_attempt_no_post"
+                if open_attempt["start"] is None else "open_attempt"
+            )
+    elif closed_attempts[-1]["attempt"].get("status") == "success":
+        recovery_state = "complete_unpublished_response"
+    else:
+        recovery_state = "retry_or_error_unpublished"
+    return {
+        "header": header,
+        "closed_attempts": closed_attempts,
+        "open_attempt": open_attempt,
+        "attempt_start_count": len(closed_attempts) + int(
+            open_attempt is not None and open_attempt["start"] is not None),
+        "attempt_end_count": len(closed_attempts),
+        "recovery_state": recovery_state,
+    }
+
+
+def _validate_deepseek_linear_records(
+        rows, *, expected_linkage, expected_attempts=None,
+        allow_open_final=False):
+    """Validate frozen /4-/5 linear event/1 sidecars without upgrading them."""
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("linear DeepSeek sidecar is empty")
+    if (not isinstance(expected_linkage, dict)
+            or any(
+                not isinstance(row, dict)
+                or row.get("transport_event_schema")
+                != "anchorpatch.transport_event/1"
+                or any(
+                    row.get(key) != value
+                    for key, value in expected_linkage.items()
+                )
+                for row in rows
+            )):
+        raise RuntimeError("linear DeepSeek sidecar linkage mismatch")
+
+    closed_attempts = []
+    cursor = 0
+    expected_index = 1
+    open_attempt = None
+    while cursor < len(rows):
+        if (closed_attempts
+                and closed_attempts[-1]["attempt"].get("status")
+                != "retryable_error"):
+            raise RuntimeError(
+                "linear DeepSeek terminal attempt has trailing records")
+        start = rows[cursor]
+        cursor += 1
+        if (start.get("record_type") != "attempt_start"
+                or start.get("attempt_index") != expected_index):
+            raise RuntimeError("linear DeepSeek attempt_start is invalid")
+        stream_events = []
+        while (cursor < len(rows)
+               and rows[cursor].get("record_type") == "sdk_stream_event"):
+            event = rows[cursor]
+            cursor += 1
+            if event.get("attempt_index") != expected_index:
+                raise RuntimeError(
+                    "linear DeepSeek stream attempt index is invalid")
+            stream_events.append(event)
+        if (cursor >= len(rows)
+                or rows[cursor].get("record_type") != "attempt_end"):
+            if allow_open_final and cursor == len(rows):
+                open_attempt = {
+                    "attempt_index": expected_index,
+                    "start": start,
+                    "stream_events": stream_events,
+                }
+                break
+            raise RuntimeError("linear DeepSeek attempt_end is missing")
+        end = rows[cursor]
+        cursor += 1
+        attempt = end.get("attempt")
+        if (end.get("attempt_index") != expected_index
+                or not isinstance(attempt, dict)
+                or attempt.get("attempt_index") != expected_index):
+            raise RuntimeError("linear DeepSeek attempt_end is invalid")
+        status = attempt.get("status")
+        if status == "success":
+            if (attempt.get("http_status") != 200
+                    or attempt.get("stream_complete") is not True
+                    or not stream_events):
+                raise RuntimeError(
+                    "linear DeepSeek successful attempt is invalid")
+        elif status in {"retryable_error", "fatal_error"}:
+            if (not isinstance(attempt.get("error_type"), str)
+                    or not attempt.get("error_type")):
+                raise RuntimeError("linear DeepSeek failed attempt is invalid")
+            if attempt.get("message_start_seen") is True and not stream_events:
+                raise RuntimeError(
+                    "linear DeepSeek failed stream evidence is missing")
+        else:
+            raise RuntimeError("linear DeepSeek attempt status is invalid")
+        closed_attempts.append({
+            "start": start,
+            "stream_events": stream_events,
+            "end": end,
+            "attempt": attempt,
+        })
+        expected_index += 1
+
+    if cursor != len(rows):
+        raise RuntimeError("linear DeepSeek sidecar has trailing records")
+    if not allow_open_final and (not closed_attempts or open_attempt is not None):
+        raise RuntimeError("linear DeepSeek sidecar is not closed")
+    attempts = [item["attempt"] for item in closed_attempts]
+    if expected_attempts is not None and attempts != expected_attempts:
+        raise RuntimeError("linear DeepSeek attempts mismatch")
+    recovery_state = (
+        "open_attempt" if open_attempt is not None
+        else (
+            "complete_unpublished_response"
+            if closed_attempts[-1]["attempt"].get("status") == "success"
+            else "retry_or_error_unpublished"
+        )
+    )
+    return {
+        "closed_attempts": closed_attempts,
+        "open_attempt": open_attempt,
+        "attempt_start_count": len(closed_attempts) + int(
+            open_attempt is not None),
+        "attempt_end_count": len(closed_attempts),
+        "recovery_state": recovery_state,
+    }
+
+
 _GENERATE_POSITIONAL_PARAMETERS = (
     "messages", "model", "timeout", "max_retries", "temperature", "is_json",
     "return_metadata", "max_tokens", "variables", "instance",
@@ -1512,11 +2106,13 @@ class ApiCallRecorder:
         os.makedirs(d, exist_ok=True)
         return os.path.join(d, f"{rt}_{direction}_{call_id}.{ext}")
 
-    def _dump_raw_io(self, call_id, meta):
+    def _dump_raw_io(
+            self, call_id, meta, *, stream_events_already_saved=False):
         """Write the complete raw API log for one call: the request that was
-        sent and the full raw response (including thinking blocks and every SSE
-        event). Returns a dict of the paths written. Best-effort — a logging
-        failure never breaks the run."""
+        sent and the full raw response. Raw stream events are only duplicated
+        when no critical transport sidecar already owns them. Returns a dict of
+        the paths written. Best-effort — a logging failure never breaks the
+        run."""
         paths = {}
         try:
             req = {
@@ -1532,7 +2128,7 @@ class ApiCallRecorder:
             paths["request"] = os.path.abspath(rp)
 
             events = meta.get("_raw_stream_events")
-            if events:
+            if events and not stream_events_already_saved:
                 ep = self._raw_path(call_id, "sse.jsonl")
                 with open(ep, "w", encoding="utf-8", newline="") as f:
                     for ev in events:
@@ -2030,6 +2626,7 @@ class ApiCallRecorder:
             ) from exc
         transport_path = None
         transport_fh = None
+        transport_header_written = False
         semantic_lock_fh = None
         transport_lock = threading.Lock()
         progress_logged = set()
@@ -2485,7 +3082,7 @@ class ApiCallRecorder:
                     transport_path, "w", encoding="utf-8", newline="")
 
             def _openai_compatible_sink(payload):
-                nonlocal provider_post_started
+                nonlocal provider_post_started, transport_header_written
                 if prior_sink is not None:
                     prior_sink(payload)
                 if payload.get("record_type") == "attempt_start":
@@ -2493,17 +3090,45 @@ class ApiCallRecorder:
                         self.out_dir, self.sample_id)
                 if transport_fh is not None:
                     payload = dict(payload)
-                    payload.update({
-                        "transport_event_schema":
-                        "anchorpatch.transport_event/1",
-                        "worker_launch_id": self.worker_launch_id,
-                        "worker_pid": os.getpid(),
-                        "sample": self.sample_id,
-                        "method": self.method,
-                        "rt_index": self.rt_index,
-                        "direction": self.direction,
-                        "call_id": call_id,
-                    })
+                    if (provider_runtime.get("transport_revision")
+                            == DEEPSEEK_COMPACT_TRANSPORT_REVISION):
+                        if payload.get("record_type") not in {
+                                "attempt_start", "stream_checkpoint",
+                                "stream_summary", "attempt_end"}:
+                            raise RuntimeError(
+                                "compact DeepSeek transport received an "
+                                "unsupported event")
+                        if not transport_header_written:
+                            header = {
+                                "transport_event_schema":
+                                DEEPSEEK_COMPACT_EVENT_SCHEMA,
+                                "record_type": "transport_header",
+                                "transport_revision":
+                                DEEPSEEK_COMPACT_TRANSPORT_REVISION,
+                                "worker_launch_id": self.worker_launch_id,
+                                "worker_pid": os.getpid(),
+                                "sample": self.sample_id,
+                                "method": self.method,
+                                "rt_index": self.rt_index,
+                                "direction": self.direction,
+                                "call_id": call_id,
+                            }
+                            transport_fh.write(
+                                json.dumps(header, ensure_ascii=False) + "\n")
+                            transport_fh.flush()
+                            transport_header_written = True
+                    else:
+                        payload.update({
+                            "transport_event_schema":
+                            "anchorpatch.transport_event/1",
+                            "worker_launch_id": self.worker_launch_id,
+                            "worker_pid": os.getpid(),
+                            "sample": self.sample_id,
+                            "method": self.method,
+                            "rt_index": self.rt_index,
+                            "direction": self.direction,
+                            "call_id": call_id,
+                        })
                     line = json.dumps(
                         payload, ensure_ascii=False, default=str)
                     for secret in secrets:
@@ -2552,6 +3177,7 @@ class ApiCallRecorder:
                 out = self.generate_fn(*args, **kwargs)
         except Exception as exc:
             _close_transport()
+            transport_facts = _transport_sidecar_facts(transport_path)
             latency_ms = int((time.time() - t0) * 1000)
             classification = "provider/API failure" if _is_provider_exception(exc) else "runner_exception"
             attempts = list(getattr(exc, "transport_attempts", None) or [])
@@ -2603,6 +3229,7 @@ class ApiCallRecorder:
                     os.path.abspath(transport_path)
                     if transport_path and os.path.getsize(transport_path) else None
                 ),
+                **transport_facts,
                 "runner_exception": error_message,
                 "classification": classification,
                 "subagent_audit_required": True,
@@ -2690,14 +3317,25 @@ class ApiCallRecorder:
             _release_semantic_lock()
             raise
         _close_transport()
+        transport_facts = _transport_sidecar_facts(transport_path)
 
         meta = out if isinstance(out, dict) else {}
         raw = meta.get("message") if isinstance(out, dict) else str(out)
         raw_path = self._raw_path(call_id)
         with open(raw_path, "w", encoding="utf-8", newline="") as f:
             f.write(raw if isinstance(raw, str) else str(raw))
-        # Complete raw API log (request + full response incl. thinking + SSE).
-        raw_io_paths = self._dump_raw_io(call_id, meta)
+        transport_saved_path = (
+            os.path.abspath(transport_path)
+            if transport_path and os.path.getsize(transport_path) else None
+        )
+        # Complete raw API log. A critical DeepSeek sidecar already owns the
+        # stream evidence (compact summaries in /6, linear events in /4-/5), so
+        # never write a second .sse.jsonl copy of the same transport evidence.
+        raw_io_paths = self._dump_raw_io(
+            call_id,
+            meta,
+            stream_events_already_saved=bool(transport_saved_path),
+        )
 
         classification, error_type = _empty_classification(meta, raw)
         latency_ms = int((meta.get("elapsed_time") or (time.time() - t0)) * 1000)
@@ -2744,10 +3382,9 @@ class ApiCallRecorder:
             "raw_request_saved_path": raw_io_paths.get("request"),
             "raw_response_full_saved_path": raw_io_paths.get("response_full"),
             "raw_sse_saved_path": (
-                os.path.abspath(transport_path)
-                if transport_path and os.path.getsize(transport_path)
-                else raw_io_paths.get("sse")
+                transport_saved_path or raw_io_paths.get("sse")
             ),
+            **transport_facts,
             "runner_exception": None,
             "classification": classification,
             "subagent_audit_required": False,
@@ -3180,49 +3817,79 @@ def _deepseek_dispatcher_stopped_sidecar_evidence(out_dir, api_row):
     if not inside or not os.path.isfile(path):
         raise RuntimeError(
             "DeepSeek dispatcher-stop transport sidecar is invalid")
-    rows = _read_jsonl_records_with_retry(path)
-    starts = [
-        row for row in rows
-        if row.get("record_type") == "attempt_start"
-    ]
-    stream_events = [
-        row for row in rows
-        if row.get("record_type") == "sdk_stream_event"
-    ]
-    end_rows = [
-        row for row in rows
-        if row.get("record_type") == "attempt_end"
-    ]
+    evidence = _read_deepseek_transport_sidecar(path)
+    rows = evidence["rows"]
+    starts = evidence["starts"]
+    end_rows = evidence["ends"]
     expected_linkage = {
-        "transport_event_schema": "anchorpatch.transport_event/1",
         "call_id": api_row.get("request_id"),
         "worker_launch_id": api_row.get("worker_launch_id"),
+        "worker_pid": api_row.get("worker_pid"),
         "sample": api_row.get("sample"),
         "method": api_row.get("method"),
         "rt_index": api_row.get("rt_index"),
         "direction": api_row.get("direction"),
-        "attempt_index": 1,
     }
+    compact_validation = None
+    legacy_validation = None
+    transport_revision = api_row.get("transport_revision")
+    if transport_revision == DEEPSEEK_COMPACT_TRANSPORT_REVISION:
+        if not evidence["compact"]:
+            raise RuntimeError(
+                "DeepSeek dispatcher-stop compact sidecar was downgraded")
+        try:
+            compact_validation = _validate_deepseek_compact_records(
+                rows, expected_linkage=expected_linkage)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "DeepSeek dispatcher-stop compact sidecar is invalid") from exc
+    elif transport_revision in {
+            "opencode_openai_compatible/4",
+            "opencode_openai_compatible/5",
+    }:
+        if evidence["compact"]:
+            raise RuntimeError(
+                "DeepSeek dispatcher-stop legacy sidecar is compact")
+    else:
+        raise RuntimeError(
+            "DeepSeek dispatcher-stop transport revision is invalid")
     attempt = (
         end_rows[0].get("attempt")
         if len(end_rows) == 1 else None
     )
+    if (transport_revision in {
+            "opencode_openai_compatible/4",
+            "opencode_openai_compatible/5",
+    } and isinstance(attempt, dict)):
+        try:
+            legacy_validation = _validate_deepseek_linear_records(
+                rows,
+                expected_linkage=expected_linkage,
+                expected_attempts=[attempt],
+            )
+        except RuntimeError:
+            legacy_validation = None
+    compact_valid = (
+        compact_validation is not None
+        and len(compact_validation["closed_attempts"]) == 1
+    )
+    legacy_valid = (
+        legacy_validation is not None
+        and len(legacy_validation["closed_attempts"]) == 1
+    )
     if (len(rows) < 3
             or len(starts) != 1
-            or len(stream_events) < 1
+            or 1 not in evidence["generation_attempt_indexes"]
             or len(end_rows) != 1
-            or rows[0] is not starts[0]
-            or rows[-1] is not end_rows[0]
-            or any(
-                row.get("record_type") not in {
-                    "attempt_start", "sdk_stream_event", "attempt_end"}
-                or any(
-                    row.get(key) != value
-                    for key, value in expected_linkage.items()
-                )
-                for row in rows
+            or (
+                evidence["body"][0] is not starts[0]
+                if evidence["body"] else True
             )
+            or rows[-1] is not end_rows[0]
+            or not (compact_valid or legacy_valid)
             or not isinstance(attempt, dict)
+            or starts[0].get("attempt_index") != 1
+            or end_rows[0].get("attempt_index") != 1
             or any(
                 attempt.get(key) != value
                 for key, value in {
@@ -3256,7 +3923,13 @@ def _deepseek_dispatcher_stopped_sidecar_evidence(out_dir, api_row):
         "sha256": _sha256_file(path),
         "event_count": len(rows),
         "attempt_start_count": 1,
-        "sdk_stream_event_count": len(stream_events),
+        "sdk_stream_event_count": (
+            evidence["summaries"][0].get("stream_event_count")
+            if evidence["compact"] else len([
+                row for row in rows
+                if row.get("record_type") == "sdk_stream_event"
+            ])
+        ),
         "attempt_end_count": 1,
         "attempt_end_sha256": _canonical_record_sha256(end_rows[0]),
     }
@@ -5374,6 +6047,7 @@ def read_campaign_recovery_authorization(
                 or manifest_config.get("transport_revision") not in {
                     "opencode_openai_compatible/4",
                     "opencode_openai_compatible/5",
+                    "opencode_openai_compatible/6",
                 }):
             raise RuntimeError(
                 "dispatcher parent-loss manifest contract is invalid")
@@ -6042,6 +6716,63 @@ def read_campaign_recovery_authorization(
             for item in (
                 (superseded or {}).get("incident_attempt_rows") or [])
         }
+
+        def _validate_mapped_transport_sidecar(entry, row):
+            attempts = row.get("transport_attempts")
+            sidecar_relative = entry.get("transport_sidecar_path")
+            sidecar_digest = entry.get("transport_sidecar_sha256")
+            if (not isinstance(attempts, list) or not attempts
+                    or not isinstance(sidecar_relative, str)
+                    or not sidecar_relative
+                    or not isinstance(sidecar_digest, str)
+                    or not sidecar_digest):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport sidecar evidence "
+                    "is invalid")
+            sidecar_path = os.path.realpath(os.path.join(
+                out_dir, sidecar_relative))
+            raw_path = os.path.realpath(str(
+                row.get("raw_sse_saved_path") or ""))
+            if (os.path.commonpath([out_dir, sidecar_path]) != out_dir
+                    or sidecar_path != raw_path
+                    or not os.path.isfile(sidecar_path)
+                    or _sha256_file(sidecar_path) != sidecar_digest):
+                raise RuntimeError(
+                    "dispatcher parent-loss transport sidecar digest mismatch")
+            sidecar = _read_deepseek_transport_sidecar(sidecar_path)
+            is_compact_revision = (
+                row.get("transport_revision")
+                == DEEPSEEK_COMPACT_TRANSPORT_REVISION
+            )
+            if is_compact_revision and not sidecar["compact"]:
+                raise RuntimeError(
+                    "dispatcher parent-loss API compact sidecar was downgraded")
+            if not is_compact_revision and sidecar["compact"]:
+                raise RuntimeError(
+                    "dispatcher parent-loss legacy API sidecar is compact")
+            expected_linkage = {
+                "call_id": row.get("request_id"),
+                "worker_launch_id": row.get("worker_launch_id"),
+                "worker_pid": row.get("worker_pid"),
+                "sample": row.get("sample"),
+                "method": row.get("method"),
+                "rt_index": row.get("rt_index"),
+                "direction": row.get("direction"),
+            }
+            if is_compact_revision:
+                compact = _validate_deepseek_compact_records(
+                    sidecar["rows"], expected_linkage=expected_linkage)
+                if ([item["attempt"] for item in compact["closed_attempts"]]
+                        != attempts):
+                    raise RuntimeError(
+                        "dispatcher parent-loss compact sidecar mismatch")
+            else:
+                _validate_deepseek_linear_records(
+                    sidecar["rows"],
+                    expected_linkage=expected_linkage,
+                    expected_attempts=attempts,
+                )
+
         new_api = []
         for entry, row in current_api.values():
             key = (entry.get("row_number"), entry.get("canonical_sha256"))
@@ -6069,7 +6800,6 @@ def read_campaign_recovery_authorization(
         }):
             raise RuntimeError(
                 "dispatcher parent-loss superseded incident evidence is missing")
-
         committed_call_ids = set()
         manifest_methods = set((manifest.get("config") or {}).get(
             "method_set") or [])
@@ -6153,6 +6883,7 @@ def read_campaign_recovery_authorization(
                     or attempts[-1].get("terminal_sequence_valid") is not True):
                 raise RuntimeError(
                     "dispatcher parent-loss API incident is invalid")
+            _validate_mapped_transport_sidecar(entry, row)
             budget_index = 0
             for expected_index, attempt in enumerate(attempts, 1):
                 if attempt.get("attempt_index") != expected_index:
@@ -6175,51 +6906,6 @@ def read_campaign_recovery_authorization(
                         "retry_budget_attempt_index") != budget_index:
                     raise RuntimeError(
                         "dispatcher parent-loss retry sequence is invalid")
-
-            sidecar_relative = entry.get("transport_sidecar_path")
-            sidecar_digest = entry.get("transport_sidecar_sha256")
-            if (not isinstance(sidecar_relative, str)
-                    or not sidecar_relative
-                    or not isinstance(sidecar_digest, str)
-                    or not sidecar_digest):
-                raise RuntimeError(
-                    "dispatcher parent-loss transport sidecar evidence "
-                    "is invalid")
-            sidecar_path = os.path.realpath(os.path.join(
-                out_dir, sidecar_relative))
-            raw_path = os.path.realpath(str(
-                row.get("raw_sse_saved_path") or ""))
-            if (os.path.commonpath([out_dir, sidecar_path]) != out_dir
-                    or sidecar_path != raw_path
-                    or not os.path.isfile(sidecar_path)
-                    or _sha256_file(sidecar_path) != sidecar_digest):
-                raise RuntimeError(
-                    "dispatcher parent-loss transport sidecar digest mismatch")
-            sidecar_rows = _read_jsonl_records_with_retry(sidecar_path)
-            starts = [
-                item for item in sidecar_rows
-                if item.get("record_type") == "attempt_start"
-            ]
-            ends = [
-                item.get("attempt") for item in sidecar_rows
-                if item.get("record_type") == "attempt_end"
-                and isinstance(item.get("attempt"), dict)
-            ]
-            if (len(starts) != len(attempts)
-                    or len(ends) != len(attempts)):
-                raise RuntimeError(
-                    "dispatcher parent-loss transport sidecar is incomplete")
-            for expected_index, (attempt, start, end) in enumerate(
-                    zip(attempts, starts, ends), 1):
-                if (start.get("attempt_index") != expected_index
-                        or end != attempt
-                        or not any(
-                            item.get("record_type") == "sdk_stream_event"
-                            and item.get("attempt_index") == expected_index
-                            for item in sidecar_rows
-                        )):
-                    raise RuntimeError(
-                        "dispatcher parent-loss transport sidecar mismatch")
         all_attempt_rows = (
             _read_jsonl_records_with_retry(os.path.join(
                 out_dir, "api_attempt_ledger.jsonl"))
@@ -6317,45 +7003,93 @@ def read_campaign_recovery_authorization(
                     "dispatcher parent-loss transport incident evidence "
                     "is invalid")
             current_sidecar_keys.add(key)
-            if key in prior_sidecars:
-                if prior_sidecars[key] != entry:
+            prior_entry = prior_sidecars.get(key)
+            if prior_entry is not None:
+                if prior_entry != entry:
                     raise RuntimeError(
                         "dispatcher parent-loss prior transport evidence "
                         "drifted")
-                continue
             sidecar_path = os.path.realpath(os.path.join(out_dir, key[0]))
             if (os.path.commonpath([out_dir, sidecar_path]) != out_dir
                     or not os.path.isfile(sidecar_path)
                     or _sha256_file(sidecar_path) != key[1]):
                 raise RuntimeError(
                     "dispatcher parent-loss transport incident digest mismatch")
-            rows = _read_jsonl_records_with_retry(sidecar_path)
+            sidecar = _read_deepseek_transport_sidecar(sidecar_path)
+            rows = sidecar["rows"]
             worker_id = entry.get("worker_launch_id")
-            worker = current_workers.get(worker_id) or {}
-            starts = [
-                row for row in rows
-                if row.get("record_type") == "attempt_start"
-            ]
-            ends = [
-                row for row in rows
-                if row.get("record_type") == "attempt_end"
-            ]
-            if (worker_id not in interrupted_worker_ids
-                    or not rows
-                    or any(
-                        row.get("transport_event_schema")
-                        != "anchorpatch.transport_event/1"
-                        or row.get("worker_launch_id") != worker_id
-                        or row.get("worker_pid") != worker.get("worker_pid")
-                        or row.get("sample") != worker.get("sample")
-                        or row.get("method") != entry.get("method")
-                        or row.get("rt_index") != entry.get("rt_index")
-                        or row.get("direction") != entry.get("direction")
-                        or row.get("call_id") != entry.get("call_id")
-                        for row in rows
+            worker = (
+                current_workers.get(worker_id) or {}
+                if prior_entry is None else None
+            )
+            starts = sidecar["starts"]
+            ends = sidecar["ends"]
+            expected_linkage = {
+                "worker_launch_id": worker_id,
+                "worker_pid": (
+                    worker.get("worker_pid")
+                    if worker is not None else entry.get("worker_pid")
+                ),
+                "sample": (
+                    worker.get("sample")
+                    if worker is not None else entry.get("sample")
+                ),
+                "method": entry.get("method"),
+                "rt_index": entry.get("rt_index"),
+                "direction": entry.get("direction"),
+                "call_id": entry.get("call_id"),
+            }
+            compact = None
+            is_compact_revision = (
+                manifest_config.get("transport_revision")
+                == DEEPSEEK_COMPACT_TRANSPORT_REVISION
+            )
+            if is_compact_revision:
+                if not sidecar["compact"]:
+                    raise RuntimeError(
+                        "dispatcher parent-loss compact transport schema "
+                        "was downgraded")
+                try:
+                    compact = _validate_deepseek_compact_records(
+                        rows,
+                        expected_linkage=expected_linkage,
+                        allow_open_final=True,
                     )
-                    or entry.get("sample") != worker.get("sample")
-                    or entry.get("worker_pid") != worker.get("worker_pid")
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        "dispatcher parent-loss compact transport incident "
+                        "is invalid") from exc
+                attempt_start_count = compact["attempt_start_count"]
+                attempt_end_count = compact["attempt_end_count"]
+                expected_state = compact["recovery_state"]
+                linkage_valid = True
+            else:
+                if sidecar["compact"]:
+                    raise RuntimeError(
+                        "dispatcher parent-loss legacy transport schema "
+                        "was upgraded")
+                try:
+                    linear = _validate_deepseek_linear_records(
+                        rows,
+                        expected_linkage=expected_linkage,
+                        allow_open_final=True,
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        "dispatcher parent-loss linear transport incident "
+                        "is invalid") from exc
+                linkage_valid = True
+                attempt_start_count = linear["attempt_start_count"]
+                attempt_end_count = linear["attempt_end_count"]
+                expected_state = linear["recovery_state"]
+            if (not rows
+                    or not linkage_valid
+                    or not isinstance(worker_id, str) or not worker_id
+                    or not isinstance(entry.get("worker_pid"), int)
+                    or isinstance(entry.get("worker_pid"), bool)
+                    or entry.get("worker_pid") <= 0
+                    or not isinstance(entry.get("sample"), str)
+                    or not entry.get("sample")
                     or entry.get("method") not in manifest_methods
                     or not isinstance(entry.get("rt_index"), int)
                     or isinstance(entry.get("rt_index"), bool)
@@ -6363,27 +7097,29 @@ def read_campaign_recovery_authorization(
                     or entry.get("direction") not in {
                         "forward", "backward"}
                     or entry.get("event_count") != len(rows)
-                    or entry.get("attempt_start_count") != len(starts)
-                    or entry.get("attempt_end_count") != len(ends)
-                    or not starts or len(ends) > len(starts)):
+                    or entry.get("attempt_start_count")
+                    != attempt_start_count
+                    or entry.get("attempt_end_count") != attempt_end_count
+                    or (
+                        not is_compact_revision
+                        and attempt_start_count == 0
+                    )
+                    or (
+                        prior_entry is None
+                        and (
+                            worker_id not in interrupted_worker_ids
+                            or entry.get("sample") != worker.get("sample")
+                            or entry.get("worker_pid")
+                            != worker.get("worker_pid")
+                        )
+                    )):
                 raise RuntimeError(
                     "dispatcher parent-loss transport incident scope mismatch")
-            expected_state = (
-                "open_attempt" if len(ends) < len(starts)
-                else (
-                    "complete_unpublished_response"
-                    if (
-                        isinstance(ends[-1].get("attempt"), dict)
-                        and ends[-1]["attempt"].get("status") == "success"
-                        and ends[-1]["attempt"].get("stream_complete") is True
-                    )
-                    else "retry_or_error_unpublished"
-                )
-            )
             if entry.get("state") != expected_state:
                 raise RuntimeError(
                     "dispatcher parent-loss transport incident state mismatch")
-            new_sidecars[sidecar_path] = entry
+            if prior_entry is None:
+                new_sidecars[sidecar_path] = entry
         if set(prior_sidecars) - current_sidecar_keys:
             raise RuntimeError(
                 "dispatcher parent-loss superseded transport evidence "

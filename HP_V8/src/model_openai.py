@@ -13,6 +13,7 @@ from openai import (
     OpenAI,
 )
 import httpx
+import hashlib
 import os, time, json, re
 import concurrent.futures
 import urllib.error
@@ -49,7 +50,7 @@ _OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/go/v1"
 _OPENCODE_ZEN_CHAT_COMPLETIONS_URL = (
     _OPENCODE_ZEN_BASE_URL + "/chat/completions"
 )
-_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/5"
+_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/6"
 _OPENCODE_OPENAI_COMPATIBLE_TRANSPORT = "openai_sdk_stream"
 _OPENCODE_MAX_RETRY_AFTER_SECONDS = 300
 _REASONING_EFFORTS = {"low", "medium", "high"}
@@ -853,6 +854,24 @@ def _openai_stream_delta_seen(delta, key):
     return value is not None
 
 
+def _canonical_stream_chunk_bytes(value):
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+
+
+def _stream_value_utf8_bytes(value):
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    return len(_canonical_stream_chunk_bytes(value))
+
+
 def _valid_openai_final_usage(value):
     """Require the complete non-negative Chat Completions token accounting."""
     usage = value if isinstance(value, dict) else _as_plain_dict(value)
@@ -873,7 +892,6 @@ def _valid_openai_final_usage(value):
 def _call_openai_compatible_stream(
         client, request_kwargs, *, raw_event_sink=None, attempt_index=1):
     """Collect a complete OpenAI ChatCompletion stream with terminal usage."""
-    raw_chunks = []
     content_parts = []
     response_id = None
     response_model = None
@@ -895,7 +913,62 @@ def _call_openai_compatible_stream(
         "content_blocks_balanced": True,
         "terminal_sequence_valid": False,
     }
+    stream_digest = hashlib.sha256()
+    stream_event_count = 0
+    stream_event_canonical_bytes = 0
+    text_delta_count = 0
+    text_delta_utf8_bytes = 0
+    reasoning_delta_count = 0
+    reasoning_delta_utf8_bytes = 0
+    tool_delta_count = 0
+    tool_delta_utf8_bytes = 0
+    checkpoints = set()
+    summary_emitted = False
     terminal_sequence_valid = True
+
+    def emit_checkpoint(name, **fields):
+        if name in checkpoints:
+            return
+        checkpoints.add(name)
+        payload = {
+            "record_type": "stream_checkpoint",
+            "attempt_index": attempt_index,
+            "checkpoint": name,
+            "stream_event_count": stream_event_count,
+        }
+        payload.update(fields)
+        _emit_transport_event(raw_event_sink, payload)
+
+    def emit_summary():
+        nonlocal summary_emitted
+        if summary_emitted:
+            return
+        summary = {
+            "record_type": "stream_summary",
+            "attempt_index": attempt_index,
+            "stream_event_count": stream_event_count,
+            "stream_event_canonical_bytes": stream_event_canonical_bytes,
+            "stream_event_sha256": stream_digest.hexdigest(),
+            "text_delta_count": text_delta_count,
+            "text_delta_utf8_bytes": text_delta_utf8_bytes,
+            "reasoning_delta_count": reasoning_delta_count,
+            "reasoning_delta_utf8_bytes": reasoning_delta_utf8_bytes,
+            "tool_delta_count": tool_delta_count,
+            "tool_delta_utf8_bytes": tool_delta_utf8_bytes,
+            "message_start_seen": state["message_start_seen"],
+            "message_stop_seen": state["message_stop_seen"],
+            "final_usage_seen": state["final_usage_seen"],
+            "generation_delta_seen": state["generation_delta_seen"],
+            "terminal_sequence_valid": state["terminal_sequence_valid"],
+            "finish_reason": finish_reason,
+            "usage": usage,
+        }
+        _emit_transport_event(raw_event_sink, summary)
+        summary_emitted = True
+        state.update({
+            key: value for key, value in summary.items()
+            if key not in {"record_type", "attempt_index", "usage"}
+        })
 
     try:
         stream = client.chat.completions.create(
@@ -920,13 +993,13 @@ def _call_openai_compatible_stream(
                     pass
                 raise
             plain = _as_plain_dict(chunk)
-            raw_chunks.append(plain)
+            encoded = _canonical_stream_chunk_bytes(plain)
+            stream_digest.update(len(encoded).to_bytes(8, "big"))
+            stream_digest.update(encoded)
+            stream_event_count += 1
+            stream_event_canonical_bytes += len(encoded)
             state["message_start_seen"] = True
-            _emit_transport_event(raw_event_sink, {
-                "record_type": "sdk_stream_event",
-                "attempt_index": attempt_index,
-                "event": plain,
-            })
+            emit_checkpoint("first_chunk")
             response_id = plain.get("id") or response_id
             response_model = plain.get("model") or response_model
             choices = plain.get("choices") or []
@@ -942,16 +1015,37 @@ def _call_openai_compatible_stream(
                         text = _content_to_text(content)
                         if text:
                             content_parts.append(text)
+                            text_delta_count += 1
+                            text_delta_utf8_bytes += len(text.encode("utf-8"))
                             state["generation_delta_seen"] = True
                             state["text_delta_seen"] = True
-                    if any(_openai_stream_delta_seen(delta, key) for key in (
+                    reasoning_values = [
+                        delta.get(key) for key in (
                             "reasoning", "reasoning_content",
-                            "reasoning_details")):
+                            "reasoning_details")
+                        if _openai_stream_delta_seen(delta, key)
+                    ]
+                    if reasoning_values:
+                        reasoning_delta_count += 1
+                        reasoning_delta_utf8_bytes += sum(
+                            _stream_value_utf8_bytes(value)
+                            for value in reasoning_values
+                        )
                         state["generation_delta_seen"] = True
                         state["thinking_delta_seen"] = True
                     if _openai_stream_delta_seen(delta, "tool_calls"):
+                        tool_delta_count += 1
+                        tool_delta_utf8_bytes += _stream_value_utf8_bytes(
+                            delta.get("tool_calls"))
                         state["generation_delta_seen"] = True
                         state["tool_delta_seen"] = True
+                    if state["generation_delta_seen"]:
+                        emit_checkpoint(
+                            "generation_started",
+                            text_delta_seen=state["text_delta_seen"],
+                            thinking_delta_seen=state["thinking_delta_seen"],
+                            tool_delta_seen=state["tool_delta_seen"],
+                        )
                 current_finish = choice0.get("finish_reason")
                 if current_finish is not None and (
                         not isinstance(current_finish, str)
@@ -963,6 +1057,8 @@ def _call_openai_compatible_stream(
                     finish_reason = current_finish
                     state["message_delta_seen"] = True
                     state["message_stop_seen"] = True
+                    emit_checkpoint(
+                        "finish_seen", finish_reason=finish_reason)
             usage_value = plain.get("usage")
             if usage_value is not None:
                 if (
@@ -972,10 +1068,14 @@ def _call_openai_compatible_stream(
                         and _valid_openai_final_usage(usage_value)):
                     usage = usage_value
                     state["final_usage_seen"] = True
+                    emit_checkpoint("usage_seen", usage=usage)
                 else:
                     terminal_sequence_valid = False
     except Exception as exc:
         state["terminal_sequence_valid"] = False
+        if not getattr(
+                exc, "_anchorpatch_transport_observability_failure", False):
+            emit_summary()
         exc._opencode_attempt = dict(state)
         raise
 
@@ -996,10 +1096,12 @@ def _call_openai_compatible_stream(
             "OpenAI-compatible stream ended without " + " and ".join(missing),
             status_code=state["response_started_http_status"],
         )
+        emit_summary()
         exc._opencode_attempt = dict(state)
         raise exc
 
     state["stream_complete"] = True
+    emit_summary()
     return {
         "id": response_id,
         "model": response_model,
@@ -1014,7 +1116,6 @@ def _call_openai_compatible_stream(
         "usage": usage or {},
         "http_status": 200,
         "stream_complete": True,
-        "_raw_stream_events": raw_chunks,
         "_stream_attempt_state": state,
     }
 
@@ -1648,6 +1749,13 @@ class OpenAI_Model:
         is_opencode_zen = (
             not is_minimax and _is_opencode_zen_runtime(resolved)
         )
+        if (is_opencode_zen
+                and resolved.lower().startswith("deepseek-v4-")
+                and effective_reasoning_effort != "high"):
+            raise ValueError(
+                "OpenCode Zen DeepSeek-V4 transport /6 requires "
+                "reasoning_effort='high'"
+            )
         effective_temperature = (
             1.0 if is_minimax and effective_thinking_mode == "adaptive" else temperature
         )
@@ -2255,6 +2363,10 @@ class OpenAI_Model:
             "output_tokens_per_second": output_tps,
             "total_tokens_per_second": total_tps,
         }
+        if (is_opencode_zen
+                and transport_revision_label
+                == _OPENCODE_OPENAI_COMPATIBLE_REVISION):
+            result.pop("_raw_stream_events", None)
         if _response_commit_sink is not None:
             _response_commit_sink(result)
         return result

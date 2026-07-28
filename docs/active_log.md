@@ -1,6 +1,33 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-29 - Before Zero-API Validation: DeepSeek `/6` compact transport
+
+- trigger：正式 `/5` 长 reasoning campaign 的逐 chunk critical
+  `.transport.jsonl` 累计约 49.2 GB，同一 `_raw_stream_events` 又产生约 26.1 GB
+  无 API-row 引用的重复 `.sse.jsonl`。用户决定放弃该 DeepSeek campaign；旧目录
+  保持 `/5` 历史身份，不再 resume、拼接或升级。
+- unique change：活动 revision 升为 `opencode_openai_compatible/6`，critical sidecar
+  升为 `anchorpatch.transport_event/2`。每 call 一个 header；每 attempt 仅保存 start、
+  最多四个单调 checkpoint、一个聚合 stream summary 与 end，使证据从 O(chunk)
+  改为 O(attempt)。API row 同时绑定 sidecar SHA、size 和 record count。
+- retention：DeepSeek `/6` 不返回 `_raw_stream_events`，不再生成重复 `.sse.jsonl`。
+  最终正文、request、重建 response、usage、retry budget 与完整脱敏 502/503
+  body/message 保留；parent-loss 仍由 `generation_started` checkpoint 判定是否已生成。
+- compatibility：`/4`、`/5` linear sidecar 只读审计兼容；新 writer、普通 resume 与
+  recovery 仅接受新 out_dir 的 `/6`，不得改旧 manifest 混用。方法、prompt、executor、
+  evaluator、scoring、endpoint、high reasoning 和 terminal/retry 语义均不改变。
+- gate：本轮没有调用 API。Git Bash 零 API 验证现为 transport core `73/73`、HP
+  integration/dispatcher/recovery `234/234`、postprocess trust gate `14` 项
+  （Windows symlink 权限相关 `1` 项 skip）、process `25/25`、artifact seal `7/7`，并包含
+  50,000-chunk 常数级 sidecar、revision 降级、open-prefix 与历史 `/4`/`/5` reader
+  负例。付费实验仍保持 NO-GO，直到基础设施修改形成 clean commit，并另建新实验计划。
+- control plane：idle poll 不再每 5 秒完整审计；仅 worker 退出后做 strict post-exit
+  inspection，通过后才补位。refill 前再次检查 stop latch；incomplete closeout 强制
+  worker terminal provenance。strict inspection、artifact seal 与 public/private final
+  record 均绑定强内容 SHA-256；同尺寸且恢复 mtime 的 evidence/source/archive/report
+  变化不能命中旧 cache，archive symlink fail-closed。
+
 ## 2026-07-28 - Experiment Update: DeepSeek `/5` quota pause and resume blocker
 
 - experiment：`exp_20260728_dsv4f_hpfr_full234_rt10_stream_c10_v5`；campaign

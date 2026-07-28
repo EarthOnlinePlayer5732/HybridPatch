@@ -878,3 +878,44 @@ worker metadata 绑定、同父且同一五文件变更集合下做一次 SHA �
 漂移或已经进入 worker metadata 的 authorization 均 fail-closed。后续再次发生
 parent loss 时，新 authorization 不继承这组只属于上一层的 reader witness；reader
 改为按 recovery chain 中每层 authorization 的实际归档路径与 SHA 验证历史 witness。
+
+## 2026-07-29 DeepSeek `/6` compact transport evidence
+
+正式 `/5` RT10 campaign 暴露出与模型结果无关的存储失控：逐 SDK chunk 的 critical
+`.transport.jsonl` 累计约 49.2 GB，成功 response 内同一 `_raw_stream_events` 又写成
+约 26.1 GB 的重复 `.sse.jsonl`。用户决定放弃该 DeepSeek campaign；它保持 `/5`
+历史身份，不再 resume、拼接或改 manifest 升级为 `/6`。
+
+新实验的 DeepSeek revision 升为 `opencode_openai_compatible/6`，sidecar schema 为
+`anchorpatch.transport_event/2`。每 call 只写一个 identity header；每 attempt 写 start、
+最多四个 stream checkpoint、聚合 summary 和 end。所有 attempt 的 checkpoint event count
+不回退且必须按 first-chunk、generation、finish、usage 的语义顺序出现。summary 保存 chunk count、
+canonical bytes、长度前缀增量 SHA-256、text/reasoning/tool delta 计数与 bytes、finish、
+usage 和 terminal flags；API terminal row 绑定 sidecar SHA、size 与 record count。因此
+关键证据规模按 attempt 增长，不再按数万 chunk 增长。
+
+`/6` 不生成重复 `.sse.jsonl`，也不把每个 raw chunk 保留在返回 metadata 中。最终
+assistant 正文、request、重建 response、terminal usage、retry budget 与完整脱敏
+502/503 body/message 继续保存；`generation_started` checkpoint 仍为 parent-loss/open
+attempt 提供是否已开始生成的 durable witness。`/4`、`/5` linear sidecar reader 保留
+只读兼容，但旧目录不能普通 resume 或 recovery 成 `/6`。
+
+这次修改只涉及 DeepSeek transport/control-plane 证据形态，不改变
+`hybridpatch/8`、FullRewrite、prompt、executor、gate、evaluator、scoring、endpoint、
+high reasoning、terminal usage 或 502/503 预算语义。实现与文档阶段未调用 API；新的
+正式 full234 仍必须使用新 out_dir，并在零 API transport、dispatcher、recovery 和
+大 synthetic-stream size regression 全部通过后另行计划和授权。
+
+本次零 API 收口通过：transport core `73/73`、HP integration/dispatcher/recovery
+`234/234`、postprocess trust gate `14` 项（Windows symlink 权限相关 `1` 项 skip）、
+process `25/25`、artifact seal `7/7`。`/6` normal inspector、dispatcher-stop、parent-loss
+authorizer/reader 复用同一 compact 状态机；`/6` 不接受 event/1 降级，`/4`、`/5` 继续由
+独立 linear reader 只读验证。header-only、open checkpoint、terminal-summary-before-end、
+closed success/retry/fatal 与 superseded authorization 均重新按当前 evidence 验证。
+
+dispatcher 的 idle 5 秒 poll 不再执行全 campaign inspection；worker 退出后才做一次
+post-exit 严格检查，通过后才补位。补位边界会再次读取 stop latch，incomplete 收尾也
+强制验证 worker exit、metadata terminal state 与 PID/launch identity。postprocess 的
+strict-inspection cache、seal cache 和 public/private final record 均改为内容 SHA-256
+绑定；同尺寸且恢复原 mtime 的 API ledger、sidecar、source tree、archive 或 report
+变化均不得复用旧审计/封存结果，archive 内 symlink fail-closed。

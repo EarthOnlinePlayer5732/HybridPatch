@@ -136,8 +136,18 @@ def _real_generate(*a, **k):
     return g(*a, **k)
 
 
-def _require_formal_opencode_transport(model):
-    if not str(model).lower().startswith("minimax-m3"):
+def _require_formal_opencode_transport(model, reasoning_effort=None):
+    model_name = str(model).lower()
+    if model_name.startswith("deepseek-v4-"):
+        base_url = (os.environ.get("OPENAI_BASE_URL") or "").rstrip("/")
+        if (base_url == "https://opencode.ai/zen/go/v1"
+                and reasoning_effort != "high"):
+            raise RuntimeError(
+                "formal OpenCode Zen DeepSeek-V4 experiments require "
+                "reasoning_effort=high"
+            )
+        return
+    if not model_name.startswith("minimax-m3"):
         return
     transport = (os.environ.get("OPENCODE_TRANSPORT") or "anthropic_sdk_v2").strip()
     if transport != "anthropic_sdk_v2":
@@ -551,8 +561,8 @@ def _row(method, sample_id, sample_type, model, rid_chain, state_chain, rt_num,
 def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor=True,
               out_dir=RESULTS_DIR, model=MODEL_DEFAULT, max_tokens=None,
               generate_fn=None, printing=True, inline_report=False, fr_baseline=None,
-              stop_on_collapse=False):
-    _require_formal_opencode_transport(model)
+              stop_on_collapse=False, reasoning_effort=None):
+    _require_formal_opencode_transport(model, reasoning_effort)
     if max_tokens is None and not str(model).lower().startswith("minimax-m3"):
         max_tokens = 20000
     random.seed(seed)
@@ -564,6 +574,14 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
         generate_fn = api_recorder.generate
     else:
         generate_fn = base_generate_fn
+    if reasoning_effort is not None:
+        unconfigured_generate = generate_fn
+
+        def generate_with_reasoning(*args, **kwargs):
+            kwargs.setdefault("reasoning_effort", reasoning_effort)
+            return unconfigured_generate(*args, **kwargs)
+
+        generate_fn = generate_with_reasoning
     sample, sample_folder, id2state = load_sample(sample_id, samples_folder=os.path.join(SAMPLES_ROOT, ""))
     sample_type = sample["sample_type"]
     domain = get_domain(sample_type)
@@ -768,6 +786,12 @@ def main():
     ap.add_argument("--skip_distractor", action="store_true")
     ap.add_argument("--out_dir", default=RESULTS_DIR)
     ap.add_argument("--model", default=MODEL_DEFAULT)
+    ap.add_argument(
+        "--reasoning_effort",
+        choices=("low", "medium", "high"),
+        default=None,
+        help="Required as high for OpenCode Zen DeepSeek-V4 transport /6.",
+    )
     ap.add_argument("--max_tokens", type=int, default=None,
                     help="MiniMax default/ceiling is 131072; 0 selects that default. "
                          "Other models default to 20000.")
@@ -786,7 +810,7 @@ def main():
         args.max_tokens = None  # MiniMax model layer substitutes 131072.
     elif args.max_tokens is None and not str(args.model).lower().startswith("minimax-m3"):
         args.max_tokens = 20000
-    _require_formal_opencode_transport(args.model)
+    _require_formal_opencode_transport(args.model, args.reasoning_effort)
 
     fr_baseline = None
     if args.fr_baseline and os.path.exists(args.fr_baseline):
@@ -806,6 +830,7 @@ def main():
                 run_relay(method, sample_id, num_round_trips=args.num_round_trips, seed=args.seed,
                           include_distractor=not args.skip_distractor, out_dir=args.out_dir,
                           model=args.model, max_tokens=args.max_tokens,
+                          reasoning_effort=args.reasoning_effort,
                           inline_report=args.inline_report, fr_baseline=fr_baseline,
                           stop_on_collapse=args.stop_on_collapse)
             except Exception as e:
