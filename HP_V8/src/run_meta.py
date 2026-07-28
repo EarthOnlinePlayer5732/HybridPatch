@@ -72,6 +72,9 @@ DISPATCHER_PROCESS_LOST_RECOVERY_KIND = "dispatcher_process_lost"
 DISPATCHER_PARENT_LOSS_PENDING_FILENAME = (
     "dispatcher_parent_loss_recovery_pending.json"
 )
+DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME = (
+    "deepseek_transport_inspector_recovery_pending.json"
+)
 _GIT_IDENTITY_RECOVERY_CHANGED_PATHS = {
     ".gitignore",
     "HP_V8/VERSION.md",
@@ -96,6 +99,16 @@ _DEEPSEEK_TRANSPORT_DISCONNECT_RECOVERY_CHANGED_PATHS = {
     "transport/src/model_openai.py",
     "transport/src/test_model_openai.py",
 }
+_DEEPSEEK_TRANSPORT_INSPECTOR_STOP_ERROR = (
+    "campaign preflight failed before worker launch: "
+    "DeepSeek API response incomplete at row 760; "
+    "DeepSeek API response incomplete at row 778; "
+    "DeepSeek raw request transport audit failed at row 760; "
+    "DeepSeek raw request transport audit failed at row 778; "
+    "DeepSeek retry evidence invalid at row 760; "
+    "DeepSeek retry evidence invalid at row 778; "
+    "DeepSeek transport sidecar invalid at row 778"
+)
 
 
 class CampaignStoppedError(RuntimeError):
@@ -2932,6 +2945,307 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
+def _file_prefix_matches(path, evidence):
+    if (not isinstance(evidence, dict)
+            or not isinstance(evidence.get("byte_count"), int)
+            or isinstance(evidence.get("byte_count"), bool)
+            or evidence["byte_count"] <= 0
+            or not isinstance(evidence.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", evidence["sha256"])):
+        return False
+    remaining = evidence["byte_count"]
+    digest = hashlib.sha256()
+    try:
+        with open(path, "rb") as handle:
+            while remaining:
+                chunk = handle.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    return False
+                digest.update(chunk)
+                remaining -= len(chunk)
+    except OSError:
+        return False
+    return digest.hexdigest() == evidence["sha256"]
+
+
+def _jsonl_first_suffix_record_matches(path, evidence, expected_record):
+    if not _file_prefix_matches(path, evidence):
+        return False
+    expected = (
+        json.dumps(
+            expected_record, ensure_ascii=False).encode("utf-8")
+        + b"\n"
+    )
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(evidence["byte_count"])
+            tail = handle.read()
+    except OSError:
+        return False
+    return tail.startswith(expected)
+
+
+def _deepseek_initial_recovery_witness_matches(
+        out_dir, record, authorization_sha256):
+    prefixes = record.get(
+        "deepseek_transport_disconnect_initial_prefixes")
+    if (not isinstance(prefixes, dict)
+            or set(prefixes) != {"dispatch_log.jsonl"}):
+        return False
+    expected = {
+        "event": (
+            "user_authorized_deepseek_transport_disconnect_retry_recovery"),
+        "created_at": record.get("created_at"),
+        "campaign_recovery_authorization_id": record.get(
+            "authorization_id"),
+        "campaign_recovery_authorization_sha256": authorization_sha256,
+        "deepseek_transport_disconnect_retry_samples": record.get(
+            "deepseek_transport_disconnect_retry_samples"),
+        "incident_api_rows": len(record.get("incident_api_rows") or []),
+        "prior_git_commit": record.get("prior_git_commit"),
+        "recovery_git_commit": record.get("recovery_git_commit"),
+    }
+    rows = [
+        row for row in _read_jsonl_records_with_retry(
+            os.path.join(out_dir, "dispatch_log.jsonl"))
+        if row.get("event") == expected["event"]
+        and row.get("campaign_recovery_authorization_id")
+        == record.get("authorization_id")
+    ]
+    return (
+        len(rows) == 1
+        and rows[0] == expected
+        and _jsonl_first_suffix_record_matches(
+            os.path.join(out_dir, "dispatch_log.jsonl"),
+            prefixes["dispatch_log.jsonl"],
+            expected,
+        )
+    )
+
+
+def _run_metadata_recovery_identity(record):
+    """Hash immutable metadata fields across a controlled campaign resume."""
+    if not isinstance(record, dict):
+        raise RuntimeError("run metadata recovery row is invalid")
+    identity = dict(record)
+    identity.pop("finished_at", None)
+    identity.pop("task_plans", None)
+    return _canonical_record_sha256(identity)
+
+
+def _run_metadata_recovery_identities(path):
+    rows = _read_jsonl_records_with_retry(path)
+    if not rows:
+        raise RuntimeError("run metadata recovery evidence is empty")
+    return [
+        {
+            "row_number": number,
+            "canonical_sha256": _run_metadata_recovery_identity(row),
+            "task_plans": json.loads(json.dumps(
+                row.get("task_plans") or {})),
+        }
+        for number, row in enumerate(rows, 1)
+    ]
+
+
+def _run_metadata_recovery_prefix_matches(path, identities):
+    if not isinstance(identities, list) or not identities:
+        return False
+    try:
+        rows = _read_jsonl_records_with_retry(path)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    if len(rows) < len(identities):
+        return False
+    try:
+        with open(
+                os.path.join(
+                    os.path.dirname(path), "dispatch_manifest.json"),
+                encoding="utf-8",
+        ) as handle:
+            dispatch_manifest = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    target_round_trips = (
+        (dispatch_manifest.get("config") or {}).get(
+            "num_round_trips")
+        if isinstance(dispatch_manifest, dict) else None
+    )
+    manifest_task_plans = (
+        dispatch_manifest.get("task_plans") or {}
+        if isinstance(dispatch_manifest, dict) else {}
+    )
+    expected_task_plans = {
+        sample: {
+            "sha256": plan.get("sha256"),
+            "round_trips": target_round_trips,
+        }
+        for sample, plan in manifest_task_plans.items()
+        if isinstance(sample, str) and isinstance(plan, dict)
+    }
+    shared_task_plans = rows[0].get("task_plans") or {}
+    if (not isinstance(shared_task_plans, dict)
+            or any(
+                (row.get("task_plans") or {}) != shared_task_plans
+                for row in rows
+            )
+            or any(
+                expected_task_plans.get(sample) != plan
+                for sample, plan in shared_task_plans.items()
+            )):
+        return False
+    statuses = [row.get("status") for row in rows]
+    finished_values = [row.get("finished_at") for row in rows]
+    if "running" in statuses:
+        if any(value is not None for value in finished_values):
+            return False
+    else:
+        if (not finished_values
+                or not isinstance(finished_values[0], str)
+                or not finished_values[0]
+                or any(
+                    value != finished_values[0]
+                    for value in finished_values
+                )):
+            return False
+        try:
+            shared_finished = datetime.fromisoformat(finished_values[0])
+            invocation_finished = [
+                datetime.fromisoformat(row["invocation_finished_at"])
+                for row in rows
+            ]
+        except (KeyError, TypeError, ValueError):
+            return False
+        if (shared_finished.tzinfo is None
+                or shared_finished.utcoffset() is None
+                or any(
+                    value.tzinfo is None or value.utcoffset() is None
+                    for value in invocation_finished
+                )
+                or shared_finished != max(invocation_finished)):
+            return False
+    for number, (entry, row) in enumerate(
+            zip(identities, rows), 1):
+        prior_task_plans = (
+            entry.get("task_plans")
+            if isinstance(entry, dict) else None
+        )
+        if (not isinstance(entry, dict)
+                or entry.get("row_number") != number
+                or not isinstance(entry.get("canonical_sha256"), str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", entry["canonical_sha256"])
+                or _run_metadata_recovery_identity(row)
+                != entry["canonical_sha256"]
+                or not isinstance(prior_task_plans, dict)
+                or any(
+                    shared_task_plans.get(sample) != plan
+                    for sample, plan in prior_task_plans.items()
+                )):
+            return False
+    return True
+
+
+def _deepseek_dispatcher_stopped_sidecar_evidence(out_dir, api_row):
+    """Bind the exact partial stream hidden by a dispatcher-stop API row."""
+    out_dir = os.path.realpath(os.path.abspath(out_dir))
+    if not isinstance(api_row, dict):
+        raise RuntimeError(
+            "DeepSeek dispatcher-stop transport evidence is invalid")
+    raw_path = api_row.get("raw_sse_saved_path")
+    if not isinstance(raw_path, str) or not raw_path:
+        raise RuntimeError(
+            "DeepSeek dispatcher-stop transport sidecar is missing")
+    path = os.path.realpath(raw_path)
+    try:
+        inside = os.path.commonpath([out_dir, path]) == out_dir
+    except ValueError:
+        inside = False
+    if not inside or not os.path.isfile(path):
+        raise RuntimeError(
+            "DeepSeek dispatcher-stop transport sidecar is invalid")
+    rows = _read_jsonl_records_with_retry(path)
+    starts = [
+        row for row in rows
+        if row.get("record_type") == "attempt_start"
+    ]
+    stream_events = [
+        row for row in rows
+        if row.get("record_type") == "sdk_stream_event"
+    ]
+    end_rows = [
+        row for row in rows
+        if row.get("record_type") == "attempt_end"
+    ]
+    expected_linkage = {
+        "transport_event_schema": "anchorpatch.transport_event/1",
+        "call_id": api_row.get("request_id"),
+        "worker_launch_id": api_row.get("worker_launch_id"),
+        "sample": api_row.get("sample"),
+        "method": api_row.get("method"),
+        "rt_index": api_row.get("rt_index"),
+        "direction": api_row.get("direction"),
+        "attempt_index": 1,
+    }
+    attempt = (
+        end_rows[0].get("attempt")
+        if len(end_rows) == 1 else None
+    )
+    if (len(rows) < 3
+            or len(starts) != 1
+            or len(stream_events) < 1
+            or len(end_rows) != 1
+            or rows[0] is not starts[0]
+            or rows[-1] is not end_rows[0]
+            or any(
+                row.get("record_type") not in {
+                    "attempt_start", "sdk_stream_event", "attempt_end"}
+                or any(
+                    row.get(key) != value
+                    for key, value in expected_linkage.items()
+                )
+                for row in rows
+            )
+            or not isinstance(attempt, dict)
+            or any(
+                attempt.get(key) != value
+                for key, value in {
+                    "attempt_index": 1,
+                    "status": "retryable_error",
+                    "http_status": 200,
+                    "error_type": "incomplete_stream",
+                    "error_message": (
+                        "OpenAI-compatible stream ended without "
+                        "finish_reason and final_usage"
+                    ),
+                    "response_started_http_status": 200,
+                    "stream_complete": False,
+                    "message_start_seen": True,
+                    "message_stop_seen": False,
+                    "final_usage_seen": False,
+                    "generation_delta_seen": True,
+                    "terminal_sequence_valid": False,
+                    "retry_budget_consumed": True,
+                    "retry_budget_attempt_index": 1,
+                }.items()
+            )):
+        raise RuntimeError(
+            "DeepSeek dispatcher-stop partial stream shape is invalid")
+    return {
+        "api_row_sha256": _canonical_record_sha256(api_row),
+        "request_id": api_row.get("request_id"),
+        "incident_kind": (
+            "deepseek_dispatcher_stopped_uncommitted_api"),
+        "path": os.path.relpath(path, out_dir).replace("\\", "/"),
+        "sha256": _sha256_file(path),
+        "event_count": len(rows),
+        "attempt_start_count": 1,
+        "sdk_stream_event_count": len(stream_events),
+        "attempt_end_count": 1,
+        "attempt_end_sha256": _canonical_record_sha256(end_rows[0]),
+    }
+
+
 def _load_recovery_authorization_chain(out_dir, path, record):
     """Load the exact V2 authorization chain pinned by nested SHA-256 links."""
     history = []
@@ -3025,13 +3339,18 @@ def read_campaign_recovery_authorization(
         allow_pending_transaction=False):
     """Validate a narrow, append-only campaign recovery boundary."""
     out_dir = os.path.abspath(out_dir)
-    pending_path = os.path.join(
-        out_dir, DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
-    if os.path.isfile(pending_path) and not allow_pending_transaction:
+    pending_paths = [
+        os.path.join(out_dir, name)
+        for name in (
+            DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
+            DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
+        )
+    ]
+    if (any(os.path.isfile(path) for path in pending_paths)
+            and not allow_pending_transaction):
         raise RuntimeError(
-            "dispatcher parent-loss recovery transaction is pending; "
-            "rerun authorize_ledger_lock_recovery.py "
-            "--dispatcher_process_lost before resume"
+            "campaign recovery transaction is pending; rerun the matching "
+            "authorize_ledger_lock_recovery.py mode before resume"
         )
     path = os.path.join(out_dir, CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME)
     if not os.path.exists(path):
@@ -3085,6 +3404,30 @@ def read_campaign_recovery_authorization(
         raise RuntimeError("campaign recovery prior identity mismatch")
 
     archived_relative = record.get("archived_stop_path")
+    if record.get(
+            "deepseek_transport_disconnect_inspector_followup_recovery"
+            ) is True:
+        authorization_id = record.get("authorization_id")
+        if (not isinstance(authorization_id, str)
+                or not authorization_id
+                or authorization_id in {".", ".."}
+                or "/" in authorization_id
+                or "\\" in authorization_id):
+            raise RuntimeError(
+                "DeepSeek inspector recovery authorization id is invalid")
+        expected_history_relative = (
+            "recovery_history/" + authorization_id)
+        expected_superseded_relative = (
+            expected_history_relative
+            + "/superseded_campaign_recovery_authorization.json"
+        )
+        expected_stop_relative = (
+            expected_history_relative + "/campaign_stop.json")
+        if (record.get("superseded_authorization_path")
+                != expected_superseded_relative
+                or archived_relative != expected_stop_relative):
+            raise RuntimeError(
+                "DeepSeek inspector recovery archive path mismatch")
     if not isinstance(archived_relative, str) or not archived_relative:
         raise RuntimeError("campaign recovery archived stop path is invalid")
     archived_path = os.path.realpath(os.path.join(out_dir, archived_relative))
@@ -3165,11 +3508,8 @@ def read_campaign_recovery_authorization(
             and isinstance(record.get("deepseek_server_retry_samples"), list)
             and bool(record.get("deepseek_server_retry_samples"))
         )
-        deepseek_transport_disconnect_retry_recovery = (
-            record.get(
-                "deepseek_transport_disconnect_retry_recovery") is True
-            and record.get("authorization_basis")
-            == (
+        deepseek_transport_disconnect_initial_stop = (
+            record.get("authorization_basis") == (
                 "explicit_user_resume_after_deepseek_transport_disconnect_"
                 "classifier_fix"
             )
@@ -3185,6 +3525,47 @@ def read_campaign_recovery_authorization(
             and record.get(
                 "deepseek_transport_disconnect_retry_worker_launch_id")
             == archived_stop.get("worker_launch_id")
+        )
+        deepseek_transport_disconnect_inspector_followup_stop = (
+            record.get(
+                "deepseek_transport_disconnect_inspector_followup_recovery")
+            is True
+            and record.get("authorization_basis")
+            == (
+                "explicit_user_resume_after_deepseek_recovery_inspector_fix"
+            )
+            and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition")
+            == "dispatcher_integrity_failure"
+            and archived_stop.get("worker_launch_id") is None
+            and isinstance(archived_stop.get("worker_pid"), int)
+            and not isinstance(archived_stop.get("worker_pid"), bool)
+            and archived_stop.get("worker_pid") > 0
+            and archived_stop.get("error_type") == "RuntimeError"
+            and archived_stop.get("error")
+            == _DEEPSEEK_TRANSPORT_INSPECTOR_STOP_ERROR
+            and isinstance(record.get("superseded_authorization_path"), str)
+            and bool(record.get("superseded_authorization_path"))
+            and isinstance(
+                record.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_authorization_id"),
+                str,
+            )
+            and isinstance(
+                record.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_authorization_sha256"),
+                str,
+            )
+        )
+        deepseek_transport_disconnect_retry_recovery = (
+            record.get(
+                "deepseek_transport_disconnect_retry_recovery") is True
+            and (
+                deepseek_transport_disconnect_initial_stop
+                or deepseek_transport_disconnect_inspector_followup_stop
+            )
         )
         dispatcher_process_lost_stop = (
             dispatcher_process_lost_recovery
@@ -3241,6 +3622,201 @@ def read_campaign_recovery_authorization(
             or current_fingerprint
             != record.get("recovery_code_fingerprint")):
         raise RuntimeError("campaign recovery current identity mismatch")
+    if (record.get(
+            "deepseek_transport_disconnect_initial_transaction") is True
+            and record.get(
+                "deepseek_transport_disconnect_"
+                "inspector_followup_recovery") is not True
+            and not _deepseek_initial_recovery_witness_matches(
+                out_dir, record, _sha256_file(path))):
+        raise RuntimeError(
+            "DeepSeek initial transport recovery dispatch witness "
+            "mismatch"
+        )
+    if record.get(
+            "deepseek_transport_disconnect_inspector_followup_recovery"
+            ) is True:
+        if len(recovery_chain) < 2:
+            raise RuntimeError(
+                "DeepSeek inspector follow-up authorization chain is "
+                "incomplete"
+            )
+        superseded_item = recovery_chain[1]
+        superseded = superseded_item["record"]
+        prior_recovery_commit = superseded.get("recovery_git_commit")
+        prior_recovery_fingerprint = superseded.get(
+            "recovery_code_fingerprint")
+        if (superseded.get(
+                "deepseek_transport_disconnect_retry_recovery") is not True
+                or superseded.get(
+                    "deepseek_transport_disconnect_"
+                    "inspector_followup_recovery") is not None
+                or superseded.get("authorization_basis")
+                != (
+                    "explicit_user_resume_after_deepseek_transport_"
+                    "disconnect_classifier_fix"
+                )
+                or superseded.get("authorization_id")
+                != record.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_authorization_id")
+                or superseded_item["sha256"]
+                != record.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_authorization_sha256")
+                or prior_recovery_commit
+                != record.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_recovery_git_commit")
+                or not isinstance(prior_recovery_fingerprint, dict)):
+            raise RuntimeError(
+                "DeepSeek inspector follow-up superseded authorization "
+                "mismatch"
+            )
+        if (superseded.get(
+                "deepseek_transport_disconnect_initial_transaction")
+                is True
+                and not _deepseek_initial_recovery_witness_matches(
+                    out_dir, superseded, superseded_item["sha256"])):
+            raise RuntimeError(
+                "DeepSeek inspector superseded authorization witness "
+                "mismatch"
+            )
+        superseded_stop_relative = superseded.get("archived_stop_path")
+        if (not isinstance(superseded_stop_relative, str)
+                or not superseded_stop_relative):
+            raise RuntimeError(
+                "DeepSeek inspector superseded stop evidence is invalid")
+        superseded_stop_path = os.path.realpath(os.path.join(
+            out_dir, superseded_stop_relative))
+        try:
+            superseded_stop_inside = (
+                os.path.commonpath([out_dir, superseded_stop_path])
+                == out_dir
+            )
+        except ValueError:
+            superseded_stop_inside = False
+        if (not superseded_stop_inside
+                or not os.path.isfile(superseded_stop_path)
+                or _sha256_file(superseded_stop_path)
+                != superseded.get("archived_stop_sha256")):
+            raise RuntimeError(
+                "DeepSeek inspector superseded stop digest mismatch")
+        try:
+            with open(
+                    superseded_stop_path, encoding="utf-8") as handle:
+                superseded_stop = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "DeepSeek inspector superseded stop is invalid") from exc
+        if (not isinstance(superseded_stop, dict)
+                or superseded_stop.get("schema")
+                != STOP_CONDITION_SCHEMA
+                or superseded_stop.get("condition")
+                != "worker_fatal_error"
+                or superseded_stop.get("error_type")
+                != "OpenAICompatibleTransportError"
+                or superseded_stop.get("error")
+                != "OpenAI-compatible provider failed after 1 attempt(s)"
+                or superseded.get(
+                    "deepseek_transport_disconnect_retry_samples")
+                != [superseded_stop.get("sample")]
+                or superseded.get(
+                    "deepseek_transport_disconnect_retry_worker_launch_id")
+                != superseded_stop.get("worker_launch_id")):
+            raise RuntimeError(
+                "DeepSeek inspector superseded stop scope mismatch")
+        try:
+            delta_changed = subprocess.run(
+                [
+                    "git", "-C", _HERE, "diff", "--name-only",
+                    prior_recovery_commit, current_commit, "--",
+                ],
+                check=True, capture_output=True, text=True,
+                encoding="utf-8",
+            ).stdout.splitlines()
+        except (OSError, subprocess.CalledProcessError) as exc:
+            raise RuntimeError(
+                "cannot audit DeepSeek inspector follow-up Git diff"
+            ) from exc
+        delta_changed = sorted(
+            item.replace("\\", "/") for item in delta_changed if item)
+        expected_delta_paths = {
+            "HP_V8/src/authorize_ledger_lock_recovery.py",
+            "HP_V8/src/paired_campaign_dispatch.py",
+            "HP_V8/src/run_meta.py",
+            "HP_V8/src/test_model_openai.py",
+        }
+        delta_fingerprint_changes = sorted(
+            key for key in set(prior_recovery_fingerprint) | set(
+                current_fingerprint)
+            if prior_recovery_fingerprint.get(key)
+            != current_fingerprint.get(key)
+        )
+        if (set(delta_changed) != expected_delta_paths
+                or delta_changed != record.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "delta_changed_paths")
+                or delta_fingerprint_changes != ["run_meta.py"]):
+            raise RuntimeError(
+                "DeepSeek inspector follow-up code scope mismatch")
+        prefixes = record.get(
+            "deepseek_transport_disconnect_inspector_prefixes")
+        expected_prefix_names = {
+            "api_calls.jsonl",
+            "dispatch_log.jsonl",
+        }
+        if (not isinstance(prefixes, dict)
+                or set(prefixes) != expected_prefix_names
+                or any(
+                    not _file_prefix_matches(
+                        os.path.join(out_dir, name), prefixes[name])
+                    for name in expected_prefix_names
+                )):
+            raise RuntimeError(
+                "DeepSeek inspector follow-up evidence prefix mismatch")
+        metadata_identities = record.get(
+            "deepseek_transport_disconnect_inspector_"
+            "run_metadata_identities"
+        )
+        if not _run_metadata_recovery_prefix_matches(
+                os.path.join(out_dir, "run_metadata.jsonl"),
+                metadata_identities):
+            raise RuntimeError(
+                "DeepSeek inspector follow-up run metadata identity "
+                "mismatch"
+            )
+        current_authorization_sha256 = _sha256_file(path)
+        expected_witness = {
+            "event": (
+                "user_authorized_deepseek_transport_inspector_followup"),
+            "created_at": record.get("created_at"),
+            "campaign_recovery_authorization_id": record.get(
+                "authorization_id"),
+            "campaign_recovery_authorization_sha256": (
+                current_authorization_sha256),
+            "superseded_authorization_id": superseded.get(
+                "authorization_id"),
+            "incident_api_rows": len(record.get("incident_api_rows") or []),
+            "prior_recovery_git_commit": prior_recovery_commit,
+            "recovery_git_commit": current_commit,
+        }
+        witness_rows = [
+            row for row in _read_jsonl_records_with_retry(
+                os.path.join(out_dir, "dispatch_log.jsonl"))
+            if row.get("event")
+            == "user_authorized_deepseek_transport_inspector_followup"
+            and row.get("campaign_recovery_authorization_id")
+            == record.get("authorization_id")
+        ]
+        if (len(witness_rows) != 1
+                or witness_rows[0] != expected_witness
+                or not _jsonl_first_suffix_record_matches(
+                    os.path.join(out_dir, "dispatch_log.jsonl"),
+                    prefixes["dispatch_log.jsonl"],
+                    expected_witness)):
+            raise RuntimeError(
+                "DeepSeek inspector follow-up dispatch witness mismatch")
     prior_fingerprint = record.get("prior_code_fingerprint")
     if not isinstance(prior_fingerprint, dict):
         raise RuntimeError("campaign recovery prior fingerprint is invalid")
@@ -3406,6 +3982,29 @@ def read_campaign_recovery_authorization(
                             result_path):
                         committed_call_ids.update(
                             result_row.get("api_call_ids") or [])
+            sidecar_entries = record.get(
+                "incident_transport_sidecars", [])
+            if deepseek_transport_disconnect_retry:
+                dispatcher_stopped_rows = [
+                    row for entry, row in validated_api
+                    if entry.get("incident_kind")
+                    == "deepseek_dispatcher_stopped_uncommitted_api"
+                ]
+                if (len(dispatcher_stopped_rows) != 1
+                        or not isinstance(sidecar_entries, list)
+                        or len(sidecar_entries) != 1
+                        or sidecar_entries[0]
+                        != _deepseek_dispatcher_stopped_sidecar_evidence(
+                            out_dir, dispatcher_stopped_rows[0])):
+                    raise RuntimeError(
+                        "campaign DeepSeek dispatcher-stop transport "
+                        "evidence is invalid"
+                    )
+            elif sidecar_entries:
+                raise RuntimeError(
+                    "campaign DeepSeek server retry transport evidence "
+                    "is invalid"
+                )
             observed_retry_samples = set()
             for entry, row in validated_api:
                 attempts = row.get("transport_attempts")
@@ -4838,6 +5437,7 @@ def campaign_recovery_incident_evidence(out_dir):
             "api_incident_kinds": {},
             "attempt_row_hashes": frozenset(),
             "transport_sidecar_hashes": frozenset(),
+            "transport_sidecars_by_api_row_hash": {},
             "worker_launch_ids": frozenset(),
             "preauthorization_worker_launch_ids": frozenset(),
             "provider_access_retry_authorizations": {},
@@ -4868,6 +5468,12 @@ def campaign_recovery_incident_evidence(out_dir):
             for item in authorization.get(
                 "incident_transport_sidecars", [])
         }),
+        "transport_sidecars_by_api_row_hash": {
+            item["api_row_sha256"]: dict(item)
+            for item in authorization.get(
+                "incident_transport_sidecars", [])
+            if isinstance(item.get("api_row_sha256"), str)
+        },
         "worker_launch_ids": frozenset(
             authorization["recovered_worker_launch_ids"]),
         "preauthorization_worker_launch_ids": frozenset(

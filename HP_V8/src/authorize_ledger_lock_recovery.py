@@ -35,6 +35,7 @@ from paired_campaign_dispatch import (
 from run_meta import (
     CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME,
     CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2,
+    DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
     DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
     DISPATCHER_PROCESS_LOST_RECOVERY_KIND,
     EMERGENCY_STOP_DIRECTORY,
@@ -42,9 +43,11 @@ from run_meta import (
     STOP_CONDITION_SCHEMA,
     _canonical_record_sha256,
     _campaign_stop_publication_lock,
+    _deepseek_dispatcher_stopped_sidecar_evidence,
     _git_identity,
     _git_identity_details,
     _sha256_file,
+    _run_metadata_recovery_identities,
     append_jsonl_locked,
     campaign_recovery_incident_evidence,
     code_fingerprint,
@@ -62,6 +65,19 @@ _DISPATCHER_PARENT_LOSS_PENDING_FILENAME = (
 )
 _DISPATCHER_PARENT_LOSS_PENDING_SCHEMA = (
     "anchorpatch.dispatcher_parent_loss_recovery/1"
+)
+_DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA = (
+    "anchorpatch.deepseek_transport_inspector_recovery/1"
+)
+_DEEPSEEK_TRANSPORT_INSPECTOR_STOP_ERROR = (
+    "campaign preflight failed before worker launch: "
+    "DeepSeek API response incomplete at row 760; "
+    "DeepSeek API response incomplete at row 778; "
+    "DeepSeek raw request transport audit failed at row 760; "
+    "DeepSeek raw request transport audit failed at row 778; "
+    "DeepSeek retry evidence invalid at row 760; "
+    "DeepSeek retry evidence invalid at row 778; "
+    "DeepSeek transport sidecar invalid at row 778"
 )
 
 
@@ -100,6 +116,88 @@ def _copy_file_durable(source, destination, *, allow_missing=False):
             raise FileNotFoundError(source)
         writer.flush()
         os.fsync(writer.fileno())
+
+
+def _ensure_bound_file_copy(source, destination, expected_sha256):
+    """Publish one byte-exact archive through a crash-recoverable temp file."""
+    if (not isinstance(expected_sha256, str)
+            or len(expected_sha256) != 64):
+        raise RuntimeError("recovery archive digest is invalid")
+    if os.path.isfile(destination):
+        if _sha256_file(destination) != expected_sha256:
+            raise RuntimeError("recovery archive destination digest mismatch")
+        return
+    if _sha256_file(source) != expected_sha256:
+        raise RuntimeError("recovery archive source digest mismatch")
+    temp_path = destination + ".pending-copy"
+    _unlink_with_sharing_retry(temp_path)
+    try:
+        with open(temp_path, "xb") as writer:
+            with open(source, "rb") as reader:
+                for chunk in iter(
+                        lambda: reader.read(1024 * 1024), b""):
+                    writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        if _sha256_file(temp_path) != expected_sha256:
+            raise RuntimeError("recovery archive temp digest mismatch")
+        _replace_with_sharing_retry(temp_path, destination)
+    finally:
+        _unlink_with_sharing_retry(temp_path)
+
+
+def _recoverable_jsonl_tail(handle, prefix_evidence, record):
+    if (not isinstance(prefix_evidence, dict)
+            or not isinstance(prefix_evidence.get("byte_count"), int)
+            or isinstance(prefix_evidence.get("byte_count"), bool)
+            or prefix_evidence["byte_count"] <= 0
+            or not isinstance(prefix_evidence.get("sha256"), str)
+            or len(prefix_evidence["sha256"]) != 64):
+        raise RuntimeError("recovery JSONL prefix evidence is invalid")
+    expected = (
+        json.dumps(record, ensure_ascii=False).encode("utf-8") + b"\n")
+    handle.seek(0)
+    prefix = handle.read(prefix_evidence["byte_count"])
+    if (len(prefix) != prefix_evidence["byte_count"]
+            or hashlib.sha256(prefix).hexdigest()
+            != prefix_evidence["sha256"]):
+        raise RuntimeError("recovery JSONL prefix has drifted")
+    tail = handle.read()
+    if not expected.startswith(tail):
+        raise RuntimeError("recovery JSONL tail conflicts")
+    return expected, tail
+
+
+def _assert_recoverable_jsonl_tail(path, prefix_evidence, record):
+    """Verify one pending-bound JSONL event before any recovery mutation."""
+    with portalocker.Lock(
+            path,
+            mode="r+b",
+            timeout=60,
+            check_interval=0.05,
+            flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+    ) as handle:
+        _recoverable_jsonl_tail(handle, prefix_evidence, record)
+
+
+def _append_recoverable_jsonl_tail(path, prefix_evidence, record):
+    """Repair only an exact partial copy of one pending-bound JSONL event."""
+    with portalocker.Lock(
+            path,
+            mode="r+b",
+            timeout=60,
+            check_interval=0.05,
+            flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+    ) as handle:
+        expected, tail = _recoverable_jsonl_tail(
+            handle, prefix_evidence, record)
+        if tail == expected:
+            return
+        handle.seek(prefix_evidence["byte_count"])
+        handle.truncate()
+        handle.write(expected)
+        handle.flush()
+        os.fsync(handle.fileno())
 
 
 def _write_json_no_replace(path, record):
@@ -220,6 +318,21 @@ def _read_jsonl(path):
                 raise RuntimeError(f"non-object JSONL at {path}:{number}")
             rows.append(row)
     return rows
+
+
+def _file_prefix_evidence(path):
+    size = os.path.getsize(path)
+    if size <= 0:
+        raise RuntimeError(f"recovery evidence file is empty: {path}")
+    with open(path, "rb") as handle:
+        handle.seek(-1, os.SEEK_END)
+        if handle.read(1) != b"\n":
+            raise RuntimeError(
+                f"recovery evidence file lacks a terminal newline: {path}")
+    return {
+        "byte_count": size,
+        "sha256": _sha256_file(path),
+    }
 
 
 def _git_changed_paths(prior_commit, recovery_commit):
@@ -2265,12 +2378,155 @@ def _authorize_deepseek_server_retry(
     }
 
 
+def _commit_deepseek_transport_disconnect_initial(
+        out_dir, manifest, stop_path, auth_path, record):
+    """Complete the initial recovery while its stop remains fail-closed."""
+    if (not isinstance(record, dict)
+            or record.get(
+                "deepseek_transport_disconnect_initial_transaction")
+            is not True
+            or record.get(
+                "deepseek_transport_disconnect_retry_recovery") is not True
+            or record.get(
+                "deepseek_transport_disconnect_"
+                "inspector_followup_recovery") is not None):
+        raise RuntimeError(
+            "DeepSeek initial transport recovery record is invalid")
+    manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+    current_commit, current_tree = _git_identity()
+    if (_sha256_file(manifest_path)
+            != record.get("dispatch_manifest_sha256")
+            or current_tree != "clean"
+            or current_commit != record.get("recovery_git_commit")
+            or code_fingerprint()
+            != record.get("recovery_code_fingerprint")):
+        raise RuntimeError(
+            "DeepSeek initial transport recovery identity has drifted")
+    active = _read_json(os.path.join(out_dir, "active_worker_set.json"))
+    if active.get("workers") != {}:
+        raise RuntimeError("workers are still active")
+    samples = record.get("deepseek_resume_samples")
+    if not isinstance(samples, list) or not samples:
+        raise RuntimeError(
+            "DeepSeek initial transport recovery sample scope is invalid")
+    _assert_worker_leases_free(out_dir, samples)
+
+    archived_relative = record.get("archived_stop_path")
+    if not isinstance(archived_relative, str) or not archived_relative:
+        raise RuntimeError(
+            "DeepSeek initial transport recovery archive is invalid")
+    archived_stop_path = os.path.realpath(os.path.join(
+        out_dir, archived_relative))
+    history_dir = os.path.dirname(archived_stop_path)
+    try:
+        archive_inside = (
+            os.path.commonpath([out_dir, archived_stop_path]) == out_dir)
+    except ValueError:
+        archive_inside = False
+    if (not archive_inside
+            or os.path.basename(archived_stop_path)
+            != "campaign_stop.json"):
+        raise RuntimeError(
+            "DeepSeek initial transport recovery archive is invalid")
+    os.makedirs(history_dir, exist_ok=True)
+    if set(os.listdir(history_dir)) - {
+            "campaign_stop.json", EMERGENCY_STOP_DIRECTORY}:
+        raise RuntimeError(
+            "DeepSeek initial transport recovery history contains "
+            "unexpected artifacts")
+
+    sidecar_entries = record.get("incident_transport_sidecars")
+    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    api_by_hash = {
+        _canonical_record_sha256(row): row for row in api_rows
+    }
+    if (not isinstance(sidecar_entries, list)
+            or len(sidecar_entries) != 1
+            or sidecar_entries[0].get("api_row_sha256")
+            not in api_by_hash
+            or sidecar_entries[0]
+            != _deepseek_dispatcher_stopped_sidecar_evidence(
+                out_dir,
+                api_by_hash[sidecar_entries[0]["api_row_sha256"]],
+            )):
+        raise RuntimeError(
+            "DeepSeek initial transport recovery sidecar has drifted")
+
+    existing_authorization = (
+        _read_json(auth_path) if os.path.isfile(auth_path) else None
+    )
+    if existing_authorization not in (None, record):
+        raise RuntimeError(
+            "DeepSeek initial transport recovery authorization has drifted")
+    if existing_authorization is None:
+        write_json_atomic(auth_path, record)
+    authorization_sha256 = _sha256_file(auth_path)
+    event = {
+        "event": (
+            "user_authorized_deepseek_transport_disconnect_retry_recovery"),
+        "created_at": record.get("created_at"),
+        "campaign_recovery_authorization_id": record["authorization_id"],
+        "campaign_recovery_authorization_sha256": authorization_sha256,
+        "deepseek_transport_disconnect_retry_samples": record[
+            "deepseek_transport_disconnect_retry_samples"],
+        "incident_api_rows": len(record["incident_api_rows"]),
+        "prior_git_commit": record.get("prior_git_commit"),
+        "recovery_git_commit": record.get("recovery_git_commit"),
+    }
+    dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+    dispatch_prefix = (
+        record.get(
+            "deepseek_transport_disconnect_initial_prefixes") or {}
+    ).get("dispatch_log.jsonl")
+    _append_recoverable_jsonl_tail(
+        dispatch_path, dispatch_prefix, event)
+    matches = [
+        row for row in _read_jsonl(dispatch_path)
+        if row.get("event") == event["event"]
+        and row.get("campaign_recovery_authorization_id")
+        == record["authorization_id"]
+    ]
+    if len(matches) != 1 or matches[0] != event:
+        raise RuntimeError(
+            "DeepSeek initial transport recovery event has drifted")
+
+    archived_stop, archived_emergency = _archive_campaign_stop_cohort(
+        out_dir, stop_path, history_dir)
+    if (_sha256_file(archived_stop)
+            != record.get("archived_stop_sha256")
+            or os.path.realpath(archived_stop) != archived_stop_path
+            or archived_emergency
+            != record.get("archived_emergency_stop_records")):
+        raise RuntimeError(
+            "DeepSeek initial transport recovery stop has drifted")
+    campaign_recovery_incident_evidence.cache_clear()
+    verified = read_campaign_recovery_authorization(out_dir)
+    return {
+        "authorization_id": record["authorization_id"],
+        "authorization_sha256": verified["authorization_sha256"],
+        "deepseek_transport_disconnect_retry_samples": record[
+            "deepseek_transport_disconnect_retry_samples"],
+        "incident_api_rows": len(record["incident_api_rows"]),
+        "recovered_workers": len(record["recovered_worker_launch_ids"]),
+        "pending_samples": len(record["deepseek_pending_samples"]),
+    }
+
+
 def _authorize_deepseek_transport_disconnect_retry(
         out_dir, manifest, stop, stop_path, auth_path, prior_authorization):
     """Authorize this campaign's exact pre-generation disconnect replay."""
+    if prior_authorization is not None:
+        if (prior_authorization.get(
+                "deepseek_transport_disconnect_initial_transaction") is True
+                and stop.get("condition") == "worker_fatal_error"):
+            return _commit_deepseek_transport_disconnect_initial(
+                out_dir, manifest, stop_path, auth_path,
+                prior_authorization)
+        return _authorize_deepseek_transport_inspector_followup(
+            out_dir, manifest, stop, stop_path, auth_path,
+            prior_authorization)
     config = manifest.get("config") or {}
-    if (prior_authorization is not None
-            or config.get("campaign_role") != "deepseek_full234"
+    if (config.get("campaign_role") != "deepseek_full234"
             or config.get("num_round_trips")
             != DEEPSEEK_FULL234_ROUND_TRIPS
             or config.get("transport") != DEEPSEEK_TRANSPORT
@@ -2388,29 +2644,48 @@ def _authorize_deepseek_transport_disconnect_retry(
         + datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
         + "-" + uuid.uuid4().hex[:8]
     )
+    created_at = datetime.now().astimezone().isoformat(
+        timespec="seconds")
     history_dir = os.path.join(
         out_dir, "recovery_history", authorization_id)
-    os.makedirs(history_dir, exist_ok=False)
-    archived_stop, _archived_emergency = (
-        _archive_campaign_stop_cohort(
-            out_dir, stop_path, history_dir))
+    archived_stop = os.path.join(history_dir, "campaign_stop.json")
+    emergency_dir = os.path.join(out_dir, EMERGENCY_STOP_DIRECTORY)
+    emergency_names = (
+        sorted(
+            name for name in os.listdir(emergency_dir)
+            if name.endswith(".json"))
+        if os.path.isdir(emergency_dir) else []
+    )
+    if emergency_names:
+        raise RuntimeError(
+            "DeepSeek transport-disconnect recovery requires one canonical "
+            "stop latch")
 
     worker_ids = sorted(recovered_by_id)
     dispatcher_stopped_hashes = {
         _canonical_record_sha256(row)
         for _number, row in dispatcher_stopped_rows
     }
+    incident_transport_sidecars = [
+        _deepseek_dispatcher_stopped_sidecar_evidence(out_dir, row)
+        for _number, row in dispatcher_stopped_rows
+    ]
+    initial_prefixes = {
+        "dispatch_log.jsonl": _file_prefix_evidence(os.path.join(
+            out_dir, "dispatch_log.jsonl")),
+    }
     record = {
         "schema": CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2,
         "authorization_id": authorization_id,
         "recovery_kind": LEDGER_LOCK_RECOVERY_KIND,
-        "created_at": datetime.now().astimezone().isoformat(
-            timespec="seconds"),
+        "created_at": created_at,
         "authorization_basis": (
             "explicit_user_resume_after_deepseek_transport_disconnect_"
             "classifier_fix"
         ),
         "deepseek_transport_disconnect_retry_recovery": True,
+        "deepseek_transport_disconnect_initial_transaction": True,
+        "deepseek_transport_disconnect_initial_prefixes": initial_prefixes,
         "deepseek_transport_disconnect_retry_samples": [retry_sample],
         "deepseek_transport_disconnect_retry_worker_launch_id": (
             failure_row.get("worker_launch_id")),
@@ -2431,7 +2706,8 @@ def _authorize_deepseek_transport_disconnect_retry(
         "changed_tracked_paths": changed_paths,
         "archived_stop_path": os.path.relpath(
             archived_stop, out_dir).replace("\\", "/"),
-        "archived_stop_sha256": _sha256_file(archived_stop),
+        "archived_stop_sha256": _sha256_file(stop_path),
+        "archived_emergency_stop_records": [],
         "incident_api_rows": [
             _incident_entry(
                 number,
@@ -2450,36 +2726,551 @@ def _authorize_deepseek_transport_disconnect_retry(
             for number, row in scope["incident_api_rows"]
         ],
         "incident_attempt_rows": [],
+        "incident_transport_sidecars": incident_transport_sidecars,
         "recovered_worker_launch_ids": worker_ids,
         "preauthorization_worker_launch_ids": [],
         "committed_results_modified": False,
         "checkpoint_rows_modified": False,
         "provider_post_replay_scope": "uncommitted_steps_only",
     }
-    write_json_atomic(auth_path, record)
-    campaign_recovery_incident_evidence.cache_clear()
-    verified = read_campaign_recovery_authorization(out_dir)
-    append_jsonl_locked(os.path.join(out_dir, "dispatch_log.jsonl"), {
-        "event": (
-            "user_authorized_deepseek_transport_disconnect_retry_recovery"),
-        "created_at": datetime.now().astimezone().isoformat(
-            timespec="seconds"),
-        "campaign_recovery_authorization_id": authorization_id,
-        "campaign_recovery_authorization_sha256": verified[
-            "authorization_sha256"],
-        "deepseek_transport_disconnect_retry_samples": [retry_sample],
-        "incident_api_rows": len(scope["incident_api_rows"]),
-        "prior_git_commit": prior_commit,
-        "recovery_git_commit": current_commit,
-    })
-    return {
-        "authorization_id": authorization_id,
-        "authorization_sha256": verified["authorization_sha256"],
-        "deepseek_transport_disconnect_retry_samples": [retry_sample],
-        "incident_api_rows": len(scope["incident_api_rows"]),
-        "recovered_workers": len(worker_ids),
-        "pending_samples": len(scope["pending_samples"]),
+    return _commit_deepseek_transport_disconnect_initial(
+        out_dir, manifest, stop_path, auth_path, record)
+
+
+def _commit_deepseek_transport_inspector_followup(
+        out_dir, manifest, stop_path, auth_path, pending_path, pending):
+    """Finish one prepared inspector recovery; every step is idempotent."""
+    if (not isinstance(pending, dict)
+            or pending.get("schema")
+            != _DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA
+            or not isinstance(pending.get("authorization_record"), dict)):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending recovery is invalid")
+    record = pending["authorization_record"]
+    manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+    if (_sha256_file(manifest_path)
+            != record.get("dispatch_manifest_sha256")):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending manifest has drifted")
+    current_commit, current_tree = _git_identity()
+    if (current_tree != "clean"
+            or current_commit != record.get("recovery_git_commit")
+            or code_fingerprint()
+            != record.get("recovery_code_fingerprint")):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending identity has drifted")
+    active = _read_json(os.path.join(out_dir, "active_worker_set.json"))
+    if active.get("workers") != {}:
+        raise RuntimeError("workers are still active")
+    samples = record.get("deepseek_resume_samples")
+    if not isinstance(samples, list) or not samples:
+        raise RuntimeError(
+            "DeepSeek transport inspector pending sample scope is invalid")
+    _assert_worker_leases_free(out_dir, samples)
+    if (record.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or record.get("recovery_kind") != LEDGER_LOCK_RECOVERY_KIND
+            or record.get(
+                "deepseek_transport_disconnect_retry_recovery") is not True
+            or record.get(
+                "deepseek_transport_disconnect_"
+                "inspector_followup_recovery") is not True
+            or record.get("authorization_basis")
+            != (
+                "explicit_user_resume_after_deepseek_recovery_"
+                "inspector_fix"
+            )
+            or record.get("recovery_git_tree_state") != "clean"
+            or not isinstance(
+                record.get(
+                    "deepseek_transport_disconnect_retry_samples"), list)
+            or not record.get(
+                "deepseek_transport_disconnect_retry_samples")
+            or not isinstance(record.get("incident_api_rows"), list)
+            or not isinstance(
+                record.get("recovered_worker_launch_ids"), list)
+            or not isinstance(
+                record.get("deepseek_pending_samples"), list)
+            or record.get("archived_emergency_stop_records") != []
+            or not isinstance(
+                record.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_authorization_id"),
+                str,
+            )
+            or not record.get(
+                "deepseek_transport_disconnect_inspector_"
+                "prior_authorization_id")
+            or not isinstance(
+                record.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_recovery_git_commit"),
+                str,
+            )
+            or not record.get(
+                "deepseek_transport_disconnect_inspector_"
+                "prior_recovery_git_commit")):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending record is invalid")
+
+    history_relative = pending.get("history_dir")
+    authorization_id = record.get("authorization_id")
+    if (not isinstance(authorization_id, str)
+            or not authorization_id
+            or authorization_id in {".", ".."}
+            or "/" in authorization_id
+            or "\\" in authorization_id):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending authorization id is "
+            "invalid")
+    expected_history_relative = (
+        "recovery_history/" + authorization_id)
+    expected_superseded_relative = (
+        expected_history_relative
+        + "/superseded_campaign_recovery_authorization.json"
+    )
+    expected_stop_relative = (
+        expected_history_relative + "/campaign_stop.json")
+    if (pending.get("created_at") != record.get("created_at")
+            or not isinstance(record.get("created_at"), str)
+            or not record.get("created_at")
+            or history_relative != expected_history_relative
+            or record.get("superseded_authorization_path")
+            != expected_superseded_relative
+            or record.get("archived_stop_path")
+            != expected_stop_relative):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending archive path has drifted")
+    history_dir = os.path.realpath(os.path.join(
+        out_dir, history_relative))
+    superseded_path = os.path.realpath(os.path.join(
+        out_dir, expected_superseded_relative))
+    archived_stop_path = os.path.realpath(os.path.join(
+        out_dir, expected_stop_relative))
+    expected_history_dir = os.path.realpath(os.path.join(
+        out_dir, "recovery_history", authorization_id))
+    try:
+        history_inside = (
+            os.path.commonpath([out_dir, history_dir]) == out_dir
+            and history_dir == expected_history_dir
+            and os.path.dirname(superseded_path) == history_dir
+            and os.path.dirname(archived_stop_path) == history_dir
+            and superseded_path != archived_stop_path
+            and superseded_path != os.path.realpath(auth_path)
+            and superseded_path != os.path.realpath(stop_path)
+            and archived_stop_path != os.path.realpath(auth_path)
+            and archived_stop_path != os.path.realpath(stop_path)
+        )
+    except ValueError:
+        history_inside = False
+    if not history_inside:
+        raise RuntimeError(
+            "DeepSeek transport inspector pending archive path has drifted")
+    if os.path.exists(history_dir) and not os.path.isdir(history_dir):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending history path is invalid")
+    allowed_history_names = {
+        "superseded_campaign_recovery_authorization.json",
+        (
+            "superseded_campaign_recovery_authorization.json"
+            ".pending-copy"
+        ),
+        "campaign_stop.json",
+        EMERGENCY_STOP_DIRECTORY,
     }
+    if (os.path.isdir(history_dir)
+            and set(os.listdir(history_dir)) - allowed_history_names):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending history contains "
+            "unexpected artifacts")
+
+    existing_authorization = (
+        _read_json(auth_path) if os.path.isfile(auth_path) else None
+    )
+    expected_superseded_sha256 = record.get(
+        "superseded_authorization_sha256")
+    if (not isinstance(expected_superseded_sha256, str)
+            or len(expected_superseded_sha256) != 64
+            or record.get(
+                "deepseek_transport_disconnect_inspector_"
+                "prior_authorization_sha256")
+            != expected_superseded_sha256):
+        raise RuntimeError(
+            "DeepSeek transport inspector superseded authorization "
+            "digest is invalid")
+    if os.path.isfile(superseded_path):
+        if _sha256_file(superseded_path) != expected_superseded_sha256:
+            raise RuntimeError(
+                "DeepSeek transport inspector superseded authorization "
+                "archive has drifted")
+        superseded_authorization = _read_json(superseded_path)
+    elif existing_authorization is not None:
+        if _sha256_file(auth_path) != expected_superseded_sha256:
+            raise RuntimeError(
+                "DeepSeek transport inspector superseded authorization "
+                "source has drifted")
+        superseded_authorization = existing_authorization
+    else:
+        raise RuntimeError(
+            "DeepSeek transport inspector superseded authorization "
+            "source is missing")
+    if (superseded_authorization.get("authorization_id")
+            != record.get(
+                "deepseek_transport_disconnect_inspector_"
+                "prior_authorization_id")):
+        raise RuntimeError(
+            "DeepSeek transport inspector superseded authorization "
+            "identity has drifted")
+    if (existing_authorization is not None
+            and existing_authorization != superseded_authorization
+            and existing_authorization != record):
+        raise RuntimeError(
+            "DeepSeek transport inspector active authorization has drifted")
+
+    expected_stop_sha256 = record.get("archived_stop_sha256")
+    stop_source = (
+        stop_path if os.path.isfile(stop_path) else archived_stop_path)
+    if (not isinstance(expected_stop_sha256, str)
+            or len(expected_stop_sha256) != 64
+            or not os.path.isfile(stop_source)
+            or _sha256_file(stop_source) != expected_stop_sha256):
+        raise RuntimeError(
+            "DeepSeek transport inspector stop source has drifted")
+    emergency_dir = os.path.join(
+        out_dir, EMERGENCY_STOP_DIRECTORY)
+    emergency_history = os.path.join(
+        history_dir, EMERGENCY_STOP_DIRECTORY)
+    if any(
+            os.path.isdir(path)
+            and any(name.endswith(".json") for name in os.listdir(path))
+            for path in (emergency_dir, emergency_history)):
+        raise RuntimeError(
+            "DeepSeek transport inspector emergency stop scope has drifted")
+
+    authorization_sha256 = hashlib.sha256(
+        json.dumps(record, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+    event = {
+        "event": "user_authorized_deepseek_transport_inspector_followup",
+        "created_at": pending.get("created_at"),
+        "campaign_recovery_authorization_id": record["authorization_id"],
+        "campaign_recovery_authorization_sha256": authorization_sha256,
+        "superseded_authorization_id": superseded_authorization.get(
+            "authorization_id"),
+        "incident_api_rows": len(record["incident_api_rows"]),
+        "prior_recovery_git_commit": record[
+            "deepseek_transport_disconnect_inspector_"
+            "prior_recovery_git_commit"
+        ],
+        "recovery_git_commit": record["recovery_git_commit"],
+    }
+    dispatch_prefix = (
+        record.get(
+            "deepseek_transport_disconnect_inspector_prefixes") or {}
+    ).get("dispatch_log.jsonl")
+    _assert_recoverable_jsonl_tail(
+        dispatch_path, dispatch_prefix, event)
+
+    os.makedirs(history_dir, exist_ok=True)
+    _ensure_bound_file_copy(
+        auth_path, superseded_path, expected_superseded_sha256)
+    archived_stop, archived_emergency = _archive_campaign_stop_cohort(
+        out_dir, stop_path, history_dir)
+    if (_sha256_file(archived_stop)
+            != record.get("archived_stop_sha256")
+            or os.path.realpath(archived_stop) != archived_stop_path
+            or archived_emergency
+            != record.get("archived_emergency_stop_records")):
+        raise RuntimeError(
+            "DeepSeek transport inspector archived stop cohort has drifted")
+    if existing_authorization != record:
+        write_json_atomic(auth_path, record)
+
+    if _sha256_file(auth_path) != authorization_sha256:
+        raise RuntimeError(
+            "DeepSeek transport inspector active authorization digest "
+            "has drifted")
+    _append_recoverable_jsonl_tail(
+        dispatch_path, dispatch_prefix, event)
+    matches = [
+        row for row in _read_jsonl(dispatch_path)
+        if row.get("event") == event["event"]
+        and row.get("campaign_recovery_authorization_id")
+        == record["authorization_id"]
+    ]
+    if len(matches) != 1 or matches[0] != event:
+        raise RuntimeError(
+            "DeepSeek transport inspector authorization event has drifted")
+
+    campaign_recovery_incident_evidence.cache_clear()
+    verified = read_campaign_recovery_authorization(
+        out_dir, allow_pending_transaction=True)
+    _unlink_with_sharing_retry(pending_path)
+    return {
+        "authorization_id": record["authorization_id"],
+        "authorization_sha256": verified["authorization_sha256"],
+        "deepseek_transport_disconnect_retry_samples": record[
+            "deepseek_transport_disconnect_retry_samples"],
+        "incident_api_rows": len(record["incident_api_rows"]),
+        "recovered_workers": len(record["recovered_worker_launch_ids"]),
+        "pending_samples": len(record["deepseek_pending_samples"]),
+        "inspector_followup": True,
+    }
+
+
+def _authorize_deepseek_transport_inspector_followup(
+        out_dir, manifest, stop, stop_path, auth_path, prior_authorization):
+    """Supersede the exact zero-worker inspector gap from the first recovery."""
+    config = manifest.get("config") or {}
+    prior_authorization_sha256 = _sha256_file(auth_path)
+    if (prior_authorization.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or prior_authorization.get("recovery_kind")
+            != LEDGER_LOCK_RECOVERY_KIND
+            or prior_authorization.get(
+                "deepseek_transport_disconnect_retry_recovery") is not True
+            or prior_authorization.get(
+                "deepseek_transport_disconnect_inspector_followup_recovery")
+            is not None
+            or prior_authorization.get("authorization_basis")
+            != (
+                "explicit_user_resume_after_deepseek_transport_disconnect_"
+                "classifier_fix"
+            )
+            or config.get("campaign_role") != "deepseek_full234"
+            or config.get("num_round_trips")
+            != DEEPSEEK_FULL234_ROUND_TRIPS
+            or config.get("transport") != DEEPSEEK_TRANSPORT
+            or config.get("transport_revision")
+            != DEEPSEEK_TRANSPORT_REVISION
+            or stop.get("schema") != STOP_CONDITION_SCHEMA
+            or stop.get("condition") != "dispatcher_integrity_failure"
+            or stop.get("worker_launch_id") is not None
+            or not isinstance(stop.get("worker_pid"), int)
+            or isinstance(stop.get("worker_pid"), bool)
+            or stop.get("worker_pid") <= 0
+            or stop.get("error_type") != "RuntimeError"
+            or stop.get("error")
+            != _DEEPSEEK_TRANSPORT_INSPECTOR_STOP_ERROR):
+        raise RuntimeError(
+            "DeepSeek transport inspector follow-up boundary is invalid")
+    active = _read_json(os.path.join(out_dir, "active_worker_set.json"))
+    if active.get("workers") != {}:
+        raise RuntimeError("workers are still active")
+    samples = config.get("samples") or []
+    _assert_worker_leases_free(out_dir, samples)
+
+    manifest_digest = _sha256_file(os.path.join(
+        out_dir, "dispatch_manifest.json"))
+    prior_commit = manifest.get("run_git_commit")
+    prior_fingerprint = manifest.get("code_fingerprint")
+    prior_recovery_commit = prior_authorization.get("recovery_git_commit")
+    prior_recovery_fingerprint = prior_authorization.get(
+        "recovery_code_fingerprint")
+    if (manifest_digest
+            != prior_authorization.get("dispatch_manifest_sha256")
+            or prior_commit != prior_authorization.get("prior_git_commit")
+            or prior_fingerprint
+            != prior_authorization.get("prior_code_fingerprint")
+            or not isinstance(prior_recovery_commit, str)
+            or not isinstance(prior_recovery_fingerprint, dict)):
+        raise RuntimeError(
+            "DeepSeek transport inspector prior authorization has drifted")
+
+    current_commit, current_tree = _git_identity()
+    if current_tree != "clean" or current_commit == prior_recovery_commit:
+        raise RuntimeError(
+            "DeepSeek transport inspector follow-up requires a new clean "
+            "Git commit"
+        )
+    delta_changed_paths = _git_changed_paths(
+        prior_recovery_commit, current_commit)
+    required_delta_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/paired_campaign_dispatch.py",
+        "HP_V8/src/run_meta.py",
+        "HP_V8/src/test_model_openai.py",
+    }
+    if set(delta_changed_paths) != required_delta_paths:
+        raise RuntimeError(
+            "DeepSeek transport inspector follow-up commit scope is invalid")
+
+    recovery_fingerprint = code_fingerprint()
+    delta_fingerprint_changes = sorted(
+        key for key in set(prior_recovery_fingerprint) | set(
+            recovery_fingerprint)
+        if prior_recovery_fingerprint.get(key)
+        != recovery_fingerprint.get(key)
+    )
+    fingerprint_changes = sorted(
+        key for key in set(prior_fingerprint) | set(recovery_fingerprint)
+        if prior_fingerprint.get(key) != recovery_fingerprint.get(key)
+    )
+    changed_paths = _git_changed_paths(prior_commit, current_commit)
+    required_cumulative_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/model_openai.py",
+        "HP_V8/src/paired_campaign_dispatch.py",
+        "HP_V8/src/run_meta.py",
+        "HP_V8/src/test_model_openai.py",
+        "transport/src/model_openai.py",
+        "transport/src/test_model_openai.py",
+    }
+    if (delta_fingerprint_changes != ["run_meta.py"]
+            or fingerprint_changes != ["model_openai.py", "run_meta.py"]
+            or set(changed_paths) != required_cumulative_paths):
+        raise RuntimeError(
+            "DeepSeek transport inspector follow-up fingerprint scope is "
+            "invalid"
+        )
+
+    scope = _deepseek_checkpoint_resume_scope(out_dir, manifest)
+    prior_incidents = prior_authorization.get("incident_api_rows") or []
+    observed_incidents = [
+        (number, _canonical_record_sha256(row))
+        for number, row in scope["incident_api_rows"]
+    ]
+    expected_incidents = [
+        (item.get("row_number"), item.get("canonical_sha256"))
+        for item in prior_incidents if isinstance(item, dict)
+    ]
+    if (observed_incidents != expected_incidents
+            or scope["resume_samples"]
+            != prior_authorization.get("deepseek_resume_samples")
+            or scope["pending_samples"]
+            != prior_authorization.get("deepseek_pending_samples")
+            or scope["recovered_workers"]
+            != prior_authorization.get("deepseek_recovered_workers")):
+        raise RuntimeError(
+            "DeepSeek transport inspector follow-up evidence has drifted")
+
+    dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+    dispatch_rows = _read_jsonl(dispatch_path)
+    prior_events = [
+        index for index, row in enumerate(dispatch_rows)
+        if (row.get("event")
+            == "user_authorized_deepseek_transport_disconnect_retry_recovery"
+            and row.get("campaign_recovery_authorization_id")
+            == prior_authorization.get("authorization_id")
+            and row.get("campaign_recovery_authorization_sha256")
+            == prior_authorization_sha256)
+    ]
+    if len(prior_events) != 1:
+        raise RuntimeError(
+            "DeepSeek transport inspector prior authorization event is "
+            "invalid"
+        )
+    post_authorization_rows = dispatch_rows[prior_events[0] + 1:]
+    if (len(post_authorization_rows) != 1
+            or post_authorization_rows[0].get("event") != "campaign_stop"
+            or post_authorization_rows[0].get("error")
+            != _DEEPSEEK_TRANSPORT_INSPECTOR_STOP_ERROR
+            or (post_authorization_rows[0].get(
+                "worker_reconciliation") or {}).get(
+                    "closed_invocations") != []
+            or (post_authorization_rows[0].get(
+                "worker_reconciliation") or {}).get(
+                    "audited_invocations") != []):
+        raise RuntimeError(
+            "DeepSeek transport inspector follow-up was not zero-worker")
+
+    dispatcher_stopped_rows = [
+        row
+        for (_number, row), entry in zip(
+            scope["incident_api_rows"], prior_incidents)
+        if entry.get("incident_kind")
+        == "deepseek_dispatcher_stopped_uncommitted_api"
+    ]
+    if len(dispatcher_stopped_rows) != 1:
+        raise RuntimeError(
+            "DeepSeek transport inspector partial-stream scope is invalid")
+    incident_transport_sidecars = [
+        _deepseek_dispatcher_stopped_sidecar_evidence(
+            out_dir, dispatcher_stopped_rows[0])
+    ]
+    prefix_evidence = {
+        name: _file_prefix_evidence(os.path.join(out_dir, name))
+        for name in (
+            "api_calls.jsonl",
+            "dispatch_log.jsonl",
+        )
+    }
+    metadata_identities = _run_metadata_recovery_identities(
+        os.path.join(out_dir, "run_metadata.jsonl"))
+    created_at = datetime.now().astimezone().isoformat(
+        timespec="seconds")
+    authorization_id = (
+        "dsv4f-inspector-"
+        + datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
+        + "-" + uuid.uuid4().hex[:8]
+    )
+    history_dir = os.path.join(
+        out_dir, "recovery_history", authorization_id)
+    archived_authorization = os.path.join(
+        history_dir, "superseded_campaign_recovery_authorization.json")
+    archived_stop = os.path.join(history_dir, "campaign_stop.json")
+    emergency_dir = os.path.join(out_dir, EMERGENCY_STOP_DIRECTORY)
+    emergency_names = (
+        sorted(
+            name for name in os.listdir(emergency_dir)
+            if name.endswith(".json"))
+        if os.path.isdir(emergency_dir) else []
+    )
+    if emergency_names:
+        raise RuntimeError(
+            "DeepSeek transport inspector follow-up requires one canonical "
+            "stop latch")
+
+    record = json.loads(json.dumps(prior_authorization))
+    record.update({
+        "authorization_id": authorization_id,
+        "created_at": created_at,
+        "authorization_basis": (
+            "explicit_user_resume_after_deepseek_recovery_inspector_fix"
+        ),
+        "deepseek_transport_disconnect_inspector_followup_recovery": True,
+        "deepseek_transport_disconnect_inspector_prior_authorization_id": (
+            prior_authorization.get("authorization_id")),
+        "deepseek_transport_disconnect_inspector_prior_authorization_sha256": (
+            prior_authorization_sha256),
+        "deepseek_transport_disconnect_inspector_prior_recovery_git_commit": (
+            prior_recovery_commit),
+        "deepseek_transport_disconnect_inspector_delta_changed_paths": (
+            delta_changed_paths),
+        "deepseek_transport_disconnect_inspector_prefixes": prefix_evidence,
+        "deepseek_transport_disconnect_inspector_"
+        "run_metadata_identities": metadata_identities,
+        "recovery_git_commit": current_commit,
+        "recovery_git_tree_state": "clean",
+        "recovery_code_fingerprint": recovery_fingerprint,
+        "changed_code_fingerprint_keys": fingerprint_changes,
+        "changed_tracked_paths": changed_paths,
+        "archived_stop_path": os.path.relpath(
+            archived_stop, out_dir).replace("\\", "/"),
+        "archived_stop_sha256": _sha256_file(stop_path),
+        "archived_emergency_stop_records": [],
+        "superseded_authorization_path": os.path.relpath(
+            archived_authorization, out_dir).replace("\\", "/"),
+        "superseded_authorization_sha256": _sha256_file(
+            auth_path),
+        "committed_results_modified": False,
+        "checkpoint_rows_modified": False,
+        "provider_post_replay_scope": "uncommitted_steps_only",
+        "incident_transport_sidecars": incident_transport_sidecars,
+    })
+    pending_path = os.path.join(
+        out_dir, DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME)
+    pending = {
+        "schema": _DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA,
+        "created_at": created_at,
+        "history_dir": os.path.relpath(
+            history_dir, out_dir).replace("\\", "/"),
+        "authorization_record": record,
+    }
+    write_json_atomic(pending_path, pending)
+    return _commit_deepseek_transport_inspector_followup(
+        out_dir, manifest, stop_path, auth_path, pending_path, pending)
 
 
 def _merge_incident_entries(*groups):
@@ -3008,6 +3799,99 @@ def authorize(
                         prior_authorization)
             finally:
                 portalocker.unlock(lease)
+    if deepseek_transport_disconnect_retry:
+        if (operator_pause or operator_interrupted_samples
+                or provider_access_retry):
+            raise RuntimeError(
+                "DeepSeek transport-disconnect retry cannot be combined "
+                "with other recovery modes"
+            )
+        lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
+        with open(lease_path, "a+", encoding="utf-8") as lease:
+            try:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            except portalocker.exceptions.LockException as exc:
+                raise RuntimeError(
+                    "DeepSeek transport-disconnect recovery requires the "
+                    "dispatcher lease to be free") from exc
+            try:
+                with _campaign_stop_publication_lock(out_dir):
+                    manifest = _read_json(manifest_path)
+                    pending_path = os.path.join(
+                        out_dir,
+                        DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
+                    )
+                    parent_loss_pending_path = os.path.join(
+                        out_dir, DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
+                    if os.path.isfile(parent_loss_pending_path):
+                        raise RuntimeError(
+                            "dispatcher parent-loss recovery transaction "
+                            "must be completed first")
+                    if os.path.isfile(pending_path):
+                        pending = _read_json(pending_path)
+                        return (
+                            _commit_deepseek_transport_inspector_followup(
+                                out_dir, manifest, stop_path, auth_path,
+                                pending_path, pending
+                            )
+                        )
+                    prior_authorization = (
+                        _read_json(auth_path)
+                        if os.path.exists(auth_path) else None
+                    )
+                    if (prior_authorization is not None
+                            and prior_authorization.get("schema")
+                            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2):
+                        raise RuntimeError(
+                            "cannot supersede a non-V2 recovery "
+                            "authorization"
+                        )
+                    completed_initial = (
+                        prior_authorization is not None
+                        and prior_authorization.get(
+                            "deepseek_transport_disconnect_"
+                            "initial_transaction") is True
+                        and prior_authorization.get(
+                            "deepseek_transport_disconnect_"
+                            "inspector_followup_recovery") is not True
+                    )
+                    completed_followup = (
+                        prior_authorization is not None
+                        and prior_authorization.get(
+                            "deepseek_transport_disconnect_"
+                            "inspector_followup_recovery") is True
+                    )
+                    if ((completed_initial or completed_followup)
+                            and not os.path.exists(stop_path)):
+                        verified = read_campaign_recovery_authorization(
+                            out_dir)
+                        return {
+                            "authorization_id": verified[
+                                "authorization_id"],
+                            "authorization_sha256": verified[
+                                "authorization_sha256"],
+                            "deepseek_transport_disconnect_retry_samples": (
+                                verified[
+                                    "deepseek_transport_disconnect_"
+                                    "retry_samples"
+                                ]
+                            ),
+                            "incident_api_rows": len(
+                                verified["incident_api_rows"]),
+                            "recovered_workers": len(
+                                verified["recovered_worker_launch_ids"]),
+                            "pending_samples": len(
+                                verified["deepseek_pending_samples"]),
+                            "inspector_followup": completed_followup,
+                            "already_authorized": True,
+                        }
+                    stop = _read_json(stop_path)
+                    return _authorize_deepseek_transport_disconnect_retry(
+                        out_dir, manifest, stop, stop_path, auth_path,
+                        prior_authorization)
+            finally:
+                portalocker.unlock(lease)
     prior_authorization = (
         _read_json(auth_path) if os.path.exists(auth_path) else None
     )
@@ -3024,17 +3908,6 @@ def authorize(
                 "DeepSeek server retry cannot be combined with other recovery modes")
         stop = _read_json(stop_path)
         return _authorize_deepseek_server_retry(
-            out_dir, manifest, stop, stop_path, auth_path,
-            prior_authorization)
-    if deepseek_transport_disconnect_retry:
-        if (operator_pause or operator_interrupted_samples
-                or provider_access_retry):
-            raise RuntimeError(
-                "DeepSeek transport-disconnect retry cannot be combined "
-                "with other recovery modes"
-            )
-        stop = _read_json(stop_path)
-        return _authorize_deepseek_transport_disconnect_retry(
             out_dir, manifest, stop, stop_path, auth_path,
             prior_authorization)
     if provider_access_retry:

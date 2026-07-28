@@ -37,7 +37,9 @@ from experiment_runner import _require_formal_opencode_transport
 from fr_baseline_dispatch import read_keys
 from run_meta import (
     DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
+    DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
     _canonical_record_sha256,
+    _deepseek_dispatcher_stopped_sidecar_evidence,
     _git_identity,
     _validated_transport_ledger_state,
     append_jsonl_locked,
@@ -4254,6 +4256,10 @@ def _inspect_deepseek_campaign(
     recovery_authorization = read_campaign_recovery_authorization(out_dir)
     recovery_incidents = campaign_recovery_incident_evidence(out_dir)
     authorized_api_incident_hashes = recovery_incidents["api_row_hashes"]
+    api_incident_kinds = recovery_incidents.get(
+        "api_incident_kinds", {})
+    transport_sidecars_by_api_row_hash = recovery_incidents.get(
+        "transport_sidecars_by_api_row_hash", {})
     recovered_worker_ids = recovery_incidents["worker_launch_ids"]
     recovered_preauthorization_worker_ids = recovery_incidents[
         "preauthorization_worker_launch_ids"
@@ -4382,10 +4388,32 @@ def _inspect_deepseek_campaign(
         else:
             api_by_id[request_id] = row
         worker_id = row.get("worker_launch_id")
-        authorized_incident = (
-            _canonical_record_sha256(row)
-            in authorized_api_incident_hashes
+        row_hash = _canonical_record_sha256(row)
+        authorized_incident = row_hash in authorized_api_incident_hashes
+        incident_kind = (
+            api_incident_kinds.get(row_hash)
+            if authorized_incident else None
         )
+        authorized_historical_failure = (
+            authorized_incident
+            and request_id not in committed_call_ids
+            and incident_kind in {
+                "deepseek_transport_disconnect_misclassification",
+                "deepseek_dispatcher_stopped_uncommitted_api",
+            }
+        )
+        authorized_partial_sidecar = False
+        if (authorized_historical_failure
+                and incident_kind
+                == "deepseek_dispatcher_stopped_uncommitted_api"):
+            try:
+                authorized_partial_sidecar = (
+                    _deepseek_dispatcher_stopped_sidecar_evidence(
+                        out_dir, row)
+                    == transport_sidecars_by_api_row_hash.get(row_hash)
+                )
+            except RuntimeError:
+                authorized_partial_sidecar = False
         local_infrastructure_incident = (
             request_id in infrastructure_request_ids
         )
@@ -4444,20 +4472,22 @@ def _inspect_deepseek_campaign(
                 or provisional_active_failure
             )
             and _deepseek_failed_retry_row(row))
+        auditable_failure = (
+            auditable_failed_retry or authorized_historical_failure)
         if ((classification is not None
              and not auditable_model_empty
-             and not auditable_failed_retry)
+             and not auditable_failure)
                 or row.get("stream_complete") is not True
-                and not auditable_failed_retry
+                and not auditable_failure
                 or (row.get("input_tokens") is None
-                    and not auditable_failed_retry)
+                    and not auditable_failure)
                 or (row.get("output_tokens") is None
-                    and not auditable_failed_retry)):
+                    and not auditable_failure)):
             errors.append(f"DeepSeek API response incomplete at row {index}")
-        if (not auditable_failed_retry
+        if (not auditable_failure
                 and not _valid_deepseek_retry_evidence(row)):
             errors.append(f"DeepSeek retry evidence invalid at row {index}")
-        if not sidecar_valid:
+        if not sidecar_valid and not authorized_partial_sidecar:
             errors.append(
                 f"DeepSeek transport sidecar invalid at row {index}")
         request_path = row.get("raw_request_saved_path")
@@ -4481,7 +4511,7 @@ def _inspect_deepseek_campaign(
                 == {"include_usage": True}
             )
         )
-        if (not auditable_failed_retry
+        if (not auditable_failure
                 and (not isinstance(request_body, dict)
                 or request_body.get("model") != DEEPSEEK_MODEL
                 or request_body.get("reasoning_effort")
@@ -6828,13 +6858,21 @@ def _launch_under_lease(args, out_dir):
     args._dispatcher_instance_id = (
         f"dispatcher-{os.getpid()}-{uuid.uuid4().hex}"
     )
-    pending_recovery = os.path.join(
+    pending_parent_loss = os.path.join(
         out_dir, DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
-    if os.path.isfile(pending_recovery):
+    pending_inspector = os.path.join(
+        out_dir, DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME)
+    if os.path.isfile(pending_parent_loss):
         raise RuntimeError(
             "dispatcher parent-loss recovery transaction is pending; "
             "rerun authorize_ledger_lock_recovery.py "
             "--dispatcher_process_lost before resume"
+        )
+    if os.path.isfile(pending_inspector):
+        raise RuntimeError(
+            "DeepSeek transport inspector recovery transaction is pending; "
+            "rerun authorize_ledger_lock_recovery.py "
+            "--deepseek_transport_disconnect_retry before resume"
         )
     _resolve_confirmation_selection(args, out_dir=out_dir)
     _resolve_full234_scope(args)
