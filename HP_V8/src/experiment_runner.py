@@ -48,7 +48,9 @@ from run_meta import (RunLogger, dump_step_docs, append_run_metadata,
                       read_campaign_stop_conditions,
                       record_campaign_stop_condition,
                       record_emergency_campaign_stop_condition,
-                      record_sample_outcome)
+                      record_sample_outcome, normalize_snapshot_mode,
+                      SNAPSHOT_MODE_ALL, SNAPSHOT_MODE_FAILURES,
+                      SNAPSHOT_MODE_OFF, warn_best_effort_io)
 from hybrid_prompt import (build_hybrid_prompt, build_hybrid_repair_prompt,
                            classify_operation_family, extract_hybrid_json)
 from hybrid_executor import apply_hybrid
@@ -272,6 +274,77 @@ def _record_preservation_stop_from_step(
         api_call_ids=call_ids,
     )
     return True
+
+
+def _score_collapsed(evaluation):
+    score = (evaluation or {}).get("score") if isinstance(evaluation, dict) else None
+    return (
+        isinstance(score, (int, float))
+        and not isinstance(score, bool)
+        and score <= 1e-9
+    )
+
+
+def _step_has_snapshot_failure(row=None, evaluation=None, exec_log=None,
+                               v2_info=None, evaluator_exception=None):
+    if evaluator_exception is not None:
+        return True
+    if isinstance(evaluation, dict):
+        if evaluation.get("error"):
+            return True
+        if _score_collapsed(evaluation):
+            return True
+    if exec_log is not None:
+        count = getattr(exec_log, "preservation_violations", None)
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            return True
+    if isinstance(row, dict):
+        bdpatch = row.get("bdpatch") if isinstance(row.get("bdpatch"), dict) else {}
+        count = bdpatch.get("preservation_violations")
+        if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+            return True
+        telemetry = bdpatch.get("hybrid")
+        if isinstance(telemetry, dict):
+            v2_info = telemetry
+        elif isinstance(bdpatch.get("v2"), dict):
+            v2_info = bdpatch["v2"]
+    if isinstance(v2_info, dict):
+        if v2_info.get("invalid_json"):
+            return True
+        if v2_info.get("partial_extraction") or v2_info.get("failure_reason"):
+            return True
+        if v2_info.get("schema_error_count"):
+            return True
+        if v2_info.get("validation_gate_errors"):
+            return True
+        if v2_info.get("failed_step_kept_context"):
+            return True
+    return False
+
+
+def _maybe_dump_step_docs(snapshot_mode, out_dir, method, sample_id, rt_num,
+                          direction, state_id, gen_docs, *, step_info=None,
+                          row=None, evaluation=None, exec_log=None,
+                          v2_info=None, evaluator_exception=None):
+    mode = normalize_snapshot_mode(snapshot_mode, default=SNAPSHOT_MODE_ALL)
+    if mode == SNAPSHOT_MODE_OFF:
+        return None
+    if (mode == SNAPSHOT_MODE_FAILURES
+            and not _step_has_snapshot_failure(
+                row=row, evaluation=evaluation, exec_log=exec_log,
+                v2_info=v2_info, evaluator_exception=evaluator_exception)):
+        return None
+    try:
+        return dump_step_docs(
+            out_dir, method, sample_id, rt_num, direction, state_id, gen_docs,
+            step_info=step_info,
+        )
+    except Exception as exc:
+        try:
+            warn_best_effort_io("snapshot", out_dir, exc)
+        except Exception:
+            pass
+        return None
 
 
 def _enforce_post_call_campaign_guard(out_dir, sample_id):
@@ -1015,8 +1088,10 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
               out_dir=RESULTS_DIR, model=MODEL_DEFAULT, max_tokens=None,
               generate_fn=None, printing=True, inline_report=False, fr_baseline=None,
               stop_on_collapse=False, stop_on_preservation_violation=False,
-              reasoning_effort=None):
+              reasoning_effort=None, snapshot_mode=SNAPSHOT_MODE_ALL):
     _require_formal_opencode_transport(model, reasoning_effort)
+    snapshot_mode = normalize_snapshot_mode(
+        snapshot_mode, default=SNAPSHOT_MODE_ALL)
     if max_tokens is None and not str(model).lower().startswith("minimax-m3"):
         max_tokens = 20000
     random.seed(seed)
@@ -1121,23 +1196,49 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
         except Exception:
             log.close()
             raise
-        if (stop_on_preservation_violation
-                and _record_preservation_stop_from_step(
-                    out_dir, method, sample_id, rt_num, "forward",
-                    elog, meta)):
+        preservation_step_stop = (
+            stop_on_preservation_violation
+            and _record_preservation_stop_from_step(
+                out_dir, method, sample_id, rt_num, "forward", elog, meta)
+        )
+        if preservation_step_stop:
+            _maybe_dump_step_docs(
+                snapshot_mode, out_dir, method, sample_id, rt_num, "fwd",
+                fwd_target_id, gen_real,
+                step_info={
+                    "error": "preservation_violation",
+                    "actual_method": tag,
+                    "bytes_changed": gen_real != in_real,
+                },
+                exec_log=elog, v2_info=v2i,
+            )
             log.close()
             raise RuntimeError(
                 f"preservation_violations>0 at "
                 f"{method}/{sample_id}/RT{rt_num}/forward"
             )
         fwd_changed = (gen_real != in_real)
-        with log.capture("eval"):
-            evaluation = _evaluate(
-                domain, sample_id, gen_real, fwd_state,
-                list(fwd_state["context"]), method=method,
-                rt_index=rt_num, direction="forward",
-                target_state_id=fwd_target_id,
+        try:
+            with log.capture("eval"):
+                evaluation = _evaluate(
+                    domain, sample_id, gen_real, fwd_state,
+                    list(fwd_state["context"]), method=method,
+                    rt_index=rt_num, direction="forward",
+                    target_state_id=fwd_target_id,
+                )
+        except EvaluatorIncompleteError as exc:
+            _maybe_dump_step_docs(
+                snapshot_mode, out_dir, method, sample_id, rt_num, "fwd",
+                fwd_target_id, gen_real,
+                step_info={
+                    "error": "evaluator_exception",
+                    "error_type": exc.error_type,
+                    "actual_method": tag,
+                    "bytes_changed": fwd_changed,
+                },
+                exec_log=elog, v2_info=v2i, evaluator_exception=exc,
             )
+            raise
         fwd_target = list(fwd_state["context"])
         fwd_out = sorted(gen_real.keys())
         fwd_complete = is_context_complete(gen_real, fwd_target)
@@ -1147,20 +1248,33 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
                        evaluation, meta, elog, tag, fwd_changed, fwd_changed,
                        include_distractor, v2_info=v2i, edit_instruction=fwd_instr)
         pending_rows.append(fwd_row)
-        if (stop_on_preservation_violation
-                and _record_preservation_stop(
-                    out_dir, method, sample_id, rt_num, "forward", fwd_row)):
+        fwd_step_info = {
+            "score": evaluation.get("score"),
+            "error": evaluation.get("error"),
+            "actual_method": tag,
+            "bytes_changed": fwd_changed,
+            "ops": (
+                elog.to_dict().get("ops_accepted") if elog else None,
+                elog.to_dict().get("ops_total") if elog else None,
+            ),
+        }
+        preservation_row_stop = (
+            stop_on_preservation_violation
+            and _record_preservation_stop(
+                out_dir, method, sample_id, rt_num, "forward", fwd_row)
+        )
+        if api_recorder:
+            record_model_content_anomaly(out_dir, fwd_row)
+        _maybe_dump_step_docs(
+            snapshot_mode, out_dir, method, sample_id, rt_num, "fwd",
+            fwd_target_id, gen_real, step_info=fwd_step_info,
+            row=fwd_row, evaluation=evaluation, exec_log=elog, v2_info=v2i,
+        )
+        if preservation_row_stop:
             log.close()
             raise RuntimeError(
                 f"preservation_violations>0 at {method}/{sample_id}/RT{rt_num}/forward"
             )
-        if api_recorder:
-            record_model_content_anomaly(out_dir, fwd_row)
-        dump_step_docs(out_dir, method, sample_id, rt_num, "fwd", fwd_target_id, gen_real,
-                       step_info={"score": evaluation.get("score"), "error": evaluation.get("error"),
-                                  "actual_method": tag, "bytes_changed": fwd_changed,
-                                  "ops": (elog.to_dict().get("ops_accepted") if elog else None,
-                                          elog.to_dict().get("ops_total") if elog else None)})
         current_context = shuffle_context(merge_distractor(gen_real, distractor))
         current_state = fwd_state
 
@@ -1184,23 +1298,50 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
         except Exception:
             log.close()
             raise
-        if (stop_on_preservation_violation
-                and _record_preservation_stop_from_step(
-                    out_dir, method, sample_id, rt_num, "backward",
-                    elog, meta)):
+        preservation_step_stop = (
+            stop_on_preservation_violation
+            and _record_preservation_stop_from_step(
+                out_dir, method, sample_id, rt_num, "backward", elog, meta)
+        )
+        if preservation_step_stop:
+            _maybe_dump_step_docs(
+                snapshot_mode, out_dir, method, sample_id, rt_num, "bwd",
+                initial_state_id, gen_real,
+                step_info={
+                    "error": "preservation_violation",
+                    "actual_method": tag,
+                    "bytes_changed": gen_real != in_real,
+                },
+                exec_log=elog, v2_info=v2i,
+            )
             log.close()
             raise RuntimeError(
                 f"preservation_violations>0 at "
                 f"{method}/{sample_id}/RT{rt_num}/backward"
             )
         bwd_changed = (gen_real != in_real)
-        with log.capture("eval"):
-            evaluation = _evaluate(
-                domain, sample_id, gen_real, initial_state,
-                list(initial_state["context"]), method=method,
-                rt_index=rt_num, direction="backward",
-                target_state_id=initial_state_id,
+        try:
+            with log.capture("eval"):
+                evaluation = _evaluate(
+                    domain, sample_id, gen_real, initial_state,
+                    list(initial_state["context"]), method=method,
+                    rt_index=rt_num, direction="backward",
+                    target_state_id=initial_state_id,
+                )
+        except EvaluatorIncompleteError as exc:
+            bwd_changed = (gen_real != in_real)
+            _maybe_dump_step_docs(
+                snapshot_mode, out_dir, method, sample_id, rt_num, "bwd",
+                initial_state_id, gen_real,
+                step_info={
+                    "error": "evaluator_exception",
+                    "error_type": exc.error_type,
+                    "actual_method": tag,
+                    "bytes_changed": bwd_changed,
+                },
+                exec_log=elog, v2_info=v2i, evaluator_exception=exc,
             )
+            raise
         bwd_out = sorted(gen_real.keys())
         rid_chain.append(generate_response_id()); state_chain.append(initial_state_id)
         bwd_row = _row(method, sample_id, sample_type, model, rid_chain, state_chain,
@@ -1208,20 +1349,33 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
                        evaluation, meta, elog, tag, bwd_changed, fwd_changed,
                        include_distractor, v2_info=v2i, edit_instruction=bwd_instr)
         pending_rows.append(bwd_row)
-        if (stop_on_preservation_violation
-                and _record_preservation_stop(
-                    out_dir, method, sample_id, rt_num, "backward", bwd_row)):
+        bwd_step_info = {
+            "score": evaluation.get("score"),
+            "error": evaluation.get("error"),
+            "actual_method": tag,
+            "bytes_changed": bwd_changed,
+            "ops": (
+                elog.to_dict().get("ops_accepted") if elog else None,
+                elog.to_dict().get("ops_total") if elog else None,
+            ),
+        }
+        preservation_row_stop = (
+            stop_on_preservation_violation
+            and _record_preservation_stop(
+                out_dir, method, sample_id, rt_num, "backward", bwd_row)
+        )
+        if api_recorder:
+            record_model_content_anomaly(out_dir, bwd_row)
+        _maybe_dump_step_docs(
+            snapshot_mode, out_dir, method, sample_id, rt_num, "bwd",
+            initial_state_id, gen_real, step_info=bwd_step_info,
+            row=bwd_row, evaluation=evaluation, exec_log=elog, v2_info=v2i,
+        )
+        if preservation_row_stop:
             log.close()
             raise RuntimeError(
                 f"preservation_violations>0 at {method}/{sample_id}/RT{rt_num}/backward"
             )
-        if api_recorder:
-            record_model_content_anomaly(out_dir, bwd_row)
-        dump_step_docs(out_dir, method, sample_id, rt_num, "bwd", initial_state_id, gen_real,
-                       step_info={"score": evaluation.get("score"), "error": evaluation.get("error"),
-                                  "actual_method": tag, "bytes_changed": bwd_changed,
-                                  "ops": (elog.to_dict().get("ops_accepted") if elog else None,
-                                          elog.to_dict().get("ops_total") if elog else None)})
         current_context = shuffle_context(merge_distractor(gen_real, distractor))
         current_state = initial_state
 
@@ -1436,6 +1590,13 @@ def main():
         help="fail before the next API call if any generated HP row reports a "
              "preservation violation",
     )
+    ap.add_argument(
+        "--snapshot_mode",
+        choices=(SNAPSHOT_MODE_ALL, SNAPSHOT_MODE_FAILURES, SNAPSHOT_MODE_OFF),
+        default=SNAPSHOT_MODE_ALL,
+        help="write per-step document snapshots for all steps, deterministic "
+             "failures only, or never",
+    )
     args = ap.parse_args()
     _start_dispatcher_parent_watchdog(args.out_dir)
     method_phase = os.environ.get("ANCHORPATCH_METHOD_PHASE")
@@ -1467,7 +1628,8 @@ def main():
         context_shuffle_seeded=True,
         context_shuffle_seed_version="global_random_seed_v1",
         stop_on_collapse=args.stop_on_collapse,
-        stop_on_preservation_violation=args.stop_on_preservation_violation)
+        stop_on_preservation_violation=args.stop_on_preservation_violation,
+        snapshot_mode=args.snapshot_mode)
 
     finish_status = "failed"
     try:
@@ -1489,6 +1651,7 @@ def main():
                         args.stop_on_preservation_violation
                     ),
                     reasoning_effort=args.reasoning_effort,
+                    snapshot_mode=args.snapshot_mode,
                 )
         finish_status = "finished"
         if len(args.sample) == 1:

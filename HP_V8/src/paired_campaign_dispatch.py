@@ -39,6 +39,9 @@ from run_meta import (
     DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
     DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
     RUN_METADATA_STORAGE_EVENT_V1,
+    SNAPSHOT_MODE_ALL,
+    SNAPSHOT_MODE_FAILURES,
+    SNAPSHOT_MODE_OFF,
     _canonical_record_sha256,
     _deepseek_dispatcher_stopped_sidecar_evidence,
     _git_identity,
@@ -55,6 +58,8 @@ from run_meta import (
     read_run_metadata_snapshot,
     read_quiescent_run_metadata_snapshot,
     record_campaign_stop_condition,
+    normalize_snapshot_mode,
+    snapshot_docs_sample_dirs,
     write_json_atomic,
 )
 from utils_env import load_sample
@@ -768,6 +773,45 @@ def _read_json(path):
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.05)
+
+
+def _manifest_snapshot_mode(manifest):
+    config = manifest.get("config") if isinstance(manifest, dict) else None
+    if not isinstance(config, dict):
+        return SNAPSHOT_MODE_ALL, False
+    present = "snapshot_mode" in config
+    return (
+        normalize_snapshot_mode(
+            config.get("snapshot_mode"), default=SNAPSHOT_MODE_ALL),
+        present,
+    )
+
+
+def _existing_manifest_snapshot_mode(out_dir):
+    path = os.path.join(out_dir, "dispatch_manifest.json")
+    if not os.path.exists(path):
+        return None, False, False
+    mode, present = _manifest_snapshot_mode(_read_json(path))
+    return mode, present, True
+
+
+def _snapshot_mode_arg(args):
+    value = getattr(args, "snapshot_mode", None)
+    if value is None or isinstance(value, str):
+        return value
+    return None
+
+
+def _resolve_paired_snapshot_mode(out_dir, args):
+    requested = _snapshot_mode_arg(args)
+    if requested is not None:
+        return normalize_snapshot_mode(
+            requested, default=SNAPSHOT_MODE_FAILURES)
+    prior_mode, _present, has_manifest = _existing_manifest_snapshot_mode(
+        out_dir)
+    if getattr(args, "resume", False) and has_manifest:
+        return prior_mode
+    return SNAPSHOT_MODE_FAILURES
 
 
 def _canonical_json_bytes(value):
@@ -1839,9 +1883,9 @@ def _queued_pending_evidence(
             path = os.path.join(out_dir, method, f"{sample}{suffix}")
             if os.path.exists(path):
                 evidence.append(os.path.relpath(path, out_dir))
-        docs_path = os.path.join(out_dir, "docs", method, safe_sample)
-        if os.path.exists(docs_path):
-            evidence.append(os.path.relpath(docs_path, out_dir))
+        for docs_path in snapshot_docs_sample_dirs(out_dir, method, sample):
+            if os.path.exists(docs_path):
+                evidence.append(os.path.relpath(docs_path, out_dir))
         raw_path = os.path.join(out_dir, "api_raw", method, safe_sample)
         if os.path.exists(raw_path):
             evidence.append(os.path.relpath(raw_path, out_dir))
@@ -2290,11 +2334,12 @@ def _verify_pristine_method_phase(out_dir, assignments, method_phase):
             path = os.path.join(out_dir, method_phase, f"{sample}{suffix}")
             if os.path.exists(path):
                 evidence[sample].append(os.path.relpath(path, out_dir))
-        paths = (
-            Path(out_dir, "docs", method_phase, safe_sample),
+        paths = [
+            *[Path(path) for path in snapshot_docs_sample_dirs(
+                out_dir, method_phase, sample)],
             Path(out_dir, "api_raw", method_phase, safe_sample),
             Path(out_dir, "logs", f"{method_phase}__{safe_sample}.log"),
-        )
+        ]
         for path in paths:
             if path.exists():
                 evidence[sample].append(os.path.relpath(path, out_dir))
@@ -3914,6 +3959,9 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
         "reasoning_effort": runtime["reasoning_effort"],
         "run_metadata_storage": RUN_METADATA_STORAGE_EVENT_V1,
         "stop_on_preservation_violation": True,
+        "snapshot_mode": normalize_snapshot_mode(
+            _snapshot_mode_arg(args),
+            default=SNAPSHOT_MODE_FAILURES),
     }
     for optional in (
             "openai_base_url", "opencode_transport", "minimax_transport"):
@@ -3999,6 +4047,10 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
 
 def _manifest_identity(manifest):
     value = copy.deepcopy(manifest)
+    config = value.get("config")
+    if isinstance(config, dict):
+        config["snapshot_mode"] = normalize_snapshot_mode(
+            config.get("snapshot_mode"), default=SNAPSHOT_MODE_ALL)
     value["assignments"] = [
         {"sample": item["sample"], "methods": item["methods"]}
         for item in manifest.get("assignments") or []
@@ -4908,6 +4960,12 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     if require_terminal_provenance is None:
         require_terminal_provenance = require_complete
     config = manifest["config"]
+    snapshot_mode_error = None
+    try:
+        normalize_snapshot_mode(
+            config.get("snapshot_mode"), default=SNAPSHOT_MODE_ALL)
+    except ValueError as exc:
+        snapshot_mode_error = str(exc)
     quiescent_metadata_error = None
     if (require_complete and config.get("run_metadata_storage")
             == RUN_METADATA_STORAGE_EVENT_V1):
@@ -4929,6 +4987,10 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         if quiescent_metadata_error is not None:
             result["errors"] = list(result.get("errors") or []) + [
                 "run metadata is not quiescent: " + quiescent_metadata_error
+            ]
+        if snapshot_mode_error is not None:
+            result["errors"] = list(result.get("errors") or []) + [
+                "snapshot mode is invalid: " + snapshot_mode_error
             ]
         return result
     declared_phases = config.get("method_phases")
@@ -4964,6 +5026,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     expected_methods = set(config["method_set"])
     target_rt = config["num_round_trips"]
     errors = []
+    if snapshot_mode_error is not None:
+        errors.append("snapshot mode is invalid: " + snapshot_mode_error)
     if quiescent_metadata_error is not None:
         errors.append(
             "run metadata is not quiescent: " + quiescent_metadata_error)
@@ -6449,6 +6513,8 @@ def _launch_worker_batch(
         else inspection_manifest["run_git_commit"]
     )
     runtime = _campaign_runtime_config(args)
+    snapshot_mode = normalize_snapshot_mode(
+        _snapshot_mode_arg(args), default=SNAPSHOT_MODE_FAILURES)
     launch_specs = {}
     for item in assignments:
         sample = item["sample"]
@@ -6482,6 +6548,7 @@ def _launch_worker_batch(
             "--model", runtime["model"],
             "--max_tokens", str(runtime["max_tokens"]),
             "--out_dir", out_dir,
+            "--snapshot_mode", snapshot_mode,
             "--stop_on_preservation_violation",
             "--notes", f"{args.notes}, key={label}",
         ]
@@ -7153,6 +7220,7 @@ def _launch_under_lease(args, out_dir):
         for item in assignments:
             item["methods"] = list(REMAINING134_METHOD_PHASES)
 
+    args.snapshot_mode = _resolve_paired_snapshot_mode(out_dir, args)
     task_plans = prepare_task_plans(
         out_dir, args.samples, args.num_round_trips, args.seed)
     manifest = build_manifest(
@@ -7555,6 +7623,16 @@ def main():
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--resume_reason", default=None)
+    parser.add_argument(
+        "--snapshot_mode",
+        choices=(SNAPSHOT_MODE_ALL, SNAPSHOT_MODE_FAILURES, SNAPSHOT_MODE_OFF),
+        default=None,
+        help=(
+            "worker document snapshot policy; new paired campaigns default to "
+            "failures, while resumes inherit the existing manifest and legacy "
+            "manifests without this field resume as all"
+        ),
+    )
     parser.add_argument(
         "--confirm_workers_stopped", action="store_true",
         help="required for audited resume; the dispatcher also verifies every "

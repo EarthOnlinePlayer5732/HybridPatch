@@ -1012,3 +1012,24 @@ event-append crash injector；共享 integration helper 统一合法 API termina
 测试方法集合保持 `251→251`，没有 `test_*` 新增、删除或改名；四个重点恢复/campaign
 用例定向通过，完整零 API 基础设施回归为 `251/251`。本批未调用 provider API、未修改
 历史实验目录，也未改变 HybridPatch、FullRewrite、transport、dispatcher 或 recovery 行为。
+
+## 2026-07-29 snapshot 与辅助 I/O 故障域
+
+每步完整文档 snapshot 不再是结果提交的强制前置条件。runner 新增
+`--snapshot_mode {all,failures,off}`：standalone 保持历史 `all`；新 paired campaign 默认
+`failures`，只保存 evaluator error/exception、score collapse、invalid/schema/gate、
+partial extraction、任意非空最终 `failure_reason`、kept-context 或 preservation failure；
+`off` 不写 docs。旧 manifest 没有该字段时仍按
+`all` 恢复，显式模式与已有 manifest 不一致时继续拒绝混跑。
+
+snapshot 与可从核心 API/result 证据重建的 `api_anomalies.jsonl` 写失败只输出 stderr
+warning；`api_calls.jsonl`、attempt/response journal、run metadata、stop latch、结果 JSONL
+和 checkpoint 继续 fail-closed。portable lowercase 短 method/sample/state/filename 保持历史
+路径；大小写折叠可能碰撞、清洗、截断、Windows 保留名、`_step.json` 冲突或绝对路径超过
+240 字符时使用带 SHA-256 摘要的无碰撞名，
+必要时切换 compact layout，并在 snapshot metadata 中保存 original→stored 映射。即使
+`out_dir` 本身已耗尽路径预算，也只跳过该辅助 snapshot，不中断模型结果提交。
+
+新增独立 component suite `src/test_snapshot_io.py`，覆盖三种模式、长路径、保留名、
+best-effort 边界和 legacy manifest。零 API验证为 snapshot `8/8`、基础设施 `251/251`、
+hybrid executor `72/72`；实现阶段未调用 provider API，也未修改历史实验产物。

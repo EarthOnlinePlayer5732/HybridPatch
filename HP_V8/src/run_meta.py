@@ -17,7 +17,7 @@ Provides the four mechanisms the runner uses to keep a run dir self-describing:
   RunLogger                  per-(method,sample) structured log under logs/:
                              tees progress to stdout + an ANSI-free file, and
                              captures noisy domain-evaluator stdout separately.
-  dump_step_docs(...)        always-on per-step output-document snapshots under
+  dump_step_docs(...)        best-effort per-step output-document snapshots under
                              docs/<method>/<sample>/rt<NN>_<dir>_<state>/.
 
 All mechanisms are ADDITIVE: they never touch result JSONL rows, checkpoints, or the
@@ -79,6 +79,12 @@ API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
 DEEPSEEK_COMPACT_TRANSPORT_REVISION = "opencode_openai_compatible/6"
 DEEPSEEK_COMPACT_EVENT_SCHEMA = "anchorpatch.transport_event/2"
 SAMPLE_OUTCOME_SCHEMA = "anchorpatch.sample_outcome/1"
+SNAPSHOT_MODE_ALL = "all"
+SNAPSHOT_MODE_FAILURES = "failures"
+SNAPSHOT_MODE_OFF = "off"
+SNAPSHOT_MODES = frozenset({
+    SNAPSHOT_MODE_ALL, SNAPSHOT_MODE_FAILURES, SNAPSHOT_MODE_OFF,
+})
 CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA = (
     "anchorpatch.campaign_recovery_authorization/1"
 )
@@ -169,6 +175,54 @@ def code_fingerprint():
 
 def _strip(s):
     return _ANSI.sub("", s)
+
+
+def warn_best_effort_io(kind, target, exc):
+    """Emit a diagnostic without ever becoming a second failure source."""
+    try:
+        print(
+            f"WARNING: {kind} best-effort write failed: {target}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
+    except Exception:
+        pass
+
+
+def normalize_snapshot_mode(value, *, default=SNAPSHOT_MODE_ALL):
+    if value is None:
+        value = default
+    if value not in SNAPSHOT_MODES:
+        raise ValueError(f"unsupported snapshot_mode: {value!r}")
+    return value
+
+
+def _campaign_config_for_snapshot_compare(config):
+    if not isinstance(config, dict):
+        return config
+    normalized = dict(config)
+    normalized["snapshot_mode"] = normalize_snapshot_mode(
+        normalized.get("snapshot_mode"), default=SNAPSHOT_MODE_ALL)
+    return normalized
+
+
+def _campaign_configs_match(prior, current):
+    return (
+        _campaign_config_for_snapshot_compare(prior)
+        == _campaign_config_for_snapshot_compare(current)
+    )
+
+
+def _campaign_config_for_storage(current, prior):
+    """Keep legacy all-snapshot campaigns byte-compatible on resume."""
+    if (isinstance(prior, dict)
+            and "snapshot_mode" not in prior
+            and _campaign_configs_match(prior, current)):
+        stored = dict(current)
+        stored.pop("snapshot_mode", None)
+        return stored
+    return current
 
 
 def append_jsonl_locked(path, record):
@@ -2586,7 +2640,17 @@ class ApiCallRecorder:
         self.records_by_id[record["request_id"]] = record
         append_jsonl_locked(os.path.join(self.out_dir, "api_calls.jsonl"), record)
         if record.get("classification"):
-            append_jsonl_locked(os.path.join(self.out_dir, "api_anomalies.jsonl"), record)
+            try:
+                append_jsonl_locked(
+                    os.path.join(self.out_dir, "api_anomalies.jsonl"),
+                    record,
+                )
+            except Exception as exc:
+                warn_best_effort_io(
+                    "api_anomalies",
+                    os.path.join(self.out_dir, "api_anomalies.jsonl"),
+                    exc,
+                )
 
     def generate(self, *args, **kwargs):
         _enforce_pre_call_campaign_guards(self.out_dir, self.sample_id)
@@ -3538,7 +3602,13 @@ def record_model_content_anomaly(out_dir, row):
         "rerun_recommended": False,
         "count_as_method_failure": True,
     }
-    append_jsonl_locked(os.path.join(out_dir, "api_anomalies.jsonl"), record)
+    try:
+        append_jsonl_locked(os.path.join(out_dir, "api_anomalies.jsonl"), record)
+    except Exception as exc:
+        warn_best_effort_io(
+            "api_anomalies", os.path.join(out_dir, "api_anomalies.jsonl"),
+            exc,
+        )
     return record
 
 
@@ -7639,6 +7709,9 @@ def _fold_run_metadata_events(events):
                     != source.get("reasoning_effort")
                     or not isinstance(campaign_config.get("method_set"), list)
                     or not set(methods) <= set(campaign_config["method_set"])
+                    or campaign_config.get(
+                        "snapshot_mode", SNAPSHOT_MODE_ALL)
+                    not in SNAPSHOT_MODES
                     or not isinstance(worker_pid, int)
                     or isinstance(worker_pid, bool) or worker_pid <= 0):
                 raise RuntimeError(
@@ -7646,12 +7719,14 @@ def _fold_run_metadata_events(events):
             if records:
                 first = records[0]
                 invariant_fields = {
-                    "started_at", "timezone", "out_dir", "campaign_config",
-                    "transport", "transport_revision",
-                    "transport_resume_policy",
+                    "started_at", "timezone", "out_dir", "transport",
+                    "transport_revision", "transport_resume_policy",
                 }
                 if any(source.get(field) != first.get(field)
-                       for field in invariant_fields):
+                       for field in invariant_fields) or not (
+                           _campaign_configs_match(
+                               first.get("campaign_config"),
+                               source.get("campaign_config"))):
                     raise RuntimeError(
                         "run metadata campaign registration identity drifted")
                 previous = records[-1]
@@ -8889,7 +8964,8 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                         context_shuffle_seed_version=None,
                         stop_on_collapse=False,
                         stop_on_preservation_violation=False,
-                        reasoning_effort=None):
+                        reasoning_effort=None,
+                        snapshot_mode=SNAPSHOT_MODE_ALL):
     """Register one invocation in a locked V8 campaign metadata ledger.
 
     The first invocation establishes the campaign Git identity and timezone-aware
@@ -8901,6 +8977,8 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
     receipt-bound compatibility projection.
     """
     del printing  # V3 turns the old fingerprint warning into a hard refusal.
+    snapshot_mode = normalize_snapshot_mode(
+        snapshot_mode, default=SNAPSHOT_MODE_ALL)
     method_phase = os.environ.get("ANCHORPATCH_METHOD_PHASE")
     declared_method_set = os.environ.get("ANCHORPATCH_CAMPAIGN_METHOD_SET")
     campaign_methods = sorted(set(methods))
@@ -9192,6 +9270,7 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             "stop_on_preservation_violation": bool(
                 stop_on_preservation_violation
             ),
+            "snapshot_mode": snapshot_mode,
         }
         previous_config = _one_prior_value(prior, "campaign_config")
         if prior and previous_config is None:
@@ -9199,11 +9278,15 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                 f"refusing to resume/mix {out_dir!r}: prior campaign_config "
                 "is unrecorded"
             )
-        if previous_config is not None and previous_config != campaign_config:
+        if (previous_config is not None
+                and not _campaign_configs_match(
+                    previous_config, campaign_config)):
             raise RuntimeError(
                 f"refusing to resume/mix {out_dir!r}: prior campaign_config "
                 "differs from the current invocation; use a new --out_dir"
             )
+        campaign_config = _campaign_config_for_storage(
+            campaign_config, previous_config)
 
         campaign_started_at = _one_prior_value(prior, "started_at")
         campaign_timezone = _one_prior_value(prior, "timezone")
@@ -9411,35 +9494,251 @@ def _safe(name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", str(name))
 
 
-_MAX_DOC_FILENAME = 80
+_MAX_SNAPSHOT_COMPONENT = 80
+_MAX_DOC_FILENAME = 120
+_SNAPSHOT_FULL_PATH_BUDGET = 240
+_WINDOWS_RESERVED_SNAPSHOT_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *{f"COM{index}" for index in range(1, 10)},
+    *{f"LPT{index}" for index in range(1, 10)},
+})
 
 
-def _safe_doc_filename(name):
-    safe = _safe(name).strip("._") or "unnamed"
-    if len(safe) <= _MAX_DOC_FILENAME:
+def _snapshot_digest(value, size=16):
+    return hashlib.sha256(
+        str(value).encode("utf-8", errors="replace")).hexdigest()[:size]
+
+
+def _portable_snapshot_name(text, safe, max_len, *, reserve_step=False):
+    if (not safe or safe in {".", ".."} or safe != text
+            or len(safe) > max_len or safe != safe.casefold()
+            or safe.endswith((".", " "))):
+        return False
+    stem = safe.split(".", 1)[0].rstrip(". ").upper()
+    if stem in _WINDOWS_RESERVED_SNAPSHOT_NAMES:
+        return False
+    if reserve_step and safe.casefold() == "_step.json":
+        return False
+    return True
+
+
+def _hashed_snapshot_component(name, *, fallback="item",
+                               max_len=_MAX_SNAPSHOT_COMPONENT):
+    text = str(name)
+    safe = _safe(text)
+    if _portable_snapshot_name(text, safe, max_len):
         return safe
-    digest = hashlib.sha256(str(name).encode("utf-8", errors="replace")).hexdigest()[:12]
+    safe = safe.strip("._") or fallback
+    digest = _snapshot_digest(text)
+    suffix = f"__{digest}"
+    if max_len < len(suffix) + 8:
+        return f"h_{_snapshot_digest(text, max(8, max_len - 2))}"[:max_len]
+    keep = max(8, max_len - len(suffix))
+    prefix = (safe[:keep].rstrip("._") or fallback)
+    return f"{prefix}{suffix}"
+
+
+def _hashed_doc_filename(name):
+    text = str(name)
+    safe = _safe(text)
+    safe = safe.strip("._") or "unnamed"
+    digest = _snapshot_digest(text)
     root, ext = os.path.splitext(safe)
     if len(ext) > 16:
         root, ext = safe, ""
-    keep = max(12, _MAX_DOC_FILENAME - len(digest) - len(ext) - 2)
-    return f"{root[:keep]}__{digest}{ext}"
+    root = root.strip("._") or "unnamed"
+    suffix = f"__{digest}{ext}"
+    prefix = "doc_"
+    keep = max(8, _MAX_DOC_FILENAME - len(prefix) - len(suffix))
+    return f"{prefix}{root[:keep].rstrip('._') or 'unnamed'}{suffix}"
+
+
+def _safe_doc_filename(name):
+    text = str(name)
+    safe = _safe(text)
+    if _portable_snapshot_name(
+            text, safe, _MAX_DOC_FILENAME, reserve_step=True):
+        return safe
+    return _hashed_doc_filename(text)
+
+
+def _snapshot_filenames(doc_items):
+    """Return portable, case-insensitive collision-free snapshot names."""
+    initial = [_safe_doc_filename(name) for name, _content in doc_items]
+    counts = {}
+    for filename in initial:
+        key = filename.casefold()
+        counts[key] = counts.get(key, 0) + 1
+    result = []
+    used = set()
+    for index, ((name, _content), filename) in enumerate(
+            zip(doc_items, initial), 1):
+        candidate = (
+            _hashed_doc_filename(name)
+            if counts[filename.casefold()] > 1 else filename
+        )
+        if candidate.casefold() in used:
+            candidate = _compact_doc_filename(index, name)
+        if candidate.casefold() in used:
+            raise RuntimeError("snapshot filename collision could not be resolved")
+        used.add(candidate.casefold())
+        result.append(candidate)
+    return result
+
+
+def snapshot_docs_sample_dir(out_dir, method, sample_id):
+    return os.path.join(
+        out_dir,
+        "docs",
+        _hashed_snapshot_component(method, fallback="method"),
+        _hashed_snapshot_component(sample_id, fallback="sample"),
+    )
+
+
+def _compact_snapshot_sample_dir(out_dir, method, sample_id):
+    return os.path.join(
+        out_dir,
+        "docs",
+        "_compact",
+        f"m_{_snapshot_digest(method)}",
+        f"s_{_snapshot_digest(sample_id)}",
+    )
+
+
+def snapshot_docs_sample_dirs(out_dir, method, sample_id):
+    current = snapshot_docs_sample_dir(out_dir, method, sample_id)
+    compact = _compact_snapshot_sample_dir(out_dir, method, sample_id)
+    legacy = os.path.join(out_dir, "docs", _safe(method), _safe(sample_id))
+    paths = []
+    seen = set()
+    for path in (current, compact, legacy):
+        key = os.path.normcase(os.path.abspath(path))
+        if key not in seen:
+            seen.add(key)
+            paths.append(path)
+    return paths
+
+
+def _snapshot_step_dir(out_dir, method, sample_id, rt_num, direction, state_id):
+    sample_dir = snapshot_docs_sample_dir(out_dir, method, sample_id)
+    step = "rt{:02d}_{}_{}".format(
+        int(rt_num),
+        _hashed_snapshot_component(direction, fallback="direction", max_len=40),
+        _hashed_snapshot_component(state_id, fallback="state"),
+    )
+    return os.path.join(sample_dir, step)
+
+
+def _compact_snapshot_step_dir(
+        out_dir, method, sample_id, rt_num, direction, state_id):
+    step = "rt{:02d}_{}_st_{}".format(
+        int(rt_num),
+        _hashed_snapshot_component(direction, fallback="direction", max_len=16),
+        _snapshot_digest(state_id),
+    )
+    return os.path.join(
+        _compact_snapshot_sample_dir(out_dir, method, sample_id), step)
+
+
+def _compact_doc_filename(index, name):
+    safe = _safe(name)
+    _root, ext = os.path.splitext(safe)
+    if len(ext) > 10:
+        ext = ""
+    return f"d{int(index):04d}_{_snapshot_digest(name)}{ext}"
+
+
+def _require_contained_path(root, path):
+    root = os.path.realpath(os.path.abspath(root))
+    path = os.path.realpath(os.path.abspath(path))
+    try:
+        inside = os.path.commonpath([root, path]) == root
+    except ValueError:
+        inside = False
+    if not inside:
+        raise RuntimeError(f"snapshot path escaped output directory: {path}")
+    return path
+
+
+def _snapshot_path_within_budget(path):
+    return len(os.path.abspath(path)) <= _SNAPSHOT_FULL_PATH_BUDGET
+
+
+def _snapshot_file_plan(out_dir, step_dir, doc_items, filenames, step_info,
+                        path_mode):
+    docs_root = _require_contained_path(
+        os.path.join(out_dir, "docs"), os.path.join(out_dir, "docs"))
+    d = _require_contained_path(docs_root, step_dir)
+    file_plan = []
+    file_map = []
+    for (original, content), stored in zip(doc_items, filenames):
+        path = _require_contained_path(d, os.path.join(d, stored))
+        file_plan.append((path, content))
+        file_map.append({
+            "original": str(original),
+            "stored": stored,
+            "relative_path": os.path.relpath(path, out_dir),
+        })
+    metadata = None
+    meta_path = None
+    if step_info is not None or file_map:
+        metadata = dict(step_info) if isinstance(step_info, dict) else {
+            "step_info": step_info,
+        }
+        metadata["snapshot_path_mode"] = path_mode
+        metadata["snapshot_full_path_budget"] = _SNAPSHOT_FULL_PATH_BUDGET
+        metadata["snapshot_files"] = file_map
+        meta_path = _require_contained_path(d, os.path.join(d, "_step.json"))
+    paths = [path for path, _content in file_plan]
+    if meta_path is not None:
+        paths.append(meta_path)
+    return d, file_plan, meta_path, metadata, paths
+
+
+def _snapshot_plan_within_budget(paths):
+    return all(_snapshot_path_within_budget(path) for path in paths)
 
 
 def dump_step_docs(out_dir, method, sample_id, rt_num, direction, state_id,
                    gen_docs, step_info=None):
-    """Always-on snapshot of the documents a step produced.
+    """Best-effort snapshot of the documents a step produced.
 
-    docs/<method>/<sample>/rt<NN>_<fwd|bwd>_<state>/<filename>   (+ _step.json)
+    docs/<method>/<sample>/rt<NN>_<dir>_<state>/<filename>   (+ _step.json)
     gen_docs is the editable output {filename: content}. Additive; independent
     of JSONL / replay."""
-    d = os.path.join(out_dir, "docs", _safe(method), _safe(sample_id),
-                     f"rt{int(rt_num):02d}_{direction}_{_safe(state_id)}")
-    os.makedirs(d, exist_ok=True)
-    for fname, content in (gen_docs or {}).items():
-        with open(os.path.join(d, _safe_doc_filename(fname)), "w", encoding="utf-8", newline="") as f:
-            f.write(content if isinstance(content, str) else str(content))
-    if step_info is not None:
-        json.dump(step_info, open(os.path.join(d, "_step.json"), "w", encoding="utf-8"),
-                  ensure_ascii=False, indent=2)
-    return d
+    try:
+        doc_items = list((gen_docs or {}).items())
+        filenames = _snapshot_filenames(doc_items)
+        plan = _snapshot_file_plan(
+            out_dir,
+            _snapshot_step_dir(
+                out_dir, method, sample_id, rt_num, direction, state_id),
+            doc_items, filenames, step_info, "legacy",
+        )
+        if not _snapshot_plan_within_budget(plan[-1]):
+            compact_filenames = [
+                _compact_doc_filename(index, fname)
+                for index, (fname, _content) in enumerate(doc_items, 1)
+            ]
+            plan = _snapshot_file_plan(
+                out_dir,
+                _compact_snapshot_step_dir(
+                    out_dir, method, sample_id, rt_num, direction, state_id),
+                doc_items, compact_filenames, step_info, "compact",
+            )
+        if not _snapshot_plan_within_budget(plan[-1]):
+            raise RuntimeError(
+                "snapshot absolute path budget exhausted "
+                f"(limit={_SNAPSHOT_FULL_PATH_BUDGET})")
+        d, file_plan, meta_path, metadata, _paths = plan
+        os.makedirs(d, exist_ok=True)
+        for path, content in file_plan:
+            with open(path, "w", encoding="utf-8", newline="") as f:
+                f.write(content if isinstance(content, str) else str(content))
+        if meta_path is not None:
+            with open(meta_path, "w", encoding="utf-8", newline="") as handle:
+                json.dump(metadata, handle, ensure_ascii=False, indent=2)
+        return d
+    except Exception as exc:
+        warn_best_effort_io("snapshot", out_dir, exc)
+        return None
