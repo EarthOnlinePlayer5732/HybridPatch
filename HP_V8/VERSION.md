@@ -96,7 +96,7 @@ V8 plan 恰好包含两个字段：
 
 `bdpatch.hybrid` 记录 prompt profile/分类命中、prompt 与 repair 字符数、信封字符/字节数、local/bulk/显式操作数、锚点字节、显式块编号数、实际 touched target 文件数和文档大小比率。`protocol_burden_exceeded` 表示 primary/repair 任一 attempt 超阈值；`protocol_burden_overages` 描述 chosen envelope，`protocol_burden_attempt_overages` 按 attempt 保存每项 `actual/threshold`。
 
-run metadata 升级为 `anchorpatch.run_metadata/3`，在锁内记录并复用 campaign 的 `run_git_commit`、`git_tree_state`、带时区 `started_at` 与 `finished_at`，拒绝跨 commit、tree state、代码指纹、campaign config、task-plan hash 或 transport 混跑。配对 dispatcher 为每个 sample 持有进程期租约，并以 active-worker set、PID、task-plan start barrier 和先落盘 authorization 后发布 ACK 的顺序阻止未授权调用；journal replay 按 semantic-call identity 审计而不误算为第二次 provider POST。first-writer-wins stop latch 在 preservation、代码/计划漂移或 campaign 停止后阻止新的语义调用；fail-fast 后只有在租约释放且 worker/PID provenance 可审计时才关闭遗留 `running` invocation。任何已有 preservation violation 会在恢复启动 worker 前拒绝 campaign。
+run metadata 升级为 `anchorpatch.run_metadata/3`，在锁内记录并复用 campaign 的 `run_git_commit`、`git_tree_state`、带时区 `started_at` 与 `finished_at`，拒绝跨 commit、tree state、代码指纹、campaign config、task-plan hash 或 transport 混跑。配对 dispatcher 为每个 sample 持有进程期租约，并以 active-worker set、PID、task-plan start barrier 和先落盘 authorization 后发布 ACK 的顺序阻止未授权调用；journal replay 按 semantic-call identity 审计而不误算为第二次 provider POST。热路径 runtime guard 只复核 first-writer-wins stop latch 与 active-worker authorization；Git/tree 与 task-plan bytes 在 startup、dispatcher authorization 和 final inspector 保持强校验。fail-fast 后只有在租约释放且 worker/PID provenance 可审计时才关闭遗留 `running` invocation。任何已有 preservation violation 会在恢复启动 worker 前拒绝 campaign。
 
 付费 dispatcher 固定 smoke 为 2 样本×2RT（16 行）、main 为用户指定 10 样本×10RT（400 行）；main 必须先严格复核同提交 smoke 的完整性、路径身份、exact final backward 可计分性、preservation tagged union、API/worker provenance 和 16/16 USD coverage，再按固定 `400/16=25` 投影。投影 `<= USD 50` 才可读取 Key 并启动 worker；该门禁是启动前成本估算，不是运行时账单上限。全新 campaign 在尚无 committed rows 时允许 checkpoint 尚未创建；一旦存在 committed rows，checkpoint 缺失或类型非法仍由 preflight 拒绝，完成态继续要求精确 RT 数和行数。
 
@@ -130,8 +130,8 @@ transport-v3 归档继续只按其历史规范解释，旧
   的 worker 才标为 `infrastructure_incomplete`；未完成 endpoint 保持 missing/null，
   其他 sample 继续。preservation、Git/tree 漂移、重复或半提交 RT、ledger 无法映射、
   非 retryable provider 错误、本地/runner/evaluator/shared-integrity 错误仍全局停止。
-- provider 返回后与 relay commit 前都会复核 latch、active worker、Git/tree 和 task-plan；
-  result rows/checkpoint commit 与 stop latch 使用同一 ordering lock。全局回收只有在
+- provider 返回后与 relay commit 前都会复核 latch 与 active worker；Git/tree 和 task-plan
+  由 startup、dispatcher authorization 与 final inspector 强校验。result rows/checkpoint commit 与 stop latch 使用同一 ordering lock。全局回收只有在
   sample lease 已释放且 metadata/exit provenance 可审计时才撤销 active set。
 - audited resume 只创建 latest incomplete sample 的 worker，从 checkpoint 第一个未提交
   RT 开始；已提交 RT 不产生新 provider POST，旧 failure/ledger/raw 全部 append-only。

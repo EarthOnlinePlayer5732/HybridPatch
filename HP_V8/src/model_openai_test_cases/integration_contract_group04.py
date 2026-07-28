@@ -62,6 +62,53 @@ class IntegrationContractGroup04Mixin:
             with self.assertRaisesRegex(RuntimeError, "invalid campaign stop"):
                 run_meta.record_campaign_stop_condition(out_dir, "new")
 
+    def test_runtime_guard_never_calls_git_or_reads_task_plan(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            active_path = os.path.join(out_dir, "active_worker_set.json")
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            run_meta.write_json_atomic(active_path, {
+                "schema": "anchorpatch.active_worker_set/1",
+                "workers": {"worker-a": {"sample": "sample"}},
+            })
+            utils_relay_plan.save_relay_task_plan(plan_path, ["target"])
+            blocked_plan = os.path.abspath(plan_path)
+            plan_reads = []
+            real_open = open
+
+            def guarded_open(path, *args, **kwargs):
+                try:
+                    candidate = os.path.abspath(os.fspath(path))
+                except TypeError:
+                    candidate = None
+                if candidate == blocked_plan:
+                    plan_reads.append((path, args, kwargs))
+                    raise AssertionError(
+                        "runtime guard must not read task-plan bytes")
+                return real_open(path, *args, **kwargs)
+
+            env = {
+                "ANCHORPATCH_WORKER_LAUNCH_ID": "worker-a",
+                "ANCHORPATCH_ACTIVE_WORKER_SET_PATH": active_path,
+                "ANCHORPATCH_EXPECTED_GIT_COMMIT": "1" * 40,
+                "ANCHORPATCH_EXPECTED_GIT_TREE_STATE": "clean",
+                "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256": "0" * 64,
+                "ANCHORPATCH_EXPECTED_TASK_PLAN_PATH": plan_path,
+            }
+            with mock.patch.dict(os.environ, env, clear=False), \
+                    mock.patch.object(
+                        run_meta, "_git_identity_details",
+                        side_effect=AssertionError(
+                            "runtime guard must not call Git")), \
+                    mock.patch.object(
+                        run_meta, "_git_identity",
+                        side_effect=AssertionError(
+                            "runtime guard must not call Git")), \
+                    mock.patch("builtins.open", side_effect=guarded_open):
+                run_meta.enforce_campaign_runtime_guards(out_dir, "sample")
+
+            self.assertEqual(plan_reads, [])
+            self.assertEqual(run_meta.read_campaign_stop_conditions(out_dir), [])
+
     def test_stop_latched_during_transport_preflight_blocks_provider_post(self):
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
             os.environ, {"OPENCODE_API_KEY": "unit-test-key"}, clear=False,

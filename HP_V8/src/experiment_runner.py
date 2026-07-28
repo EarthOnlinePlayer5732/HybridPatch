@@ -1232,9 +1232,11 @@ def run_relay(method, sample_id, num_round_trips=10, seed=42, include_distractor
                      or (bwd_rs is not None and bwd_rs <= 1e-9))
 
         # ----- atomic commit: both rows + checkpoint -----
-        # Repeat immutable identity checks after evaluation and immediately
-        # before the latch-ordered commit.  This catches Git/task-plan drift
-        # that appeared while either provider call was in flight.
+        # Repeat the hot latch/active-worker checks after evaluation and
+        # immediately before the latch-ordered commit. Git identity and
+        # task-plan bytes are locked at startup and rechecked by the dispatcher
+        # inspector, while the commit itself repeats the stop-latch check under
+        # the campaign metadata lock.
         try:
             enforce_campaign_runtime_guards(out_dir, sample_id)
         except Exception:

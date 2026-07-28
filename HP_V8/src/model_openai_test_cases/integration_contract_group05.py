@@ -875,7 +875,7 @@ class IntegrationContractGroup05Mixin:
             self.assertEqual(tree_state, "dirty")
             self.assertEqual(porcelain, "?? HP_V8/src/untracked_source.py\n")
 
-    def test_git_identity_drift_stop_records_full_porcelain(self):
+    def test_run_metadata_startup_rejects_dispatch_git_identity_drift(self):
         with tempfile.TemporaryDirectory() as repo_dir, \
                 tempfile.TemporaryDirectory() as out_dir:
             repo = pathlib.Path(repo_dir)
@@ -904,19 +904,36 @@ class IntegrationContractGroup05Mixin:
             ).stdout.strip()
             untracked_source = source_dir / "unexpected.py"
             untracked_source.write_text("unexpected\n", encoding="utf-8")
-            expected_porcelain = "?? HP_V8/src/unexpected.py\n"
             env = {
                 "ANCHORPATCH_EXPECTED_GIT_COMMIT": commit,
                 "ANCHORPATCH_EXPECTED_GIT_TREE_STATE": "clean",
             }
+            kwargs = {
+                "command": "python test",
+                "samples": ["sample"],
+                "methods": ["hybridpatch", "fullrewrite"],
+                "num_round_trips": 1,
+                "seed": 42,
+                "model": "offline-test-model",
+                "distractor": True,
+                "max_tokens": 16,
+                "printing": False,
+            }
             with mock.patch.object(run_meta, "_HERE", str(source_dir)), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value={"x": "y"}), \
                     mock.patch.dict(os.environ, env, clear=False):
-                with self.assertRaises(run_meta.CampaignStoppedError):
-                    run_meta.enforce_campaign_runtime_guards(out_dir, "sample")
-            stop = run_meta.read_campaign_stop_conditions(out_dir)[0]
-            self.assertEqual(stop["condition"], "git_identity_drift")
-            self.assertEqual(stop["actual_tree_state"], "dirty")
-            self.assertEqual(stop["git_status_porcelain"], expected_porcelain)
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "runner Git identity differs from dispatch manifest"):
+                    run_meta.append_run_metadata(out_dir, **kwargs)
+            self.assertEqual(run_meta.read_run_metadata_snapshot(out_dir), [])
+            self.assertEqual(run_meta.read_campaign_stop_conditions(out_dir), [])
+            self.assertFalse(os.path.exists(
+                os.path.join(out_dir, "api_calls.jsonl")))
+            self.assertFalse(os.path.exists(
+                os.path.join(out_dir, "api_attempt_ledger.jsonl")))
 
     def test_run_metadata_locks_task_plan_hash_before_api(self):
         kwargs = {
@@ -964,3 +981,56 @@ class IntegrationContractGroup05Mixin:
             with self.assertRaises(RuntimeError):
                 run_meta.register_task_plan(
                     out_dir, "sample", plan_path, num_round_trips=2)
+
+    def test_dispatcher_inspector_rejects_git_and_task_plan_drift(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            sample = "sample"
+            plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["state_a"])
+            plan_sha = paired_dispatch._sha256(plan_path)
+            manifest = {
+                "schema": paired_dispatch.SCHEMA,
+                "run_git_commit": "1" * 40,
+                "git_tree_state": "clean",
+                "config": {
+                    "samples": [sample],
+                    "method_set": ["fullrewrite", "hybridpatch"],
+                    "num_round_trips": 1,
+                },
+                "task_plans": {
+                    sample: {
+                        "path": os.path.basename(plan_path),
+                        "sha256": plan_sha,
+                    },
+                },
+            }
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")):
+                utils_relay_plan.save_relay_task_plan(
+                    plan_path, ["state_b"])
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertIn(
+                    "task-plan hash drift: sample",
+                    inspection["errors"],
+                )
+
+                utils_relay_plan.save_relay_task_plan(
+                    plan_path, ["state_a"])
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertNotIn(
+                    "task-plan hash drift: sample",
+                    inspection["errors"],
+                )
+
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("2" * 40, "clean")):
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir, manifest, require_complete=True)
+                self.assertIn(
+                    "Git commit/tree state changed during campaign",
+                    inspection["errors"],
+                )

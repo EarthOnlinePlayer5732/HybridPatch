@@ -574,51 +574,23 @@ def enforce_active_worker_authorization(out_dir, sample_id):
 
 
 def _enforce_pre_call_campaign_guards(out_dir, sample_id):
-    """Check the global latch and immutable campaign identity before a call."""
+    """Check the hot pre-call campaign guards.
+
+    This runs directly in the provider-call path, so it stays limited to the
+    durable stop latch and the dispatcher's active-worker authorization.  Git
+    identity and task-plan immutability remain enforced at startup,
+    dispatcher authorization, and final inspection.
+    """
     _raise_if_campaign_stopped(out_dir)
     enforce_active_worker_authorization(out_dir, sample_id)
-    expected_commit = os.environ.get("ANCHORPATCH_EXPECTED_GIT_COMMIT")
-    expected_tree = os.environ.get("ANCHORPATCH_EXPECTED_GIT_TREE_STATE")
-    if expected_commit or expected_tree:
-        current_commit, current_tree, current_status = _git_identity_details()
-        if ((expected_commit and current_commit != expected_commit)
-                or (expected_tree and current_tree != expected_tree)):
-            record_campaign_stop_condition(
-                out_dir,
-                "git_identity_drift",
-                sample=sample_id,
-                expected_commit=expected_commit,
-                actual_commit=current_commit,
-                expected_tree_state=expected_tree,
-                actual_tree_state=current_tree,
-                git_status_porcelain=current_status,
-            )
-            _raise_if_campaign_stopped(out_dir)
-    expected_plan = os.environ.get(
-        "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256")
-    plan_path = os.environ.get("ANCHORPATCH_EXPECTED_TASK_PLAN_PATH")
-    if expected_plan or plan_path:
-        actual_plan = None
-        if plan_path and os.path.isfile(plan_path):
-            with open(plan_path, "rb") as handle:
-                actual_plan = hashlib.sha256(handle.read()).hexdigest()
-        if (not expected_plan or not plan_path or actual_plan != expected_plan):
-            record_campaign_stop_condition(
-                out_dir,
-                "task_plan_drift",
-                sample=sample_id,
-                expected_sha256=expected_plan,
-                actual_sha256=actual_plan,
-            )
-            _raise_if_campaign_stopped(out_dir)
-    # Close the identity-check/latch-check window as far as a file-based latch
-    # permits. Calls already in flight may finish, but no later semantic call
-    # proceeds after another worker durably sets the latch.
+    # Close the latch-check window as far as a file-based latch permits. Calls
+    # already in flight may finish, but no later semantic call proceeds after
+    # another worker durably sets the latch.
     _raise_if_campaign_stopped(out_dir)
 
 
 def enforce_campaign_runtime_guards(out_dir, sample_id):
-    """Public pre/post-call guard for latch, worker, Git and task-plan identity."""
+    """Public hot guard for stop-latch and active-worker authorization."""
     _enforce_pre_call_campaign_guards(out_dir, sample_id)
 
 
