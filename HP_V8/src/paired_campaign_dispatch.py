@@ -2106,6 +2106,8 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
     sample_set = set(samples)
     recovery_incidents = campaign_recovery_incident_evidence(out_dir)
     recovered_worker_ids = recovery_incidents["worker_launch_ids"]
+    recovered_workers_by_sample = recovery_incidents.get(
+        "deepseek_recovered_workers", {})
     api_incident_kinds = recovery_incidents.get(
         "api_incident_kinds", {})
     parent_loss_workers = recovery_incidents[
@@ -2193,6 +2195,24 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
                 f"started: {sample}; evidence={evidence}"
             )
         status = metadata.get("status")
+        recovered_worker = recovered_workers_by_sample.get(sample)
+        recovered_identity = {
+            key: metadata.get(key)
+            for key in (
+                "sample", "status", "worker_launch_id", "worker_pid",
+                "invocation_id",
+            )
+        }
+        recovered_identity["sample"] = sample
+        if recovered_worker is not None:
+            if recovered_worker != recovered_identity:
+                raise RuntimeError(
+                    "queued resume recovered worker identity is invalid: "
+                    f"{sample}"
+                )
+            if status in {"failed", "interrupted_by_dispatcher"}:
+                allowed.add(sample)
+                continue
         if status == "interrupted_by_dispatcher":
             allowed.add(sample)
             continue
@@ -6869,10 +6889,16 @@ def _launch_under_lease(args, out_dir):
             "--dispatcher_process_lost before resume"
         )
     if os.path.isfile(pending_inspector):
+        pending = _read_json(pending_inspector)
+        recovery_mode = (
+            "--deepseek_resume_classifier_retry"
+            if pending.get("followup_kind") == "resume_classifier"
+            else "--deepseek_transport_disconnect_retry"
+        )
         raise RuntimeError(
             "DeepSeek transport inspector recovery transaction is pending; "
             "rerun authorize_ledger_lock_recovery.py "
-            "--deepseek_transport_disconnect_retry before resume"
+            f"{recovery_mode} before resume"
         )
     _resolve_confirmation_selection(args, out_dir=out_dir)
     _resolve_full234_scope(args)

@@ -12003,6 +12003,60 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 finally:
                     portalocker.unlock(lease)
 
+    def test_resume_classifier_pending_requires_explicit_recovery_mode(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "dispatch_manifest.json"),
+                {"schema": paired_dispatch.SCHEMA},
+            )
+            run_meta.write_json_atomic(
+                os.path.join(
+                    out_dir,
+                    run_meta.DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
+                ),
+                {"followup_kind": "resume_classifier"},
+            )
+            with self.assertRaisesRegex(
+                    RuntimeError, "requires its explicit recovery mode"):
+                ledger_recovery.authorize(
+                    out_dir,
+                    deepseek_transport_disconnect_retry=True,
+                )
+            pending_path = os.path.join(
+                out_dir,
+                run_meta.DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
+            )
+            run_meta.write_json_atomic(pending_path, {
+                "schema": (
+                    ledger_recovery
+                    ._DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA),
+                "authorization_record": {
+                    "deepseek_resume_classifier_followup_recovery": True,
+                    "authorization_basis": (
+                        ledger_recovery
+                        ._DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS),
+                },
+            })
+            with self.assertRaisesRegex(
+                    RuntimeError, "pending mode binding is invalid"):
+                ledger_recovery.authorize(
+                    out_dir,
+                    deepseek_transport_disconnect_retry=True,
+                )
+            run_meta.write_json_atomic(pending_path, {
+                "schema": (
+                    ledger_recovery
+                    ._DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA),
+                "followup_kind": "resume_classifier",
+                "authorization_record": {},
+            })
+            with self.assertRaisesRegex(
+                    RuntimeError, "pending mode binding is invalid"):
+                ledger_recovery.authorize(
+                    out_dir,
+                    deepseek_resume_classifier_retry=True,
+                )
+
     def _make_deepseek_initial_recovery_fixture(self, out_dir):
         manifest_path = os.path.join(
             out_dir, "dispatch_manifest.json")
@@ -12217,6 +12271,9 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "incident_api_rows": [{"row_number": 1}],
                 "recovered_worker_launch_ids": ["worker-a"],
                 "deepseek_pending_samples": [],
+                "committed_results_modified": False,
+                "checkpoint_rows_modified": False,
+                "provider_post_replay_scope": "uncommitted_steps_only",
             }
             with mock.patch.object(
                     ledger_recovery,
@@ -12322,6 +12379,9 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                 "incident_api_rows": [{"row_number": 1}],
                 "recovered_worker_launch_ids": ["worker-a"],
                 "deepseek_pending_samples": [],
+                "committed_results_modified": False,
+                "checkpoint_rows_modified": False,
+                "provider_post_replay_scope": "uncommitted_steps_only",
             }
             pending = {
                 "schema": (
@@ -13093,6 +13153,192 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
                     RuntimeError, "cannot prove pending sample"):
                 paired_dispatch._verified_deepseek_resume_missing_samples(
                     "unused", assignments)
+
+    def test_resume_accepts_exact_authorized_failed_recovered_worker(self):
+        sample = "sample"
+        worker_id = "worker-a"
+        worker_pid = 123
+        invocation_id = "invocation-a"
+        assignments = [{
+            "sample": sample,
+            "methods": ["hybridpatch", "fullrewrite"],
+        }]
+        metadata = [{
+            "samples": [sample],
+            "status": "failed",
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+            "invocation_id": invocation_id,
+        }]
+        dispatch_rows = [{
+            "event": "worker_exit",
+            "sample": sample,
+            "worker_launch_id": worker_id,
+            "pid": worker_pid,
+            "returncode": 1,
+            "disposition": "campaign_fatal",
+        }]
+        recovered_worker = {
+            "sample": sample,
+            "status": "failed",
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+            "invocation_id": invocation_id,
+        }
+        recovery = {
+            "worker_launch_ids": frozenset({worker_id}),
+            "deepseek_recovered_workers": {
+                sample: recovered_worker,
+            },
+            "dispatcher_parent_loss_workers": {},
+            "api_incident_kinds": {},
+        }
+
+        def read_jsonl(path):
+            if os.path.basename(path) == "dispatch_log.jsonl":
+                return dispatch_rows
+            if os.path.basename(path) == "api_calls.jsonl":
+                return []
+            raise AssertionError(path)
+
+        patches = (
+            mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=recovery),
+            mock.patch.object(
+                paired_dispatch, "read_run_metadata_snapshot",
+                return_value=metadata),
+            mock.patch.object(
+                paired_dispatch, "_read_jsonl", side_effect=read_jsonl),
+            mock.patch.object(
+                paired_dispatch, "_queued_pending_evidence",
+                return_value=["run_metadata.jsonl"]),
+            mock.patch.object(
+                paired_dispatch, "_worker_lease_is_held",
+                return_value=False),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertEqual(
+                paired_dispatch._verified_deepseek_resume_missing_samples(
+                    "unused", assignments),
+                {sample},
+            )
+
+        forged = {
+            **recovery,
+            "deepseek_recovered_workers": {
+                sample: {
+                    **recovered_worker,
+                    "invocation_id": "forged",
+                },
+            },
+        }
+        with mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=forged), mock.patch.object(
+                    paired_dispatch, "read_run_metadata_snapshot",
+                    return_value=metadata), mock.patch.object(
+                        paired_dispatch, "_read_jsonl",
+                        side_effect=read_jsonl), mock.patch.object(
+                            paired_dispatch, "_queued_pending_evidence",
+                            return_value=["run_metadata.jsonl"]), \
+                mock.patch.object(
+                    paired_dispatch, "_worker_lease_is_held",
+                    return_value=False):
+            with self.assertRaisesRegex(
+                    RuntimeError, "recovered worker identity is invalid"):
+                paired_dispatch._verified_deepseek_resume_missing_samples(
+                    "unused", assignments)
+
+    def test_deepseek_resume_consumes_recovered_before_pristine_audit(self):
+        assignment = {
+            "sample": "sample",
+            "methods": ["hybridpatch", "fullrewrite"],
+        }
+        recovery = {
+            "provider_access_retry_authorizations": {},
+            "provider_access_resume_samples": frozenset(),
+            "worker_launch_ids": frozenset({"worker-a"}),
+        }
+        with mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=recovery), mock.patch.object(
+                    paired_dispatch, "_latest_sample_outcomes",
+                    return_value={}), mock.patch.object(
+                        paired_dispatch,
+                        "_verified_deepseek_resume_missing_samples",
+                        return_value={"sample"}), mock.patch.object(
+                            paired_dispatch,
+                            "_verify_queued_pending_samples") as pristine:
+            selected, authorizations = (
+                paired_dispatch._select_invocation_assignments(
+                    "unused",
+                    [assignment],
+                    resume=True,
+                    target_round_trips=10,
+                    allow_pristine_pending=True,
+                    allow_deepseek_resume=True,
+                )
+            )
+        self.assertEqual(selected, [assignment])
+        self.assertEqual(authorizations, {})
+        pristine.assert_not_called()
+
+    def test_deepseek_recovered_worker_scope_is_exact_and_isolated(self):
+        worker = {
+            "sample": "sample",
+            "status": "failed",
+            "worker_launch_id": "worker-a",
+            "worker_pid": 123,
+            "invocation_id": "invocation-a",
+        }
+        self.assertTrue(
+            run_meta._deepseek_recovered_worker_scope_is_valid(
+                [worker], ["worker-a"], ["sample"], []))
+        self.assertFalse(
+            run_meta._deepseek_recovered_worker_scope_is_valid(
+                [{**worker, "worker_pid": True}],
+                ["worker-a"],
+                ["sample"],
+                [],
+            ))
+        self.assertFalse(
+            run_meta._deepseek_recovered_worker_scope_is_valid(
+                [
+                    worker,
+                    {
+                        **worker,
+                        "worker_launch_id": "worker-b",
+                        "invocation_id": "invocation-b",
+                    },
+                ],
+                ["worker-a", "worker-b"],
+                ["sample", "sample-b"],
+                [],
+            ))
+
+        authorization = {
+            "recovery_kind": run_meta.LEDGER_LOCK_RECOVERY_KIND,
+            "incident_api_rows": [],
+            "incident_attempt_rows": [],
+            "incident_transport_sidecars": [],
+            "recovered_worker_launch_ids": ["worker-a"],
+            "deepseek_recovered_workers": [worker],
+            "preauthorization_worker_launch_ids": [],
+            "provider_access_retry_authorizations": [],
+            "provider_access_resume_samples": [],
+            "authorization_id": "authorization-a",
+        }
+        run_meta.campaign_recovery_incident_evidence.cache_clear()
+        try:
+            with mock.patch.object(
+                    run_meta, "read_campaign_recovery_authorization",
+                    return_value=authorization):
+                evidence = run_meta.campaign_recovery_incident_evidence(
+                    "unused")
+        finally:
+            run_meta.campaign_recovery_incident_evidence.cache_clear()
+        self.assertEqual(evidence["deepseek_recovered_workers"], {})
 
     def test_failed_retry_audit_validates_every_attempt_and_budget_step(self):
         attempts = [

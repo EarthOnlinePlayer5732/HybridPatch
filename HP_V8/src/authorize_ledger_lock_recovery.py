@@ -27,6 +27,7 @@ from paired_campaign_dispatch import (
     _assert_worker_leases_free,
     _audit_running_invocation_provenance,
     _deepseek_campaign_runtime_identity,
+    _queued_pending_evidence,
     _valid_deepseek_transport_sidecar,
     _verified_evaluator_incomplete,
     _verified_deepseek_infrastructure_incomplete,
@@ -79,6 +80,12 @@ _DEEPSEEK_TRANSPORT_INSPECTOR_STOP_ERROR = (
     "DeepSeek retry evidence invalid at row 760; "
     "DeepSeek retry evidence invalid at row 778; "
     "DeepSeek transport sidecar invalid at row 778"
+)
+_DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX = (
+    "queued resume cannot prove pending sample was never started: "
+)
+_DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS = (
+    "explicit_user_resume_after_deepseek_resume_classifier_fix"
 )
 
 
@@ -361,6 +368,32 @@ def _reprepare_pristine_deepseek_inspector_pending(
         pending.get("authorization_record")
         if isinstance(pending, dict) else None
     )
+    classifier_followup = (
+        isinstance(record, dict)
+        and record.get(
+            "deepseek_resume_classifier_followup_recovery") is True
+        and record.get("authorization_basis")
+        == _DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS
+    )
+    pending_kind = (
+        pending.get("followup_kind")
+        if isinstance(pending, dict) else None
+    )
+    if (pending_kind not in {None, "resume_classifier"}
+            or classifier_followup
+            != (pending_kind == "resume_classifier")):
+        raise RuntimeError(
+            "DeepSeek recovery pending mode binding is invalid")
+    inspector_followup = (
+        isinstance(record, dict)
+        and record.get(
+            "deepseek_resume_classifier_followup_recovery") is not True
+        and record.get("authorization_basis")
+        == (
+            "explicit_user_resume_after_deepseek_recovery_"
+            "inspector_fix"
+        )
+    )
     if (not isinstance(record, dict)
             or pending.get("schema")
             != _DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA
@@ -372,11 +405,7 @@ def _reprepare_pristine_deepseek_inspector_pending(
             or record.get(
                 "deepseek_transport_disconnect_"
                 "inspector_followup_recovery") is not True
-            or record.get("authorization_basis")
-            != (
-                "explicit_user_resume_after_deepseek_recovery_"
-                "inspector_fix"
-            )
+            or not (inspector_followup or classifier_followup)
             or pending.get("created_at") != record.get("created_at")
             or not isinstance(record.get("created_at"), str)
             or not record.get("created_at")
@@ -398,6 +427,9 @@ def _reprepare_pristine_deepseek_inspector_pending(
     current_commit, current_tree = _git_identity()
     if current_commit == prepared_commit:
         return pending
+    if classifier_followup:
+        raise RuntimeError(
+            "DeepSeek resume-classifier pending identity has drifted")
     prepared_fingerprint = record.get("recovery_code_fingerprint")
     current_fingerprint = code_fingerprint()
     prepared_fingerprint_map = (
@@ -3080,6 +3112,29 @@ def _commit_deepseek_transport_inspector_followup(
         raise RuntimeError(
             "DeepSeek transport inspector pending recovery is invalid")
     record = pending["authorization_record"]
+    classifier_followup = (
+        record.get(
+            "deepseek_resume_classifier_followup_recovery") is True
+    )
+    pending_kind = pending.get("followup_kind")
+    if (pending_kind not in {None, "resume_classifier"}
+            or classifier_followup
+            != (pending_kind == "resume_classifier")):
+        raise RuntimeError(
+            "DeepSeek recovery pending mode binding is invalid")
+    followup_prefix = (
+        "deepseek_resume_classifier_"
+        if classifier_followup
+        else "deepseek_transport_disconnect_inspector_"
+    )
+    expected_basis = (
+        _DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS
+        if classifier_followup
+        else (
+            "explicit_user_resume_after_deepseek_recovery_"
+            "inspector_fix"
+        )
+    )
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     if (_sha256_file(manifest_path)
             != record.get("dispatch_manifest_sha256")):
@@ -3109,10 +3164,7 @@ def _commit_deepseek_transport_inspector_followup(
                 "deepseek_transport_disconnect_"
                 "inspector_followup_recovery") is not True
             or record.get("authorization_basis")
-            != (
-                "explicit_user_resume_after_deepseek_recovery_"
-                "inspector_fix"
-            )
+            != expected_basis
             or record.get("recovery_git_tree_state") != "clean"
             or not isinstance(
                 record.get(
@@ -3125,28 +3177,47 @@ def _commit_deepseek_transport_inspector_followup(
             or not isinstance(
                 record.get("deepseek_pending_samples"), list)
             or record.get("archived_emergency_stop_records") != []
+            or record.get("committed_results_modified") is not False
+            or record.get("checkpoint_rows_modified") is not False
+            or record.get("provider_post_replay_scope")
+            != "uncommitted_steps_only"
             or not isinstance(
-                record.get(
-                    "deepseek_transport_disconnect_inspector_"
-                    "prior_authorization_id"),
+                record.get(followup_prefix + "prior_authorization_id"),
+                str,
+            )
+            or not record.get(followup_prefix + "prior_authorization_id")
+            or not isinstance(
+                record.get(followup_prefix + "prior_recovery_git_commit"),
                 str,
             )
             or not record.get(
-                "deepseek_transport_disconnect_inspector_"
-                "prior_authorization_id")
-            or not isinstance(
-                record.get(
-                    "deepseek_transport_disconnect_inspector_"
-                    "prior_recovery_git_commit"),
-                str,
-            )
-            or not record.get(
-                "deepseek_transport_disconnect_inspector_"
-                "prior_recovery_git_commit")):
+                followup_prefix + "prior_recovery_git_commit")
+            or (
+                classifier_followup
+                and (
+                    not isinstance(
+                        record.get(
+                            "deepseek_resume_classifier_sample"), str)
+                    or not record.get(
+                        "deepseek_resume_classifier_sample")
+                    or not isinstance(
+                        record.get(
+                            "deepseek_resume_classifier_stop_error"), str)
+                    or not record.get(
+                        "deepseek_resume_classifier_stop_error").startswith(
+                            _DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX)
+                    or not isinstance(
+                        record.get(
+                            "deepseek_resume_classifier_evidence"), list)
+                    or not record.get(
+                        "deepseek_resume_classifier_evidence")
+                )
+            )):
         raise RuntimeError(
             "DeepSeek transport inspector pending record is invalid")
-    _validate_deepseek_inspector_reprepare_evidence(
-        out_dir, pending, record)
+    if not classifier_followup:
+        _validate_deepseek_inspector_reprepare_evidence(
+            out_dir, pending, record)
 
     history_relative = pending.get("history_dir")
     authorization_id = record.get("authorization_id")
@@ -3154,7 +3225,12 @@ def _commit_deepseek_transport_inspector_followup(
             or not authorization_id
             or authorization_id in {".", ".."}
             or "/" in authorization_id
-            or "\\" in authorization_id):
+            or "\\" in authorization_id
+            or (
+                classifier_followup
+                and re.fullmatch(
+                    r"dsr-[0-9a-f]{12}", authorization_id) is None
+            )):
         raise RuntimeError(
             "DeepSeek transport inspector pending authorization id is "
             "invalid")
@@ -3227,9 +3303,7 @@ def _commit_deepseek_transport_inspector_followup(
         "superseded_authorization_sha256")
     if (not isinstance(expected_superseded_sha256, str)
             or len(expected_superseded_sha256) != 64
-            or record.get(
-                "deepseek_transport_disconnect_inspector_"
-                "prior_authorization_sha256")
+            or record.get(followup_prefix + "prior_authorization_sha256")
             != expected_superseded_sha256):
         raise RuntimeError(
             "DeepSeek transport inspector superseded authorization "
@@ -3251,9 +3325,7 @@ def _commit_deepseek_transport_inspector_followup(
             "DeepSeek transport inspector superseded authorization "
             "source is missing")
     if (superseded_authorization.get("authorization_id")
-            != record.get(
-                "deepseek_transport_disconnect_inspector_"
-                "prior_authorization_id")):
+            != record.get(followup_prefix + "prior_authorization_id")):
         raise RuntimeError(
             "DeepSeek transport inspector superseded authorization "
             "identity has drifted")
@@ -3288,7 +3360,11 @@ def _commit_deepseek_transport_inspector_followup(
     ).hexdigest()
     dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
     event = {
-        "event": "user_authorized_deepseek_transport_inspector_followup",
+        "event": (
+            "user_authorized_deepseek_resume_classifier_followup"
+            if classifier_followup
+            else "user_authorized_deepseek_transport_inspector_followup"
+        ),
         "created_at": pending.get("created_at"),
         "campaign_recovery_authorization_id": record["authorization_id"],
         "campaign_recovery_authorization_sha256": authorization_sha256,
@@ -3296,14 +3372,14 @@ def _commit_deepseek_transport_inspector_followup(
             "authorization_id"),
         "incident_api_rows": len(record["incident_api_rows"]),
         "prior_recovery_git_commit": record[
-            "deepseek_transport_disconnect_inspector_"
-            "prior_recovery_git_commit"
-        ],
+            followup_prefix + "prior_recovery_git_commit"],
         "recovery_git_commit": record["recovery_git_commit"],
     }
+    if classifier_followup:
+        event["resume_classifier_sample"] = record[
+            "deepseek_resume_classifier_sample"]
     dispatch_prefix = (
-        record.get(
-            "deepseek_transport_disconnect_inspector_prefixes") or {}
+        record.get(followup_prefix + "prefixes") or {}
     ).get("dispatch_log.jsonl")
     _assert_recoverable_jsonl_tail(
         dispatch_path, dispatch_prefix, event)
@@ -3352,6 +3428,7 @@ def _commit_deepseek_transport_inspector_followup(
         "recovered_workers": len(record["recovered_worker_launch_ids"]),
         "pending_samples": len(record["deepseek_pending_samples"]),
         "inspector_followup": True,
+        "resume_classifier_followup": classifier_followup,
     }
 
 
@@ -3598,6 +3675,261 @@ def _authorize_deepseek_transport_inspector_followup(
         "created_at": created_at,
         "history_dir": os.path.relpath(
             history_dir, out_dir).replace("\\", "/"),
+        "authorization_record": record,
+    }
+    write_json_atomic(pending_path, pending)
+    return _commit_deepseek_transport_inspector_followup(
+        out_dir, manifest, stop_path, auth_path, pending_path, pending)
+
+
+def _authorize_deepseek_resume_classifier_followup(
+        out_dir, manifest, stop, stop_path, auth_path, prior_authorization):
+    """Supersede the exact zero-worker recovered-worker classifier gap."""
+    config = manifest.get("config") or {}
+    prior_authorization_sha256 = _sha256_file(auth_path)
+    if (prior_authorization.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or prior_authorization.get("recovery_kind")
+            != LEDGER_LOCK_RECOVERY_KIND
+            or prior_authorization.get(
+                "deepseek_transport_disconnect_retry_recovery") is not True
+            or prior_authorization.get(
+                "deepseek_transport_disconnect_inspector_followup_recovery")
+            is not True
+            or prior_authorization.get(
+                "deepseek_resume_classifier_followup_recovery") is not None
+            or prior_authorization.get("authorization_basis")
+            != (
+                "explicit_user_resume_after_deepseek_recovery_"
+                "inspector_fix"
+            )
+            or config.get("campaign_role") != "deepseek_full234"
+            or config.get("num_round_trips")
+            != DEEPSEEK_FULL234_ROUND_TRIPS
+            or config.get("transport") != DEEPSEEK_TRANSPORT
+            or config.get("transport_revision")
+            != DEEPSEEK_TRANSPORT_REVISION
+            or stop.get("schema") != STOP_CONDITION_SCHEMA
+            or stop.get("condition") != "dispatcher_integrity_failure"
+            or stop.get("worker_launch_id") is not None
+            or not isinstance(stop.get("worker_pid"), int)
+            or isinstance(stop.get("worker_pid"), bool)
+            or stop.get("worker_pid") <= 0
+            or stop.get("error_type") != "RuntimeError"
+            or not isinstance(stop.get("error"), str)
+            or not stop["error"].startswith(
+                _DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX)):
+        raise RuntimeError(
+            "DeepSeek resume-classifier follow-up boundary is invalid")
+
+    remainder = stop["error"][
+        len(_DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX):]
+    sample, separator, _serialized_evidence = remainder.partition(
+        "; evidence=")
+    assignments = {
+        item.get("sample"): item
+        for item in manifest.get("assignments") or []
+        if isinstance(item, dict)
+    }
+    assignment = assignments.get(sample)
+    recovered_workers = {
+        item.get("sample"): item
+        for item in prior_authorization.get(
+            "deepseek_recovered_workers", [])
+        if isinstance(item, dict)
+    }
+    recovered = recovered_workers.get(sample)
+    evidence = (
+        _queued_pending_evidence(
+            out_dir, sample, assignment.get("methods") or [])
+        if isinstance(assignment, dict) else None
+    )
+    expected_error = (
+        _DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX
+        + sample + f"; evidence={evidence}"
+        if isinstance(evidence, list) else None
+    )
+    if (not separator
+            or not re.fullmatch(r"[A-Za-z0-9_.-]+", sample)
+            or not isinstance(assignment, dict)
+            or not isinstance(recovered, dict)
+            or recovered.get("status") != "failed"
+            or sample not in (
+                prior_authorization.get("deepseek_resume_samples") or [])
+            or sample in (
+                prior_authorization.get("deepseek_pending_samples") or [])
+            or not evidence
+            or stop.get("error") != expected_error):
+        raise RuntimeError(
+            "DeepSeek resume-classifier failure evidence is invalid")
+
+    active = _read_json(os.path.join(out_dir, "active_worker_set.json"))
+    if active.get("workers") != {}:
+        raise RuntimeError("workers are still active")
+    samples = config.get("samples") or []
+    _assert_worker_leases_free(out_dir, samples)
+
+    manifest_digest = _sha256_file(os.path.join(
+        out_dir, "dispatch_manifest.json"))
+    prior_commit = manifest.get("run_git_commit")
+    prior_fingerprint = manifest.get("code_fingerprint")
+    prior_recovery_commit = prior_authorization.get("recovery_git_commit")
+    prior_recovery_fingerprint = prior_authorization.get(
+        "recovery_code_fingerprint")
+    if (manifest_digest
+            != prior_authorization.get("dispatch_manifest_sha256")
+            or prior_commit != prior_authorization.get("prior_git_commit")
+            or prior_fingerprint
+            != prior_authorization.get("prior_code_fingerprint")
+            or not isinstance(prior_recovery_commit, str)
+            or not isinstance(prior_recovery_fingerprint, dict)):
+        raise RuntimeError(
+            "DeepSeek resume-classifier prior authorization has drifted")
+
+    current_commit, current_tree = _git_identity()
+    recovery_fingerprint = code_fingerprint()
+    parent_line = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", current_commit],
+        check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout.split()
+    delta_changed_paths = _git_changed_paths(
+        prior_recovery_commit, current_commit)
+    required_delta_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/paired_campaign_dispatch.py",
+        "HP_V8/src/run_meta.py",
+        "HP_V8/src/test_model_openai.py",
+    }
+    delta_fingerprint_changes = sorted(
+        key for key in set(prior_recovery_fingerprint) | set(
+            recovery_fingerprint)
+        if prior_recovery_fingerprint.get(key)
+        != recovery_fingerprint.get(key)
+    )
+    fingerprint_changes = sorted(
+        key for key in set(prior_fingerprint) | set(recovery_fingerprint)
+        if prior_fingerprint.get(key) != recovery_fingerprint.get(key)
+    )
+    changed_paths = _git_changed_paths(prior_commit, current_commit)
+    required_cumulative_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/model_openai.py",
+        "HP_V8/src/paired_campaign_dispatch.py",
+        "HP_V8/src/run_meta.py",
+        "HP_V8/src/test_model_openai.py",
+        "transport/src/model_openai.py",
+        "transport/src/test_model_openai.py",
+    }
+    if (current_tree != "clean"
+            or parent_line != [current_commit, prior_recovery_commit]
+            or set(delta_changed_paths) != required_delta_paths
+            or delta_fingerprint_changes != ["run_meta.py"]
+            or fingerprint_changes != ["model_openai.py", "run_meta.py"]
+            or set(changed_paths) != required_cumulative_paths):
+        raise RuntimeError(
+            "DeepSeek resume-classifier follow-up commit scope is invalid")
+
+    scope = _deepseek_checkpoint_resume_scope(out_dir, manifest)
+    observed_incidents = [
+        (number, _canonical_record_sha256(row))
+        for number, row in scope["incident_api_rows"]
+    ]
+    expected_incidents = [
+        (item.get("row_number"), item.get("canonical_sha256"))
+        for item in prior_authorization.get("incident_api_rows") or []
+        if isinstance(item, dict)
+    ]
+    if (observed_incidents != expected_incidents
+            or scope["resume_samples"]
+            != prior_authorization.get("deepseek_resume_samples")
+            or scope["pending_samples"]
+            != prior_authorization.get("deepseek_pending_samples")
+            or scope["recovered_workers"]
+            != prior_authorization.get("deepseek_recovered_workers")):
+        raise RuntimeError(
+            "DeepSeek resume-classifier follow-up evidence has drifted")
+
+    dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+    dispatch_rows = _read_jsonl(dispatch_path)
+    prior_events = [
+        index for index, row in enumerate(dispatch_rows)
+        if (row.get("event")
+            == "user_authorized_deepseek_transport_inspector_followup"
+            and row.get("campaign_recovery_authorization_id")
+            == prior_authorization.get("authorization_id")
+            and row.get("campaign_recovery_authorization_sha256")
+            == prior_authorization_sha256)
+    ]
+    if len(prior_events) != 1:
+        raise RuntimeError(
+            "DeepSeek resume-classifier prior authorization event is invalid")
+    post_authorization_rows = dispatch_rows[prior_events[0] + 1:]
+    if (len(post_authorization_rows) != 1
+            or post_authorization_rows[0].get("event") != "campaign_stop"
+            or post_authorization_rows[0].get("error") != expected_error
+            or (post_authorization_rows[0].get(
+                "worker_reconciliation") or {}).get(
+                    "closed_invocations") != []
+            or (post_authorization_rows[0].get(
+                "worker_reconciliation") or {}).get(
+                    "audited_invocations") != []):
+        raise RuntimeError(
+            "DeepSeek resume-classifier follow-up was not zero-worker")
+
+    prefix_evidence = {
+        name: _file_prefix_evidence(os.path.join(out_dir, name))
+        for name in ("api_calls.jsonl", "dispatch_log.jsonl")
+    }
+    metadata_identities = _run_metadata_recovery_identities(
+        os.path.join(out_dir, "run_metadata.jsonl"))
+    created_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    authorization_id = "dsr-" + uuid.uuid4().hex[:12]
+    history_relative = "recovery_history/" + authorization_id
+    record = json.loads(json.dumps(prior_authorization))
+    record.update({
+        "authorization_id": authorization_id,
+        "created_at": created_at,
+        "authorization_basis": (
+            _DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS),
+        "deepseek_resume_classifier_followup_recovery": True,
+        "deepseek_resume_classifier_prior_authorization_id": (
+            prior_authorization.get("authorization_id")),
+        "deepseek_resume_classifier_prior_authorization_sha256": (
+            prior_authorization_sha256),
+        "deepseek_resume_classifier_prior_recovery_git_commit": (
+            prior_recovery_commit),
+        "deepseek_resume_classifier_delta_changed_paths": (
+            delta_changed_paths),
+        "deepseek_resume_classifier_prefixes": prefix_evidence,
+        "deepseek_resume_classifier_run_metadata_identities": (
+            metadata_identities),
+        "deepseek_resume_classifier_sample": sample,
+        "deepseek_resume_classifier_stop_error": expected_error,
+        "deepseek_resume_classifier_evidence": evidence,
+        "recovery_git_commit": current_commit,
+        "recovery_git_tree_state": "clean",
+        "recovery_code_fingerprint": recovery_fingerprint,
+        "changed_code_fingerprint_keys": fingerprint_changes,
+        "changed_tracked_paths": changed_paths,
+        "archived_stop_path": (
+            history_relative + "/campaign_stop.json"),
+        "archived_stop_sha256": _sha256_file(stop_path),
+        "archived_emergency_stop_records": [],
+        "superseded_authorization_path": (
+            history_relative
+            + "/superseded_campaign_recovery_authorization.json"),
+        "superseded_authorization_sha256": prior_authorization_sha256,
+        "committed_results_modified": False,
+        "checkpoint_rows_modified": False,
+        "provider_post_replay_scope": "uncommitted_steps_only",
+    })
+    pending_path = os.path.join(
+        out_dir, DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME)
+    pending = {
+        "schema": _DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA,
+        "followup_kind": "resume_classifier",
+        "created_at": created_at,
+        "history_dir": history_relative,
         "authorization_record": record,
     }
     write_json_atomic(pending_path, pending)
@@ -4088,11 +4420,13 @@ def authorize(
         operator_interrupted_samples=None, provider_access_retry=False,
         deepseek_server_retry=False,
         deepseek_transport_disconnect_retry=False,
+        deepseek_resume_classifier_retry=False,
         dispatcher_process_lost=False):
     out_dir = os.path.abspath(out_dir)
     selected_modes = sum(bool(value) for value in (
         operator_pause, provider_access_retry, deepseek_server_retry,
-        deepseek_transport_disconnect_retry, dispatcher_process_lost,
+        deepseek_transport_disconnect_retry,
+        deepseek_resume_classifier_retry, dispatcher_process_lost,
     ))
     if selected_modes > 1:
         raise RuntimeError("campaign recovery modes are mutually exclusive")
@@ -4162,6 +4496,10 @@ def authorize(
                             "must be completed first")
                     if os.path.isfile(pending_path):
                         pending = _read_json(pending_path)
+                        if pending.get("followup_kind") == "resume_classifier":
+                            raise RuntimeError(
+                                "DeepSeek resume-classifier recovery "
+                                "requires its explicit recovery mode")
                         pending = (
                             _reprepare_pristine_deepseek_inspector_pending(
                                 out_dir, pending_path, pending
@@ -4198,6 +4536,9 @@ def authorize(
                         and prior_authorization.get(
                             "deepseek_transport_disconnect_"
                             "inspector_followup_recovery") is True
+                        and prior_authorization.get(
+                            "deepseek_resume_classifier_"
+                            "followup_recovery") is not True
                     )
                     if ((completed_initial or completed_followup)
                             and not os.path.exists(stop_path)):
@@ -4225,6 +4566,82 @@ def authorize(
                         }
                     stop = _read_json(stop_path)
                     return _authorize_deepseek_transport_disconnect_retry(
+                        out_dir, manifest, stop, stop_path, auth_path,
+                        prior_authorization)
+            finally:
+                portalocker.unlock(lease)
+    if deepseek_resume_classifier_retry:
+        if (operator_pause or operator_interrupted_samples
+                or provider_access_retry or deepseek_server_retry
+                or deepseek_transport_disconnect_retry
+                or dispatcher_process_lost):
+            raise RuntimeError(
+                "DeepSeek resume-classifier retry cannot be combined "
+                "with other recovery modes"
+            )
+        lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
+        with open(lease_path, "a+", encoding="utf-8") as lease:
+            try:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            except portalocker.exceptions.LockException as exc:
+                raise RuntimeError(
+                    "DeepSeek resume-classifier recovery requires the "
+                    "dispatcher lease to be free") from exc
+            try:
+                with _campaign_stop_publication_lock(out_dir):
+                    manifest = _read_json(manifest_path)
+                    pending_path = os.path.join(
+                        out_dir,
+                        DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
+                    )
+                    if os.path.isfile(os.path.join(
+                            out_dir,
+                            DISPATCHER_PARENT_LOSS_PENDING_FILENAME)):
+                        raise RuntimeError(
+                            "dispatcher parent-loss recovery transaction "
+                            "must be completed first")
+                    if os.path.isfile(pending_path):
+                        pending = _read_json(pending_path)
+                        if pending.get("followup_kind") != "resume_classifier":
+                            raise RuntimeError(
+                                "a different DeepSeek recovery transaction "
+                                "is pending")
+                        return (
+                            _commit_deepseek_transport_inspector_followup(
+                                out_dir, manifest, stop_path, auth_path,
+                                pending_path, pending
+                            )
+                        )
+                    prior_authorization = (
+                        _read_json(auth_path)
+                        if os.path.exists(auth_path) else None
+                    )
+                    completed = (
+                        prior_authorization is not None
+                        and prior_authorization.get(
+                            "deepseek_resume_classifier_"
+                            "followup_recovery") is True
+                    )
+                    if completed and not os.path.exists(stop_path):
+                        verified = read_campaign_recovery_authorization(
+                            out_dir)
+                        return {
+                            "authorization_id": verified[
+                                "authorization_id"],
+                            "authorization_sha256": verified[
+                                "authorization_sha256"],
+                            "resume_classifier_followup": True,
+                            "already_authorized": True,
+                        }
+                    if (prior_authorization is None
+                            or prior_authorization.get("schema")
+                            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2):
+                        raise RuntimeError(
+                            "DeepSeek resume-classifier recovery requires "
+                            "one V2 prior authorization")
+                    stop = _read_json(stop_path)
+                    return _authorize_deepseek_resume_classifier_followup(
                         out_dir, manifest, stop, stop_path, auth_path,
                         prior_authorization)
             finally:
@@ -4638,6 +5055,8 @@ def main():
     parser.add_argument("--deepseek_server_retry", action="store_true")
     parser.add_argument(
         "--deepseek_transport_disconnect_retry", action="store_true")
+    parser.add_argument(
+        "--deepseek_resume_classifier_retry", action="store_true")
     parser.add_argument("--dispatcher_process_lost", action="store_true")
     args = parser.parse_args()
     if not args.confirm_workers_stopped:
@@ -4658,6 +5077,8 @@ def main():
         deepseek_server_retry=args.deepseek_server_retry,
         deepseek_transport_disconnect_retry=(
             args.deepseek_transport_disconnect_retry),
+        deepseek_resume_classifier_retry=(
+            args.deepseek_resume_classifier_retry),
         dispatcher_process_lost=args.dispatcher_process_lost,
     ), sort_keys=True))
 

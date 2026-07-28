@@ -109,6 +109,12 @@ _DEEPSEEK_TRANSPORT_INSPECTOR_STOP_ERROR = (
     "DeepSeek retry evidence invalid at row 778; "
     "DeepSeek transport sidecar invalid at row 778"
 )
+_DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX = (
+    "queued resume cannot prove pending sample was never started: "
+)
+_DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS = (
+    "explicit_user_resume_after_deepseek_resume_classifier_fix"
+)
 
 
 class CampaignStoppedError(RuntimeError):
@@ -3246,7 +3252,8 @@ def _deepseek_dispatcher_stopped_sidecar_evidence(out_dir, api_row):
     }
 
 
-def _deepseek_inspector_reprepare_evidence_matches(out_dir, record):
+def _deepseek_inspector_reprepare_evidence_matches(
+        out_dir, record, *, require_live_identity=True):
     prefix = "deepseek_transport_inspector_pending_reprepared_"
     suffixes = {
         "from_commit",
@@ -3331,7 +3338,10 @@ def _deepseek_inspector_reprepare_evidence_matches(out_dir, record):
                 if old_fingerprint.get(key)
                 != current_fingerprint.get(key)
             ) != ["run_meta.py"]
-            or current_fingerprint != code_fingerprint()):
+            or (
+                require_live_identity
+                and current_fingerprint != code_fingerprint()
+            )):
         return False
     try:
         parent_line = subprocess.run(
@@ -3459,6 +3469,44 @@ def _load_recovery_authorization_chain(out_dir, path, record):
     return history
 
 
+def _deepseek_recovered_worker_scope_is_valid(
+        recovered_workers, worker_ids, resume_samples, pending_samples):
+    fields = {
+        "sample",
+        "status",
+        "worker_launch_id",
+        "worker_pid",
+        "invocation_id",
+    }
+    if (not isinstance(recovered_workers, list)
+            or len(recovered_workers) != len(worker_ids)
+            or any(
+                not isinstance(item, dict)
+                or set(item) != fields
+                or not isinstance(item.get("sample"), str)
+                or not item.get("sample")
+                or item.get("status") not in {
+                    "failed", "interrupted_by_dispatcher"}
+                or not isinstance(item.get("worker_launch_id"), str)
+                or not item.get("worker_launch_id")
+                or not isinstance(item.get("worker_pid"), int)
+                or isinstance(item.get("worker_pid"), bool)
+                or item.get("worker_pid") <= 0
+                or not isinstance(item.get("invocation_id"), str)
+                or not item.get("invocation_id")
+                for item in recovered_workers)):
+        return False
+    samples = [item["sample"] for item in recovered_workers]
+    recovered_ids = [
+        item["worker_launch_id"] for item in recovered_workers]
+    return (
+        len(samples) == len(set(samples))
+        and len(recovered_ids) == len(set(recovered_ids))
+        and set(recovered_ids) == set(worker_ids)
+        and set(samples) == set(resume_samples) - set(pending_samples)
+    )
+
+
 def _preauthorization_stop_evidence_matches(
         archived_stop, preauthorization_worker_ids, expected_stop_errors):
     """Keep old worker evidence valid across an operator pause supersession."""
@@ -3552,7 +3600,14 @@ def read_campaign_recovery_authorization(
                 or not authorization_id
                 or authorization_id in {".", ".."}
                 or "/" in authorization_id
-                or "\\" in authorization_id):
+                or "\\" in authorization_id
+                or (
+                    record.get(
+                        "deepseek_resume_classifier_"
+                        "followup_recovery") is True
+                    and re.fullmatch(
+                        r"dsr-[0-9a-f]{12}", authorization_id) is None
+                )):
             raise RuntimeError(
                 "DeepSeek inspector recovery authorization id is invalid")
         expected_history_relative = (
@@ -3699,12 +3754,39 @@ def read_campaign_recovery_authorization(
                 str,
             )
         )
+        deepseek_resume_classifier_followup_stop = (
+            record.get(
+                "deepseek_resume_classifier_followup_recovery") is True
+            and record.get("authorization_basis")
+            == _DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS
+            and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition")
+            == "dispatcher_integrity_failure"
+            and archived_stop.get("worker_launch_id") is None
+            and isinstance(archived_stop.get("worker_pid"), int)
+            and not isinstance(archived_stop.get("worker_pid"), bool)
+            and archived_stop.get("worker_pid") > 0
+            and archived_stop.get("error_type") == "RuntimeError"
+            and archived_stop.get("error")
+            == record.get("deepseek_resume_classifier_stop_error")
+            and str(archived_stop.get("error") or "").startswith(
+                _DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX)
+            and isinstance(
+                record.get(
+                    "deepseek_resume_classifier_prior_authorization_id"),
+                str)
+            and isinstance(
+                record.get(
+                    "deepseek_resume_classifier_prior_authorization_sha256"),
+                str)
+        )
         deepseek_transport_disconnect_retry_recovery = (
             record.get(
                 "deepseek_transport_disconnect_retry_recovery") is True
             and (
                 deepseek_transport_disconnect_initial_stop
                 or deepseek_transport_disconnect_inspector_followup_stop
+                or deepseek_resume_classifier_followup_stop
             )
         )
         dispatcher_process_lost_stop = (
@@ -3765,6 +3847,8 @@ def read_campaign_recovery_authorization(
     if (record.get(
             "deepseek_transport_disconnect_inspector_followup_recovery"
             ) is True
+            and record.get(
+                "deepseek_resume_classifier_followup_recovery") is not True
             and not _deepseek_inspector_reprepare_evidence_matches(
                 out_dir, record)):
         raise RuntimeError(
@@ -3782,7 +3866,8 @@ def read_campaign_recovery_authorization(
         )
     if record.get(
             "deepseek_transport_disconnect_inspector_followup_recovery"
-            ) is True:
+            ) is True and record.get(
+                "deepseek_resume_classifier_followup_recovery") is not True:
         if len(recovery_chain) < 2:
             raise RuntimeError(
                 "DeepSeek inspector follow-up authorization chain is "
@@ -3964,6 +4049,343 @@ def read_campaign_recovery_authorization(
                     expected_witness)):
             raise RuntimeError(
                 "DeepSeek inspector follow-up dispatch witness mismatch")
+    if record.get(
+            "deepseek_resume_classifier_followup_recovery") is True:
+        if len(recovery_chain) < 3:
+            raise RuntimeError(
+                "DeepSeek resume-classifier authorization chain is "
+                "incomplete")
+        inspector_item = recovery_chain[1]
+        initial_item = recovery_chain[2]
+        inspector = inspector_item["record"]
+        initial = initial_item["record"]
+        inspector_commit = inspector.get("recovery_git_commit")
+        inspector_fingerprint = inspector.get(
+            "recovery_code_fingerprint")
+        initial_commit = initial.get("recovery_git_commit")
+        initial_fingerprint = initial.get("recovery_code_fingerprint")
+        if (record.get("authorization_basis")
+                != _DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS
+                or inspector.get(
+                    "deepseek_transport_disconnect_"
+                    "inspector_followup_recovery") is not True
+                or inspector.get(
+                    "deepseek_resume_classifier_"
+                    "followup_recovery") is not None
+                or inspector.get("authorization_basis")
+                != (
+                    "explicit_user_resume_after_deepseek_recovery_"
+                    "inspector_fix"
+                )
+                or initial.get(
+                    "deepseek_transport_disconnect_retry_recovery")
+                is not True
+                or initial.get(
+                    "deepseek_transport_disconnect_"
+                    "inspector_followup_recovery") is not None
+                or initial.get("authorization_basis")
+                != (
+                    "explicit_user_resume_after_deepseek_transport_"
+                    "disconnect_classifier_fix"
+                )
+                or inspector.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_authorization_id")
+                != initial.get("authorization_id")
+                or inspector.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_authorization_sha256")
+                != initial_item["sha256"]
+                or inspector.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "prior_recovery_git_commit") != initial_commit
+                or record.get(
+                    "deepseek_resume_classifier_prior_authorization_id")
+                != inspector.get("authorization_id")
+                or record.get(
+                    "deepseek_resume_classifier_prior_authorization_sha256")
+                != inspector_item["sha256"]
+                or record.get(
+                    "deepseek_resume_classifier_prior_recovery_git_commit")
+                != inspector_commit
+                or record.get("committed_results_modified") is not False
+                or record.get("checkpoint_rows_modified") is not False
+                or record.get("provider_post_replay_scope")
+                != "uncommitted_steps_only"
+                or not isinstance(inspector_fingerprint, dict)
+                or not isinstance(initial_fingerprint, dict)):
+            raise RuntimeError(
+                "DeepSeek resume-classifier superseded authorization "
+                "mismatch")
+        if (initial.get(
+                "deepseek_transport_disconnect_initial_transaction") is True
+                and not _deepseek_initial_recovery_witness_matches(
+                    out_dir, initial, initial_item["sha256"])):
+            raise RuntimeError(
+                "DeepSeek resume-classifier initial authorization witness "
+                "mismatch")
+
+        allowed_changed_keys = {
+            "authorization_id",
+            "created_at",
+            "authorization_basis",
+            "deepseek_resume_classifier_followup_recovery",
+            "deepseek_resume_classifier_prior_authorization_id",
+            "deepseek_resume_classifier_prior_authorization_sha256",
+            "deepseek_resume_classifier_prior_recovery_git_commit",
+            "deepseek_resume_classifier_delta_changed_paths",
+            "deepseek_resume_classifier_prefixes",
+            "deepseek_resume_classifier_run_metadata_identities",
+            "deepseek_resume_classifier_sample",
+            "deepseek_resume_classifier_stop_error",
+            "deepseek_resume_classifier_evidence",
+            "recovery_git_commit",
+            "recovery_git_tree_state",
+            "recovery_code_fingerprint",
+            "changed_code_fingerprint_keys",
+            "changed_tracked_paths",
+            "archived_stop_path",
+            "archived_stop_sha256",
+            "archived_emergency_stop_records",
+            "superseded_authorization_path",
+            "superseded_authorization_sha256",
+            "committed_results_modified",
+            "checkpoint_rows_modified",
+            "provider_post_replay_scope",
+        }
+        if any(
+                record.get(key) != inspector.get(key)
+                for key in set(record) | set(inspector)
+                if key not in allowed_changed_keys):
+            raise RuntimeError(
+                "DeepSeek resume-classifier authorization scope changed")
+
+        def _archived_stop_for(layer):
+            relative = layer.get("archived_stop_path")
+            if not isinstance(relative, str) or not relative:
+                return None
+            candidate = os.path.realpath(os.path.join(out_dir, relative))
+            try:
+                inside = (
+                    os.path.commonpath([out_dir, candidate]) == out_dir)
+            except ValueError:
+                inside = False
+            if (not inside or not os.path.isfile(candidate)
+                    or _sha256_file(candidate)
+                    != layer.get("archived_stop_sha256")):
+                return None
+            try:
+                with open(candidate, encoding="utf-8") as handle:
+                    value = json.load(handle)
+            except (OSError, ValueError):
+                return None
+            return value if isinstance(value, dict) else None
+
+        initial_stop = _archived_stop_for(initial)
+        inspector_stop = _archived_stop_for(inspector)
+        if (initial_stop is None
+                or initial_stop.get("schema") != STOP_CONDITION_SCHEMA
+                or initial_stop.get("condition") != "worker_fatal_error"
+                or initial_stop.get("error_type")
+                != "OpenAICompatibleTransportError"
+                or initial_stop.get("error")
+                != "OpenAI-compatible provider failed after 1 attempt(s)"
+                or initial.get(
+                    "deepseek_transport_disconnect_retry_samples")
+                != [initial_stop.get("sample")]
+                or initial.get(
+                    "deepseek_transport_disconnect_retry_worker_launch_id")
+                != initial_stop.get("worker_launch_id")
+                or inspector_stop is None
+                or inspector_stop.get("schema")
+                != STOP_CONDITION_SCHEMA
+                or inspector_stop.get("condition")
+                != "dispatcher_integrity_failure"
+                or inspector_stop.get("worker_launch_id") is not None
+                or inspector_stop.get("error_type") != "RuntimeError"
+                or inspector_stop.get("error")
+                != _DEEPSEEK_TRANSPORT_INSPECTOR_STOP_ERROR):
+            raise RuntimeError(
+                "DeepSeek resume-classifier historical stop scope mismatch")
+
+        def _git_delta(older, newer):
+            return sorted(
+                item.replace("\\", "/")
+                for item in subprocess.run(
+                    [
+                        "git", "-C", _HERE, "diff", "--name-only",
+                        older, newer, "--",
+                    ],
+                    check=True, capture_output=True, text=True,
+                    encoding="utf-8",
+                ).stdout.splitlines()
+                if item
+            )
+
+        expected_delta_paths = {
+            "HP_V8/src/authorize_ledger_lock_recovery.py",
+            "HP_V8/src/paired_campaign_dispatch.py",
+            "HP_V8/src/run_meta.py",
+            "HP_V8/src/test_model_openai.py",
+        }
+        try:
+            inspector_delta = _git_delta(
+                initial_commit, inspector_commit)
+            classifier_delta = _git_delta(
+                inspector_commit, current_commit)
+            parent_line = subprocess.run(
+                [
+                    "git", "-C", _HERE, "rev-list", "--parents",
+                    "-n", "1", current_commit,
+                ],
+                check=True, capture_output=True, text=True,
+                encoding="utf-8",
+            ).stdout.split()
+        except (OSError, subprocess.CalledProcessError, TypeError) as exc:
+            raise RuntimeError(
+                "cannot audit DeepSeek resume-classifier Git history"
+            ) from exc
+        inspector_fingerprint_delta = sorted(
+            key for key in set(initial_fingerprint) | set(
+                inspector_fingerprint)
+            if initial_fingerprint.get(key)
+            != inspector_fingerprint.get(key)
+        )
+        classifier_fingerprint_delta = sorted(
+            key for key in set(inspector_fingerprint) | set(
+                current_fingerprint)
+            if inspector_fingerprint.get(key)
+            != current_fingerprint.get(key)
+        )
+        if (set(inspector_delta) != expected_delta_paths
+                or inspector_delta != inspector.get(
+                    "deepseek_transport_disconnect_inspector_"
+                    "delta_changed_paths")
+                or inspector_fingerprint_delta != ["run_meta.py"]
+                or set(classifier_delta) != expected_delta_paths
+                or classifier_delta != record.get(
+                    "deepseek_resume_classifier_delta_changed_paths")
+                or classifier_fingerprint_delta != ["run_meta.py"]
+                or parent_line != [current_commit, inspector_commit]):
+            raise RuntimeError(
+                "DeepSeek resume-classifier code scope mismatch")
+
+        if not _deepseek_inspector_reprepare_evidence_matches(
+                out_dir, inspector, require_live_identity=False):
+            raise RuntimeError(
+                "DeepSeek historical inspector reprepare evidence mismatch")
+
+        def _prefixes_match(layer, field):
+            prefixes = layer.get(field)
+            expected_names = {"api_calls.jsonl", "dispatch_log.jsonl"}
+            return (
+                isinstance(prefixes, dict)
+                and set(prefixes) == expected_names
+                and all(
+                    _file_prefix_matches(
+                        os.path.join(out_dir, name), prefixes[name])
+                    for name in expected_names
+                )
+            )
+
+        if (not _prefixes_match(
+                inspector,
+                "deepseek_transport_disconnect_inspector_prefixes")
+                or not _prefixes_match(
+                    record, "deepseek_resume_classifier_prefixes")
+                or not _run_metadata_recovery_prefix_matches(
+                    os.path.join(out_dir, "run_metadata.jsonl"),
+                    inspector.get(
+                        "deepseek_transport_disconnect_inspector_"
+                        "run_metadata_identities"))
+                or not _run_metadata_recovery_prefix_matches(
+                    os.path.join(out_dir, "run_metadata.jsonl"),
+                    record.get(
+                        "deepseek_resume_classifier_"
+                        "run_metadata_identities"))):
+            raise RuntimeError(
+                "DeepSeek resume-classifier evidence prefix mismatch")
+
+        sample = record.get("deepseek_resume_classifier_sample")
+        evidence = record.get("deepseek_resume_classifier_evidence")
+        expected_error = (
+            _DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX
+            + str(sample) + f"; evidence={evidence}"
+        )
+        recovered_by_sample = {
+            item.get("sample"): item
+            for item in record.get("deepseek_recovered_workers") or []
+            if isinstance(item, dict)
+        }
+        if (not isinstance(sample, str) or not sample
+                or not isinstance(evidence, list) or not evidence
+                or record.get("deepseek_resume_classifier_stop_error")
+                != expected_error
+                or recovered_by_sample.get(sample, {}).get("status")
+                != "failed"
+                or sample not in (
+                    record.get("deepseek_resume_samples") or [])
+                or sample in (
+                    record.get("deepseek_pending_samples") or [])):
+            raise RuntimeError(
+                "DeepSeek resume-classifier sample scope mismatch")
+
+        inspector_expected_witness = {
+            "event": (
+                "user_authorized_deepseek_transport_inspector_followup"),
+            "created_at": inspector.get("created_at"),
+            "campaign_recovery_authorization_id": inspector.get(
+                "authorization_id"),
+            "campaign_recovery_authorization_sha256": (
+                inspector_item["sha256"]),
+            "superseded_authorization_id": initial.get(
+                "authorization_id"),
+            "incident_api_rows": len(
+                inspector.get("incident_api_rows") or []),
+            "prior_recovery_git_commit": initial_commit,
+            "recovery_git_commit": inspector_commit,
+        }
+        classifier_expected_witness = {
+            "event": (
+                "user_authorized_deepseek_resume_classifier_followup"),
+            "created_at": record.get("created_at"),
+            "campaign_recovery_authorization_id": record.get(
+                "authorization_id"),
+            "campaign_recovery_authorization_sha256": _sha256_file(path),
+            "superseded_authorization_id": inspector.get(
+                "authorization_id"),
+            "incident_api_rows": len(record.get("incident_api_rows") or []),
+            "prior_recovery_git_commit": inspector_commit,
+            "recovery_git_commit": current_commit,
+            "resume_classifier_sample": sample,
+        }
+        dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+        dispatch_rows = _read_jsonl_records_with_retry(dispatch_path)
+        for layer, prefix_field, expected_witness in (
+                (
+                    inspector,
+                    "deepseek_transport_disconnect_inspector_prefixes",
+                    inspector_expected_witness,
+                ),
+                (
+                    record,
+                    "deepseek_resume_classifier_prefixes",
+                    classifier_expected_witness,
+                )):
+            witness_rows = [
+                row for row in dispatch_rows
+                if row.get("event") == expected_witness["event"]
+                and row.get("campaign_recovery_authorization_id")
+                == layer.get("authorization_id")
+            ]
+            if (len(witness_rows) != 1
+                    or witness_rows[0] != expected_witness
+                    or not _jsonl_first_suffix_record_matches(
+                        dispatch_path,
+                        layer[prefix_field]["dispatch_log.jsonl"],
+                        expected_witness)):
+                raise RuntimeError(
+                    "DeepSeek resume-classifier dispatch witness mismatch")
     prior_fingerprint = record.get("prior_code_fingerprint")
     if not isinstance(prior_fingerprint, dict):
         raise RuntimeError("campaign recovery prior fingerprint is invalid")
@@ -4076,6 +4498,12 @@ def read_campaign_recovery_authorization(
             deepseek_server_retry
             or deepseek_transport_disconnect_retry
         )
+        deepseek_worker_scope = record.get("deepseek_recovered_workers")
+        if (not deepseek_retry
+                and deepseek_worker_scope is not None
+                and deepseek_worker_scope != []):
+            raise RuntimeError(
+                "non-DeepSeek recovery carries DeepSeek worker scope")
         validated_api = _validate_rows("api_calls.jsonl", api_incidents)
         validated_attempts = (
             []
@@ -4104,19 +4532,47 @@ def read_campaign_recovery_authorization(
                     or not isinstance(pending_samples, list)
                     or len(pending_samples) != len(set(pending_samples))
                     or not set(pending_samples) <= set(resume_samples)
-                    or not isinstance(recovered_workers, list)
-                    or {
-                        item.get("worker_launch_id")
-                        for item in recovered_workers
-                        if isinstance(item, dict)
-                    } != set(worker_ids)
-                    or {
-                        item.get("sample")
-                        for item in recovered_workers
-                        if isinstance(item, dict)
-                    } != set(resume_samples) - set(pending_samples)):
+                    or not _deepseek_recovered_worker_scope_is_valid(
+                        recovered_workers,
+                        worker_ids,
+                        resume_samples,
+                        pending_samples,
+                    )):
                 raise RuntimeError(
                     "campaign DeepSeek retry sample scope is invalid")
+
+            metadata_rows = read_run_metadata_snapshot(out_dir)
+            dispatch_rows = _read_jsonl_records_with_retry(
+                os.path.join(out_dir, "dispatch_log.jsonl"))
+            for recovered_worker in recovered_workers:
+                metadata_matches = [
+                    row for row in metadata_rows
+                    if recovered_worker["sample"] in (
+                        row.get("samples") or [])
+                    and all(
+                        row.get(key) == recovered_worker[key]
+                        for key in (
+                            "status",
+                            "worker_launch_id",
+                            "worker_pid",
+                            "invocation_id",
+                        )
+                    )
+                ]
+                exit_matches = [
+                    row for row in dispatch_rows
+                    if row.get("event") == "worker_exit"
+                    and row.get("sample") == recovered_worker["sample"]
+                    and row.get("worker_launch_id")
+                    == recovered_worker["worker_launch_id"]
+                    and row.get("pid") == recovered_worker["worker_pid"]
+                    and row.get("returncode") != 0
+                    and row.get("disposition") == "campaign_fatal"
+                ]
+                if len(metadata_matches) != 1 or len(exit_matches) != 1:
+                    raise RuntimeError(
+                        "campaign DeepSeek recovered worker evidence "
+                        "mismatch")
 
             committed_call_ids = set()
             for method in ("hybridpatch", "fullrewrite"):
@@ -5586,6 +6042,7 @@ def campaign_recovery_incident_evidence(out_dir):
             "transport_sidecar_hashes": frozenset(),
             "transport_sidecars_by_api_row_hash": {},
             "worker_launch_ids": frozenset(),
+            "deepseek_recovered_workers": {},
             "preauthorization_worker_launch_ids": frozenset(),
             "provider_access_retry_authorizations": {},
             "provider_access_resume_samples": frozenset(),
@@ -5597,6 +6054,15 @@ def campaign_recovery_incident_evidence(out_dir):
         for item in authorization.get(
             "provider_access_retry_authorizations", [])
     }
+    deepseek_recovered_workers = (
+        authorization.get("deepseek_recovered_workers", [])
+        if (
+            authorization.get("deepseek_server_retry_recovery") is True
+            or authorization.get(
+                "deepseek_transport_disconnect_retry_recovery") is True
+        )
+        else []
+    )
     return {
         "api_row_hashes": frozenset({
             item["canonical_sha256"]
@@ -5623,6 +6089,13 @@ def campaign_recovery_incident_evidence(out_dir):
         },
         "worker_launch_ids": frozenset(
             authorization["recovered_worker_launch_ids"]),
+        "deepseek_recovered_workers": {
+            item["sample"]: dict(item)
+            for item in deepseek_recovered_workers
+            if isinstance(item, dict)
+            and isinstance(item.get("sample"), str)
+            and item.get("sample")
+        },
         "preauthorization_worker_launch_ids": frozenset(
             authorization.get("preauthorization_worker_launch_ids", [])),
         "provider_access_retry_authorizations": provider_access_retries,
