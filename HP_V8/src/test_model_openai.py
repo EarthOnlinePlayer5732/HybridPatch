@@ -10399,6 +10399,129 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
         )
 
+    def test_openai_connection_error_is_retried_and_recorded(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                model_openai.APIConnectionError(
+                    request=httpx.Request(
+                        "POST",
+                        "https://opencode.ai/zen/go/v1/chat/completions",
+                    ),
+                ),
+                _official_payload(content="complete", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        self.assertEqual(result["http_attempts_used"], 2)
+        self.assertEqual(result["retry_count"], 1)
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["status"], "retryable_error")
+        self.assertEqual(first["error_type"], "transport_disconnect")
+        self.assertEqual(first["error_message"], "Connection error.")
+        self.assertIsNone(first["http_status"])
+        self.assertIs(first["retry_budget_consumed"], True)
+        self.assertEqual(first["retry_budget_attempt_index"], 1)
+
+    def test_openai_connection_error_exhaustion_is_bounded(self):
+        captures = []
+        failures = [
+            model_openai.APIConnectionError(
+                request=httpx.Request(
+                    "POST",
+                    "https://opencode.ai/zen/go/v1/chat/completions",
+                ),
+            )
+            for _index in range(3)
+        ]
+        with self.assertRaises(
+                model_openai.OpenAICompatibleTransportError) as caught:
+            self._generate(failures, captures, max_retries=3)
+        attempts = caught.exception.transport_attempts
+        self.assertEqual(len(attempts), 3)
+        self.assertTrue(all(
+            item["status"] == "retryable_error"
+            and item["error_type"] == "transport_disconnect"
+            and item["retry_budget_consumed"] is True
+            for item in attempts
+        ))
+        self.assertEqual(
+            [item["retry_budget_attempt_index"] for item in attempts],
+            [1, 2, 3],
+        )
+
+    def test_transport_error_before_first_chunk_is_incomplete_and_retried(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                [httpx.ReadTimeout("timed out before first chunk")],
+                _official_payload(content="complete", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["status"], "retryable_error")
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(first["http_status"], 200)
+        self.assertEqual(first["response_started_http_status"], 200)
+        self.assertFalse(first["generation_delta_seen"])
+        self.assertTrue(first["retry_budget_consumed"])
+
+    def test_sdk_error_before_first_chunk_is_incomplete_and_retried(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                [model_openai.APIError(
+                    "SSE error event",
+                    request=httpx.Request(
+                        "POST",
+                        "https://opencode.ai/zen/go/v1/chat/completions",
+                    ),
+                    body={"error": "temporary upstream failure"},
+                )],
+                _official_payload(content="complete", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["status"], "retryable_error")
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(first["response_started_http_status"], 200)
+        self.assertFalse(first["generation_delta_seen"])
+
+    def test_malformed_first_sse_is_incomplete_and_retried(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                [json.JSONDecodeError("malformed SSE", "not-json", 0)],
+                _official_payload(content="complete", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["status"], "retryable_error")
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(first["response_started_http_status"], 200)
+        self.assertFalse(first["generation_delta_seen"])
+
+    def test_transport_observability_failure_is_not_stream_retryable(self):
+        failure = httpx.ReadError("connection reset in local evidence sink")
+        failure._anchorpatch_transport_observability_failure = True
+        failure._opencode_attempt = {
+            "response_started_http_status": 200,
+            "generation_delta_seen": False,
+        }
+        self.assertFalse(
+            model_openai._is_incomplete_stream_exception(failure)
+        )
+        self.assertFalse(
+            model_openai._is_retryable_opencode_error(failure)
+        )
+
     def test_503_retries_do_not_consume_retry_budget(self):
         captures = []
         body = {
@@ -11827,6 +11950,109 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             },
             outcome,
         )
+
+    def test_resume_accepts_only_hash_bound_disconnect_misclassification(self):
+        sample = "sample"
+        worker_id = "worker-a"
+        worker_pid = 123
+        api_row = {
+            "sample": sample,
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+            "classification": "runner_exception",
+            "error_type": "transport_disconnect",
+            "http_status": None,
+            "provider_called": True,
+            "stream_complete": False,
+            "response_replayed": False,
+            "count_as_method_failure": True,
+            "transport_attempts": [{
+                "attempt_index": 1,
+                "status": "fatal_error",
+                "error_type": "transport_disconnect",
+            }],
+        }
+        api_digest = run_meta._canonical_record_sha256(api_row)
+        assignments = [{
+            "sample": sample,
+            "methods": ["hybridpatch", "fullrewrite"],
+        }]
+        metadata = [{
+            "samples": [sample],
+            "status": "failed",
+            "worker_launch_id": worker_id,
+            "worker_pid": worker_pid,
+        }]
+        dispatch_rows = [{
+            "event": "worker_exit",
+            "sample": sample,
+            "worker_launch_id": worker_id,
+            "pid": worker_pid,
+            "returncode": 1,
+            "disposition": "campaign_fatal",
+        }]
+
+        def read_jsonl(path):
+            if os.path.basename(path) == "dispatch_log.jsonl":
+                return dispatch_rows
+            if os.path.basename(path) == "api_calls.jsonl":
+                return [api_row]
+            raise AssertionError(path)
+
+        recovery = {
+            "worker_launch_ids": frozenset({worker_id}),
+            "dispatcher_parent_loss_workers": {},
+            "api_incident_kinds": {
+                api_digest: (
+                    "deepseek_transport_disconnect_misclassification"),
+            },
+        }
+        patches = (
+            mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=recovery),
+            mock.patch.object(
+                paired_dispatch, "read_run_metadata_snapshot",
+                return_value=metadata),
+            mock.patch.object(
+                paired_dispatch, "_read_jsonl", side_effect=read_jsonl),
+            mock.patch.object(
+                paired_dispatch, "_queued_pending_evidence",
+                return_value=["run_metadata.jsonl"]),
+            mock.patch.object(
+                paired_dispatch, "_worker_lease_is_held",
+                return_value=False),
+        )
+        with patches[0], patches[1], patches[2], patches[3], patches[4]:
+            self.assertEqual(
+                paired_dispatch._verified_deepseek_resume_missing_samples(
+                    "unused", assignments),
+                {sample},
+            )
+
+        forged_recovery = {
+            **recovery,
+            "api_incident_kinds": {
+                "0" * 64: (
+                    "deepseek_transport_disconnect_misclassification"),
+            },
+        }
+        with mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=forged_recovery), mock.patch.object(
+                    paired_dispatch, "read_run_metadata_snapshot",
+                    return_value=metadata), mock.patch.object(
+                        paired_dispatch, "_read_jsonl",
+                        side_effect=read_jsonl), mock.patch.object(
+                            paired_dispatch, "_queued_pending_evidence",
+                            return_value=["run_metadata.jsonl"]), \
+                mock.patch.object(
+                    paired_dispatch, "_worker_lease_is_held",
+                    return_value=False):
+            with self.assertRaisesRegex(
+                    RuntimeError, "cannot prove pending sample"):
+                paired_dispatch._verified_deepseek_resume_missing_samples(
+                    "unused", assignments)
 
     def test_failed_retry_audit_validates_every_attempt_and_budget_step(self):
         attempts = [

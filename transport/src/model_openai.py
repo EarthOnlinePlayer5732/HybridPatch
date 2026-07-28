@@ -5,7 +5,14 @@ Set OPENAI_API_KEY (or AZURE_OPENAI_API_KEY + AZURE_OPENAI_ENDPOINT) in your
 environment before running.
 """
 
-from openai import OpenAI, AzureOpenAI
+from openai import (
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    AzureOpenAI,
+    OpenAI,
+)
+import httpx
 import os, time, json, re
 import concurrent.futures
 import urllib.error
@@ -640,6 +647,15 @@ def _is_incomplete_stream_exception(exc, attempt=None):
     if (is_sdk_status_error and code == 200
             and "streaming response failed" in message):
         return True
+    if (
+            isinstance(state, dict)
+            and state.get("response_started_http_status") == 200
+            and (
+                getattr(
+                    exc, "_anchorpatch_stream_iteration_failure", False)
+                or isinstance(exc, (APIError, httpx.TransportError))
+            )):
+        return True
 
     if _stream_event_seen(state):
         state = state or {}
@@ -678,11 +694,15 @@ def _transport_error_type(exc, attempt=None):
 
 
 def _is_retryable_opencode_error(exc, attempt=None):
+    if getattr(exc, "_anchorpatch_transport_observability_failure", False):
+        return False
     if _is_incomplete_stream_exception(exc, attempt):
         return True
     code = _transport_status_code(exc)
     if code is not None:
         return code in (408, 409, 429) or code >= 500
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
     if anthropic is not None and isinstance(
         exc, (anthropic.APIConnectionError, anthropic.APITimeoutError)
     ):
@@ -887,7 +907,18 @@ def _call_openai_compatible_stream(
         # opened successfully. Preserve that 200 if a later EOF/connection
         # exception carries no status of its own.
         state["response_started_http_status"] = 200
-        for chunk in stream:
+        stream_iterator = iter(stream)
+        while True:
+            try:
+                chunk = next(stream_iterator)
+            except StopIteration:
+                break
+            except Exception as exc:
+                try:
+                    exc._anchorpatch_stream_iteration_failure = True
+                except Exception:
+                    pass
+                raise
             plain = _as_plain_dict(chunk)
             raw_chunks.append(plain)
             state["message_start_seen"] = True

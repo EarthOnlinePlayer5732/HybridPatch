@@ -2104,6 +2104,8 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
     sample_set = set(samples)
     recovery_incidents = campaign_recovery_incident_evidence(out_dir)
     recovered_worker_ids = recovery_incidents["worker_launch_ids"]
+    api_incident_kinds = recovery_incidents.get(
+        "api_incident_kinds", {})
     parent_loss_workers = recovery_incidents[
         "dispatcher_parent_loss_workers"
     ]
@@ -2198,7 +2200,29 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
                 if row.get("sample") == sample
                 and _deepseek_failed_retry_row(row)
             ]
-            if len(failed_rows) == 1:
+            authorized_disconnect_rows = [
+                row for row in api_rows_by_worker.get(worker_id, [])
+                if (row.get("sample") == sample
+                    and api_incident_kinds.get(
+                        _canonical_record_sha256(row))
+                    == (
+                        "deepseek_transport_disconnect_"
+                        "misclassification"
+                    )
+                    and row.get("classification") == "runner_exception"
+                    and row.get("error_type") == "transport_disconnect"
+                    and row.get("http_status") is None
+                    and row.get("provider_called") is True
+                    and row.get("stream_complete") is False
+                    and row.get("response_replayed") is False
+                    and row.get("count_as_method_failure") is True
+                    and isinstance(row.get("transport_attempts"), list)
+                    and len(row.get("transport_attempts")) == 1
+                    and row["transport_attempts"][0].get("status")
+                    == "fatal_error")
+            ]
+            if (len(failed_rows) == 1
+                    or len(authorized_disconnect_rows) == 1):
                 allowed.add(sample)
                 continue
         raise RuntimeError(

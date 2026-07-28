@@ -2041,6 +2041,129 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             ["attempt_start", "attempt_end", "attempt_start", "attempt_end"],
         )
 
+    def test_openai_connection_error_is_retried_and_recorded(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                model_openai.APIConnectionError(
+                    request=httpx.Request(
+                        "POST",
+                        "https://opencode.ai/zen/go/v1/chat/completions",
+                    ),
+                ),
+                _official_payload(content="complete", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        self.assertEqual(result["http_attempts_used"], 2)
+        self.assertEqual(result["retry_count"], 1)
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["status"], "retryable_error")
+        self.assertEqual(first["error_type"], "transport_disconnect")
+        self.assertEqual(first["error_message"], "Connection error.")
+        self.assertIsNone(first["http_status"])
+        self.assertIs(first["retry_budget_consumed"], True)
+        self.assertEqual(first["retry_budget_attempt_index"], 1)
+
+    def test_openai_connection_error_exhaustion_is_bounded(self):
+        captures = []
+        failures = [
+            model_openai.APIConnectionError(
+                request=httpx.Request(
+                    "POST",
+                    "https://opencode.ai/zen/go/v1/chat/completions",
+                ),
+            )
+            for _index in range(3)
+        ]
+        with self.assertRaises(
+                model_openai.OpenAICompatibleTransportError) as caught:
+            self._generate(failures, captures, max_retries=3)
+        attempts = caught.exception.transport_attempts
+        self.assertEqual(len(attempts), 3)
+        self.assertTrue(all(
+            item["status"] == "retryable_error"
+            and item["error_type"] == "transport_disconnect"
+            and item["retry_budget_consumed"] is True
+            for item in attempts
+        ))
+        self.assertEqual(
+            [item["retry_budget_attempt_index"] for item in attempts],
+            [1, 2, 3],
+        )
+
+    def test_transport_error_before_first_chunk_is_incomplete_and_retried(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                [httpx.ReadTimeout("timed out before first chunk")],
+                _official_payload(content="complete", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["status"], "retryable_error")
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(first["http_status"], 200)
+        self.assertEqual(first["response_started_http_status"], 200)
+        self.assertFalse(first["generation_delta_seen"])
+        self.assertTrue(first["retry_budget_consumed"])
+
+    def test_sdk_error_before_first_chunk_is_incomplete_and_retried(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                [model_openai.APIError(
+                    "SSE error event",
+                    request=httpx.Request(
+                        "POST",
+                        "https://opencode.ai/zen/go/v1/chat/completions",
+                    ),
+                    body={"error": "temporary upstream failure"},
+                )],
+                _official_payload(content="complete", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["status"], "retryable_error")
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(first["response_started_http_status"], 200)
+        self.assertFalse(first["generation_delta_seen"])
+
+    def test_malformed_first_sse_is_incomplete_and_retried(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                [json.JSONDecodeError("malformed SSE", "not-json", 0)],
+                _official_payload(content="complete", finish_reason="stop"),
+            ],
+            captures,
+        )
+        self.assertEqual(result["message"], "complete")
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["status"], "retryable_error")
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(first["response_started_http_status"], 200)
+        self.assertFalse(first["generation_delta_seen"])
+
+    def test_transport_observability_failure_is_not_stream_retryable(self):
+        failure = httpx.ReadError("connection reset in local evidence sink")
+        failure._anchorpatch_transport_observability_failure = True
+        failure._opencode_attempt = {
+            "response_started_http_status": 200,
+            "generation_delta_seen": False,
+        }
+        self.assertFalse(
+            model_openai._is_incomplete_stream_exception(failure)
+        )
+        self.assertFalse(
+            model_openai._is_retryable_opencode_error(failure)
+        )
+
     def test_503_retries_do_not_consume_retry_budget(self):
         captures = []
         body = {

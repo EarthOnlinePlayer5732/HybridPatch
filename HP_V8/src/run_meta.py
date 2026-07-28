@@ -87,6 +87,15 @@ _LEDGER_LOCK_RECOVERY_ALLOWED_CHANGED_PATHS = {
     "HP_V8/src/test_model_openai.py",
     "docs/active_log.md",
 }
+_DEEPSEEK_TRANSPORT_DISCONNECT_RECOVERY_CHANGED_PATHS = {
+    "HP_V8/src/authorize_ledger_lock_recovery.py",
+    "HP_V8/src/model_openai.py",
+    "HP_V8/src/paired_campaign_dispatch.py",
+    "HP_V8/src/run_meta.py",
+    "HP_V8/src/test_model_openai.py",
+    "transport/src/model_openai.py",
+    "transport/src/test_model_openai.py",
+}
 
 
 class CampaignStoppedError(RuntimeError):
@@ -3156,6 +3165,27 @@ def read_campaign_recovery_authorization(
             and isinstance(record.get("deepseek_server_retry_samples"), list)
             and bool(record.get("deepseek_server_retry_samples"))
         )
+        deepseek_transport_disconnect_retry_recovery = (
+            record.get(
+                "deepseek_transport_disconnect_retry_recovery") is True
+            and record.get("authorization_basis")
+            == (
+                "explicit_user_resume_after_deepseek_transport_disconnect_"
+                "classifier_fix"
+            )
+            and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition") == "worker_fatal_error"
+            and archived_stop.get("error_type")
+            == "OpenAICompatibleTransportError"
+            and archived_stop.get("error")
+            == "OpenAI-compatible provider failed after 1 attempt(s)"
+            and record.get(
+                "deepseek_transport_disconnect_retry_samples")
+            == [archived_stop.get("sample")]
+            and record.get(
+                "deepseek_transport_disconnect_retry_worker_launch_id")
+            == archived_stop.get("worker_launch_id")
+        )
         dispatcher_process_lost_stop = (
             dispatcher_process_lost_recovery
             and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
@@ -3177,6 +3207,7 @@ def read_campaign_recovery_authorization(
             or operator_pause_recovery
             or provider_access_retry_recovery
             or deepseek_server_retry_recovery
+            or deepseek_transport_disconnect_retry_recovery
             or dispatcher_process_lost_stop
         )
     if not stop_valid:
@@ -3217,10 +3248,13 @@ def read_campaign_recovery_authorization(
         key for key in set(prior_fingerprint) | set(current_fingerprint)
         if prior_fingerprint.get(key) != current_fingerprint.get(key)
     )
-    expected_fingerprint_changes = (
-        fingerprint_changes
-        if dispatcher_process_lost_recovery else ["run_meta.py"]
-    )
+    if dispatcher_process_lost_recovery:
+        expected_fingerprint_changes = fingerprint_changes
+    elif record.get(
+            "deepseek_transport_disconnect_retry_recovery") is True:
+        expected_fingerprint_changes = ["model_openai.py", "run_meta.py"]
+    else:
+        expected_fingerprint_changes = ["run_meta.py"]
     if (fingerprint_changes != expected_fingerprint_changes
             or record.get("changed_code_fingerprint_keys")
             != expected_fingerprint_changes):
@@ -3243,6 +3277,12 @@ def read_campaign_recovery_authorization(
         changed_scope_valid = changed_set == _GIT_IDENTITY_RECOVERY_CHANGED_PATHS
     elif dispatcher_process_lost_recovery:
         changed_scope_valid = True
+    elif record.get(
+            "deepseek_transport_disconnect_retry_recovery") is True:
+        changed_scope_valid = (
+            changed_set
+            == _DEEPSEEK_TRANSPORT_DISCONNECT_RECOVERY_CHANGED_PATHS
+        )
     elif record.get("deepseek_server_retry_recovery") is True:
         changed_scope_valid = (
             changed_set <= _LEDGER_LOCK_RECOVERY_ALLOWED_CHANGED_PATHS
@@ -3305,15 +3345,27 @@ def read_campaign_recovery_authorization(
 
         deepseek_server_retry = (
             record.get("deepseek_server_retry_recovery") is True)
+        deepseek_transport_disconnect_retry = (
+            record.get(
+                "deepseek_transport_disconnect_retry_recovery") is True
+        )
+        deepseek_retry = (
+            deepseek_server_retry
+            or deepseek_transport_disconnect_retry
+        )
         validated_api = _validate_rows("api_calls.jsonl", api_incidents)
         validated_attempts = (
             []
-            if deepseek_server_retry and not attempt_incidents
+            if deepseek_retry and not attempt_incidents
             else _validate_rows(
                 "api_attempt_ledger.jsonl", attempt_incidents)
         )
-        if deepseek_server_retry:
-            retry_samples = record.get("deepseek_server_retry_samples")
+        if deepseek_retry:
+            retry_samples = record.get(
+                "deepseek_server_retry_samples"
+                if deepseek_server_retry
+                else "deepseek_transport_disconnect_retry_samples"
+            )
             resume_samples = record.get("deepseek_resume_samples")
             pending_samples = record.get("deepseek_pending_samples")
             recovered_workers = record.get("deepseek_recovered_workers")
@@ -3369,6 +3421,11 @@ def read_campaign_recovery_authorization(
                         or row.get("request_id") in committed_call_ids
                         or incident_kind not in {
                             "deepseek_server_retry_exhaustion",
+                            (
+                                "deepseek_transport_disconnect_"
+                                "misclassification"
+                            ),
+                            "deepseek_dispatcher_stopped_uncommitted_api",
                             "deepseek_interrupted_uncommitted_api",
                         }):
                     raise RuntimeError(
@@ -3390,7 +3447,69 @@ def read_campaign_recovery_authorization(
                                 "retry_budget_consumed") is not True):
                         raise RuntimeError(
                             "campaign DeepSeek retry API evidence is invalid")
-                elif (row.get("classification") is not None
+                elif incident_kind == (
+                        "deepseek_transport_disconnect_misclassification"):
+                    observed_retry_samples.add(row.get("sample"))
+                    if (not deepseek_transport_disconnect_retry
+                            or row.get("classification")
+                            != "runner_exception"
+                            or row.get("error_type")
+                            != "transport_disconnect"
+                            or row.get("http_status") is not None
+                            or row.get("stream_complete") is not False
+                            or row.get("count_as_method_failure") is not True
+                            or row.get("http_attempts_used") != 1
+                            or row.get("retry_count") != 0
+                            or row.get("failed_attempt_count") != 1
+                            or row.get("max_retries") != 3
+                            or len(attempts) != 1
+                            or final_budget != 1
+                            or final_attempt.get("status") != "fatal_error"
+                            or final_attempt.get("http_status") is not None
+                            or final_attempt.get("error_type")
+                            != "transport_disconnect"
+                            or final_attempt.get("error_message")
+                            != "Connection error."
+                            or final_attempt.get(
+                                "response_started_http_status") is not None
+                            or final_attempt.get(
+                                "generation_delta_seen") is not False
+                            or final_attempt.get(
+                                "retry_budget_consumed") is not True
+                            or row.get("runner_exception")
+                            != (
+                                "OpenAICompatibleTransportError: "
+                                "OpenAI-compatible provider failed after "
+                                "1 attempt(s)"
+                            )):
+                        raise RuntimeError(
+                            "campaign DeepSeek transport-disconnect evidence "
+                            "is invalid"
+                        )
+                elif incident_kind == (
+                        "deepseek_dispatcher_stopped_uncommitted_api"):
+                    if (not deepseek_transport_disconnect_retry
+                            or row.get("classification")
+                            != "runner_exception"
+                            or row.get("error_type")
+                            != "CampaignStoppedError"
+                            or row.get("http_status") is not None
+                            or row.get("stream_complete") is not False
+                            or row.get("count_as_method_failure") is not True
+                            or row.get("http_attempts_used") is not None
+                            or attempts != []
+                            or row.get("runner_exception")
+                            != (
+                                "CampaignStoppedError: campaign stop latch "
+                                "is set: worker_fatal_error"
+                            )):
+                        raise RuntimeError(
+                            "campaign DeepSeek dispatcher-stop evidence "
+                            "is invalid"
+                        )
+                elif (incident_kind
+                      != "deepseek_interrupted_uncommitted_api"
+                      or row.get("classification") is not None
                       or row.get("http_status") != 200
                       or row.get("stream_complete") is not True
                       or row.get("input_tokens") is None
@@ -3478,7 +3597,7 @@ def read_campaign_recovery_authorization(
             os.path.join(out_dir, "api_calls.jsonl"))
         attempt_rows_all = (
             []
-            if deepseek_server_retry
+            if deepseek_retry
             else _read_jsonl_records_with_retry(
                 os.path.join(out_dir, "api_attempt_ledger.jsonl"))
         )
@@ -3614,7 +3733,7 @@ def read_campaign_recovery_authorization(
         launches = {
             row.get("worker_launch_id"): row for row in dispatch_rows
             if row.get("event") == "launch"
-            and (deepseek_server_retry
+            and (deepseek_retry
                  or row.get("method_phase") == "fullrewrite")
         }
         if not set(worker_ids) <= set(launches):
@@ -3641,7 +3760,7 @@ def read_campaign_recovery_authorization(
         }
         attempt_workers = (
             set()
-            if deepseek_server_retry
+            if deepseek_retry
             else {
                 row.get("worker_launch_id")
                 for row in _read_jsonl_records_with_retry(
@@ -4716,6 +4835,7 @@ def campaign_recovery_incident_evidence(out_dir):
             }):
         return {
             "api_row_hashes": frozenset(),
+            "api_incident_kinds": {},
             "attempt_row_hashes": frozenset(),
             "transport_sidecar_hashes": frozenset(),
             "worker_launch_ids": frozenset(),
@@ -4735,6 +4855,10 @@ def campaign_recovery_incident_evidence(out_dir):
             item["canonical_sha256"]
             for item in authorization["incident_api_rows"]
         }),
+        "api_incident_kinds": {
+            item["canonical_sha256"]: item.get("incident_kind")
+            for item in authorization["incident_api_rows"]
+        },
         "attempt_row_hashes": frozenset({
             item["canonical_sha256"]
             for item in authorization["incident_attempt_rows"]
