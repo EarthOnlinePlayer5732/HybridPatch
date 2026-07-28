@@ -743,7 +743,7 @@ supporting campaign，并已由用户中止。其 manifest、API ledger、checkp
 历史原样；不得在同一目录把 `num_round_trips=2` 改为 10，也不得把 revision `/3`
 伪装成流式。
 
-当前 DeepSeek transport revision 为 `opencode_openai_compatible/4`。OpenCode Zen Go
+该轮 DeepSeek transport revision 为 `opencode_openai_compatible/4`。OpenCode Zen Go
 请求使用 OpenAI Chat Completions stream 与 `include_usage`；完整性要求在非空
 finish reason 后观察到有效 usage-only terminal chunk。任何 partial EOF/exception、
 乱序 usage 或空 token accounting 均不返回 partial content，而是作为
@@ -799,3 +799,26 @@ usage 完整，合计 3,790 tokens；未发生 retry、502 或 503。证据目�
 `exp_dsv4f_stream_c15_error_diag_20260727`。因此当前可以确认 `/4` 的 c15 短调用链路可用，
 但不能由这 25 次健康响应反推长 HP/FR 请求下不会出现 origin 5xx，也不能补造旧档未保存的
 503 body。
+
+## 2026-07-28 DeepSeek terminal usage 形态修复
+
+`exp_20260727_dsv4f_hpfr_full234_rt10_stream_c10` 的固定身份为
+`opencode_openai_compatible/4`、RT10、3 Key×10。它在 234 个 semantic call 上产生
+702 个 HTTP 200 attempt，但 234/234 sample 都因同一 transport gate 耗尽三次重发，
+未提交 HP/FR 结果。其 raw sidecar 证明供应商把完整 usage 与非空 finish reason 放在
+同一个 choice chunk，随后发送 `choices=[]、usage=None` 的元数据块；`/4` 误要求
+finish 后必须另有 usage-only chunk。该目录保持冻结的 failed-informative transport
+evidence，不原地 resume。
+
+当前 revision 升为 `opencode_openai_compatible/5`。`/5` 仍要求非空 finish reason、
+完整一致的 token usage 和单调终结序列，只把两种形态视为等价：finish choice 自带
+有效 usage，或 finish 后出现标准 usage-only chunk。前者之后允许无 choices、无 usage
+的尾随元数据。完全缺 usage、提前/重复/畸形 usage、无或空白 finish、finish 后新
+choice、partial EOF/exception 仍分类为 `incomplete_stream` 并丢弃 partial。
+
+用户授权的单次 `hello` 探测仅发 1 个 HTTP 请求，返回 HTTP 200、
+`finish_reason=stop`、完整 usage 1 份、usage-only 0 份，与正式 sidecar 的脱敏结构
+一致。transport-core 65/65、HP 集成/dispatcher/recovery 196/196 PASS；其中两边
+DeepSeek 定向 mock 回归各 18/18 PASS。新正式 full234 必须使用 `/5`、RT10 和新
+out_dir；Dispatcher 保留 `/4` 只读历史审计，但不允许把 `/4` campaign 混入或
+升级为 `/5`。

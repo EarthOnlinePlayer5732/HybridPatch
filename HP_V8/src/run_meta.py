@@ -3683,8 +3683,10 @@ def read_campaign_recovery_authorization(
                 != {"hybridpatch", "fullrewrite"}
                 or manifest_config.get("transport")
                 != "openai_sdk_stream"
-                or manifest_config.get("transport_revision")
-                != "opencode_openai_compatible/4"):
+                or manifest_config.get("transport_revision") not in {
+                    "opencode_openai_compatible/4",
+                    "opencode_openai_compatible/5",
+                }):
             raise RuntimeError(
                 "dispatcher parent-loss manifest contract is invalid")
         dispatcher_pid = record.get("dispatcher_pid")
@@ -4391,7 +4393,7 @@ def read_campaign_recovery_authorization(
                     or call_kind not in allowed_call_kinds
                     or row.get("transport") != "openai_sdk_stream"
                     or row.get("transport_revision")
-                    != "opencode_openai_compatible/4"
+                    != manifest_config.get("transport_revision")
                     or row.get("provider_called") is not True
                     or row.get("response_replayed") is not False
                     or row.get("request_id") in committed_call_ids

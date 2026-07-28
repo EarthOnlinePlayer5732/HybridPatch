@@ -10263,7 +10263,7 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
         self.assertEqual(result["provider"], "opencode_zen")
         self.assertEqual(result["transport"], "openai_sdk_stream")
         self.assertEqual(
-            result["transport_revision"], "opencode_openai_compatible/4")
+            result["transport_revision"], "opencode_openai_compatible/5")
         self.assertEqual(
             result["request_url"],
             "https://opencode.ai/zen/go/v1/chat/completions")
@@ -10282,6 +10282,100 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
                 for event in events),
             4,
         )
+
+    def test_finish_chunk_usage_and_empty_trailer_are_complete(self):
+        captures = []
+        payload = _official_payload(content="Hello", finish_reason="stop")
+        chunks = _stream_chunks_from_payload(payload)
+        chunks[-2]["usage"] = payload["usage"]
+        chunks[-1]["usage"] = None
+        result, _events = self._generate([chunks], captures)
+        self.assertEqual(result["message"], "Hello")
+        self.assertTrue(result["stream_complete"])
+        self.assertEqual(result["input_tokens"], 10)
+        self.assertEqual(result["output_tokens"], 4)
+        attempt = result["transport_attempts"][-1]
+        self.assertTrue(attempt["message_stop_seen"])
+        self.assertTrue(attempt["final_usage_seen"])
+        self.assertTrue(attempt["terminal_sequence_valid"])
+
+    def test_duplicate_usage_after_finish_chunk_is_incomplete(self):
+        captures = []
+        payload = _official_payload(content="bad", finish_reason="stop")
+        malformed = _stream_chunks_from_payload(payload)
+        malformed[-2]["usage"] = payload["usage"]
+        result, _events = self._generate(
+            [malformed, _official_payload(content="complete")],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertTrue(first["final_usage_seen"])
+        self.assertFalse(first["terminal_sequence_valid"])
+        self.assertEqual(result["message"], "complete")
+
+    def test_blank_finish_reason_is_incomplete(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                _official_payload(content="bad", finish_reason=" \t"),
+                _official_payload(content="complete"),
+            ],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertFalse(first["message_stop_seen"])
+        self.assertFalse(first["terminal_sequence_valid"])
+        self.assertEqual(result["message"], "complete")
+
+    def test_terminal_usage_counts_are_strict(self):
+        self.assertTrue(model_openai._valid_openai_final_usage({
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "total_tokens": 14,
+        }))
+        for usage in (
+                {},
+                {"prompt_tokens": -1, "completion_tokens": 4,
+                 "total_tokens": 3},
+                {"prompt_tokens": True, "completion_tokens": 4,
+                 "total_tokens": 5},
+                {"prompt_tokens": 10, "completion_tokens": 4,
+                 "total_tokens": 15}):
+            with self.subTest(usage=usage):
+                self.assertFalse(
+                    model_openai._valid_openai_final_usage(usage))
+
+    def test_finish_without_usage_is_incomplete(self):
+        captures = []
+        malformed = _stream_chunks_from_payload(
+            _official_payload(content="bad", finish_reason="stop"))
+        malformed[-1]["usage"] = None
+        result, _events = self._generate(
+            [malformed, _official_payload(content="complete")],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertTrue(first["message_stop_seen"])
+        self.assertFalse(first["final_usage_seen"])
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(result["message"], "complete")
+
+    def test_usage_without_finish_is_incomplete(self):
+        captures = []
+        result, _events = self._generate(
+            [
+                _official_payload(content="bad", finish_reason=None),
+                _official_payload(content="complete"),
+            ],
+            captures,
+        )
+        first = result["transport_attempts"][0]
+        self.assertFalse(first["message_stop_seen"])
+        self.assertFalse(first["final_usage_seen"])
+        self.assertEqual(first["error_type"], "incomplete_stream")
+        self.assertEqual(result["message"], "complete")
 
     def test_retryable_failure_is_bounded_and_recorded(self):
         captures = []
@@ -10537,7 +10631,7 @@ class OpenCodeZenDeepSeekTests(unittest.TestCase):
             )
         self.assertEqual(config["provider"], "opencode_zen")
         self.assertEqual(
-            config["transport_revision"], "opencode_openai_compatible/4")
+            config["transport_revision"], "opencode_openai_compatible/5")
         self.assertEqual(config["transport"], "openai_sdk_stream")
         self.assertEqual(config["reasoning_effort"], "high")
         with self.assertRaises(ValueError):
@@ -11610,6 +11704,49 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
         self.assertTrue(
             paired_dispatch._valid_deepseek_transport_sidecar(
                 "unused", row))
+
+    def test_previous_stream_revision_remains_readable(self):
+        row = {
+            "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+            "transport_revision": (
+                paired_dispatch
+                .DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION),
+            "transport_attempts": [{
+                "attempt_index": 1,
+                "status": "success",
+                "http_status": 200,
+                "stream_complete": True,
+                "message_start_seen": True,
+                "message_stop_seen": True,
+                "final_usage_seen": True,
+                "terminal_sequence_valid": True,
+            }],
+            "http_attempts_used": 1,
+            "retry_count": 0,
+            "failed_attempt_count": 0,
+            "max_retries": 3,
+        }
+        self.assertTrue(
+            paired_dispatch._valid_deepseek_retry_evidence(row))
+        with tempfile.TemporaryDirectory() as out_dir:
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "dispatch_manifest.json"), {
+                    "config": {
+                        "model": paired_dispatch.DEEPSEEK_MODEL,
+                        "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                        "transport_revision": (
+                            paired_dispatch
+                            .DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION),
+                    },
+                })
+            self.assertEqual(
+                paired_dispatch._deepseek_campaign_runtime_identity(out_dir),
+                (
+                    paired_dispatch.DEEPSEEK_TRANSPORT,
+                    paired_dispatch
+                    .DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
+                ),
+            )
 
     def test_partial_stream_exhaustion_routes_to_deepseek_sample_isolation(self):
         attempts = [

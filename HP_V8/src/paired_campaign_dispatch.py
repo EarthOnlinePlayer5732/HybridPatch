@@ -62,7 +62,10 @@ from utils_relay_plan import (
 SCHEMA = "anchorpatch.paired_campaign_manifest/1"
 TRANSPORT_REVISION = "opencode_anthropic_sdk/4"
 DEEPSEEK_TRANSPORT = "openai_sdk_stream"
-DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/4"
+DEEPSEEK_TRANSPORT_REVISION = "opencode_openai_compatible/5"
+DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION = (
+    "opencode_openai_compatible/4"
+)
 DEEPSEEK_LEGACY_TRANSPORT = "openai_sdk_nonstream"
 DEEPSEEK_LEGACY_TRANSPORT_REVISION = "opencode_openai_compatible/3"
 DEEPSEEK_MODEL = "deepseek-v4-flash"
@@ -1987,14 +1990,19 @@ def _valid_deepseek_failed_retry_evidence(row):
     attempts = row.get("transport_attempts")
     runtime_identity = (
         row.get("transport"), row.get("transport_revision"))
-    is_current_stream = runtime_identity == (
-        DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION)
+    is_stream = runtime_identity in {
+        (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+        (
+            DEEPSEEK_TRANSPORT,
+            DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
+        ),
+    }
     is_frozen_legacy = runtime_identity == (
         DEEPSEEK_LEGACY_TRANSPORT,
         DEEPSEEK_LEGACY_TRANSPORT_REVISION,
     )
     http_attempts_used = row.get("http_attempts_used")
-    if (not (is_current_stream or is_frozen_legacy)
+    if (not (is_stream or is_frozen_legacy)
             or not isinstance(attempts, list) or not attempts
             or (
                 http_attempts_used != len(attempts)
@@ -2022,7 +2030,7 @@ def _valid_deepseek_failed_retry_evidence(row):
                 or not isinstance(attempt.get("error_type"), str)
                 or not attempt.get("error_type")):
             return False
-        if (is_current_stream
+        if (is_stream
                 and not isinstance(
                     attempt.get("generation_delta_seen"), bool)):
             return False
@@ -2030,7 +2038,7 @@ def _valid_deepseek_failed_retry_evidence(row):
             attempt.get("http_status") == 503
             and (
                 attempt.get("generation_delta_seen") is False
-                if is_current_stream
+                if is_stream
                 else not attempt.get("generation_delta_seen")
             )
         )
@@ -2077,6 +2085,10 @@ def _deepseek_campaign_runtime_identity(out_dir):
     if ((config or {}).get("model") != DEEPSEEK_MODEL
             or identity not in {
                 (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+                (
+                    DEEPSEEK_TRANSPORT,
+                    DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
+                ),
                 (
                     DEEPSEEK_LEGACY_TRANSPORT,
                     DEEPSEEK_LEGACY_TRANSPORT_REVISION,
@@ -3994,8 +4006,13 @@ def _valid_deepseek_retry_evidence(row):
     attempts = row.get("transport_attempts")
     runtime_identity = (
         row.get("transport"), row.get("transport_revision"))
-    is_current_stream = runtime_identity == (
-        DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION)
+    is_stream = runtime_identity in {
+        (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+        (
+            DEEPSEEK_TRANSPORT,
+            DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
+        ),
+    }
     if (not isinstance(attempts, list) or not attempts
             or row.get("http_attempts_used") != len(attempts)
             or row.get("retry_count") != len(attempts) - 1
@@ -4006,7 +4023,7 @@ def _valid_deepseek_retry_evidence(row):
             or terminal.get("http_status") != 200
             or terminal.get("stream_complete") is not True):
         return False
-    if (is_current_stream
+    if (is_stream
             and (
                 terminal.get("message_start_seen") is not True
                 or terminal.get("message_stop_seen") is not True
@@ -4023,7 +4040,7 @@ def _valid_deepseek_retry_evidence(row):
             continue
         if attempt.get("status") != "retryable_error":
             return False
-        if (is_current_stream
+        if (is_stream
                 and not isinstance(
                     attempt.get("generation_delta_seen"), bool)):
             return False
@@ -4031,7 +4048,7 @@ def _valid_deepseek_retry_evidence(row):
             attempt.get("http_status") == 503
             and (
                 attempt.get("generation_delta_seen") is False
-                if is_current_stream
+                if is_stream
                 else not attempt.get("generation_delta_seen")
             )
         )
@@ -4058,8 +4075,13 @@ def _valid_deepseek_transport_sidecar(out_dir, row):
             DEEPSEEK_LEGACY_TRANSPORT,
             DEEPSEEK_LEGACY_TRANSPORT_REVISION):
         return True
-    if runtime_identity != (
-            DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION):
+    if runtime_identity not in {
+        (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
+        (
+            DEEPSEEK_TRANSPORT,
+            DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
+        ),
+    }:
         return False
     path = row.get("raw_sse_saved_path")
     if not isinstance(path, str) or not path or not os.path.isfile(path):
@@ -4111,7 +4133,7 @@ def _valid_deepseek_transport_sidecar(out_dir, row):
 def _inspect_deepseek_campaign(
         out_dir, manifest, *, require_complete=False,
         active_samples=None, required_complete_samples=None):
-    """Audit a DeepSeek prefix, including frozen /3 and current stream /4."""
+    """Audit a DeepSeek prefix, including frozen /3-/4 and current /5."""
     config = manifest.get("config") or {}
     expected_samples = set(config.get("samples") or [])
     expected_methods = set(config.get("method_set") or [])
@@ -4130,6 +4152,10 @@ def _inspect_deepseek_campaign(
     )
     supported_runtime_identities = {
         (DEEPSEEK_LEGACY_TRANSPORT, DEEPSEEK_LEGACY_TRANSPORT_REVISION),
+        (
+            DEEPSEEK_TRANSPORT,
+            DEEPSEEK_PREVIOUS_STREAM_TRANSPORT_REVISION,
+        ),
         (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION),
     }
     if runtime_identity not in supported_runtime_identities:

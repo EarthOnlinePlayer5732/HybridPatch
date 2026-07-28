@@ -434,10 +434,10 @@ def _require_formal_opencode_transport(model, reasoning_effort=None):
             reasoning_effort=reasoning_effort)
         if (runtime.get("transport") != "openai_sdk_stream"
                 or runtime.get("transport_revision")
-                != "opencode_openai_compatible/4"):
+                != "opencode_openai_compatible/5"):
             raise RuntimeError(
                 "formal OpenCode DeepSeek-V4 experiments require "
-                "opencode_openai_compatible/4 streaming transport"
+                "opencode_openai_compatible/5 streaming transport"
             )
         return
     if not model_l.startswith("minimax-m3"):

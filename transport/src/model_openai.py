@@ -42,7 +42,7 @@ _OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/go/v1"
 _OPENCODE_ZEN_CHAT_COMPLETIONS_URL = (
     _OPENCODE_ZEN_BASE_URL + "/chat/completions"
 )
-_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/4"
+_OPENCODE_OPENAI_COMPATIBLE_REVISION = "opencode_openai_compatible/5"
 _OPENCODE_OPENAI_COMPATIBLE_TRANSPORT = "openai_sdk_stream"
 _OPENCODE_MAX_RETRY_AFTER_SECONDS = 300
 _REASONING_EFFORTS = {"low", "medium", "high"}
@@ -852,7 +852,7 @@ def _valid_openai_final_usage(value):
 
 def _call_openai_compatible_stream(
         client, request_kwargs, *, raw_event_sink=None, attempt_index=1):
-    """Collect one OpenAI ChatCompletion stream without accepting a partial EOF."""
+    """Collect a complete OpenAI ChatCompletion stream with terminal usage."""
     raw_chunks = []
     content_parts = []
     response_id = None
@@ -891,8 +891,6 @@ def _call_openai_compatible_stream(
             plain = _as_plain_dict(chunk)
             raw_chunks.append(plain)
             state["message_start_seen"] = True
-            if state["final_usage_seen"]:
-                terminal_sequence_valid = False
             _emit_transport_event(raw_event_sink, {
                 "record_type": "sdk_stream_event",
                 "attempt_index": attempt_index,
@@ -901,6 +899,7 @@ def _call_openai_compatible_stream(
             response_id = plain.get("id") or response_id
             response_model = plain.get("model") or response_model
             choices = plain.get("choices") or []
+            current_finish = None
             if choices:
                 if len(choices) != 1 or state["message_stop_seen"]:
                     terminal_sequence_valid = False
@@ -923,7 +922,11 @@ def _call_openai_compatible_stream(
                         state["generation_delta_seen"] = True
                         state["tool_delta_seen"] = True
                 current_finish = choice0.get("finish_reason")
-                if current_finish:
+                if current_finish is not None and (
+                        not isinstance(current_finish, str)
+                        or not current_finish.strip()):
+                    terminal_sequence_valid = False
+                elif current_finish:
                     if state["message_stop_seen"]:
                         terminal_sequence_valid = False
                     finish_reason = current_finish
@@ -933,7 +936,7 @@ def _call_openai_compatible_stream(
             if usage_value is not None:
                 if (
                         state["message_stop_seen"]
-                        and not choices
+                        and (not choices or bool(current_finish))
                         and not state["final_usage_seen"]
                         and _valid_openai_final_usage(usage_value)):
                     usage = usage_value

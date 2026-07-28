@@ -1,6 +1,38 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-28 - After Experiment: DeepSeek `/4` terminal-shape incompatibility
+
+- experiment：`exp_20260727_dsv4f_hpfr_full234_rt10_stream_c10`；固定身份为
+  RT10、3 Key×10、OpenCode Zen Go stream、`opencode_openai_compatible/4`。
+- terminal：234/234 sample 为 `infrastructure_incomplete`，HP/FR committed rows
+  均为 0。234 个 semantic call 共 702 个 HTTP attempt，全部 HTTP 200；每个 sample
+  都在三次完整重发后耗尽。502=0、503=0、preservation=0，无 campaign stop。
+- root cause：供应商把完整 usage 与非空 finish reason 放在同一个 choice chunk，
+  随后发送 `choices=[]、usage=None` 的尾随元数据；`/4` 只接受 finish 后独立的
+  usage-only chunk，因此误判 `incomplete_stream`。旧目录保持原样，不原地 resume。
+- user-authorized hello probe：仅 1 个 HTTP 请求，`stream=true`、
+  `include_usage=true`、high reasoning；HTTP 200、`finish_reason=stop`、86 chunks、
+  完整 usage 1 份、usage-only 0 份。未输出 Key 或模型正文。
+
+## 2026-07-28 - Before Experiment: DeepSeek full234 RT10 stream `/5`
+
+- experiment：`exp_20260728_dsv4f_hpfr_full234_rt10_stream_c10_v5`；新 out_dir，
+  不复用 `/4` 失败目录。用户已要求纠正后重新开始。
+- runtime：`opencode_openai_compatible/5`；endpoint、model、stream、
+  `include_usage=true`、`reasoning_effort=high`、RT10、3 Key×10 与 work-conserving
+  FIFO 均不变。
+- `/5` 仍要求非空 finish、完整一致 token usage 与单调终结序列；只新增对
+  finish choice 自带 usage、随后空元数据块的兼容，同时保留标准 usage-only 形态。
+  缺失/提前/重复/畸形 usage、空白 finish、finish 后新 choice 与 partial EOF
+  仍全量重发，不提交 partial。
+- compatibility：冻结 `/4` 目录可只读审计，但不能 resume 或混入 `/5`。
+  token/cost schema、502/503 retry budget、Dispatcher 隔离、HP/FR、evaluator 和
+  scoring 均不改变。
+- launch gate：transport-core 65/65、HP 集成/dispatcher/recovery 196/196 已 PASS；
+  clean commit 后直接启动。按用户要求不运行 dispatcher dry-run、统一 preflight
+  或重复 Key probe。启动后前 10 分钟每 2 分钟、随后每 10 分钟只读监控。
+
 ## 2026-07-28 - Before Experiment: DeepSeek V4 Flash full234 RT10 stream
 
 - experiment：`exp_20260727_dsv4f_hpfr_full234_rt10_stream_c10`；

@@ -109,6 +109,29 @@
   `/4`、high reasoning 与 terminal usage 全部一致，0 retry、0 个 502/503；这验证
   stream 请求形状和完成链，不代表长 HP/FR 请求的 sustained-load 结论。
 
+### `opencode_openai_compatible/5`（DeepSeek terminal usage 形态兼容）
+
+- `/4` 正式 RT10 full234 首轮的 234 个 semantic call、702 个 HTTP attempt 全部
+  HTTP 200，却全部被判 `incomplete_stream`。根因不是缺 usage：OpenCode Zen Go
+  把完整 usage 与非空 `finish_reason` 放在同一个 choice chunk，随后再发送
+  `choices=[]、usage=None` 的网关元数据块；`/4` 只接受独立 usage-only chunk，
+  因而每个 sample 三次全量重发后均 infrastructure-incomplete。该失败目录保持原样。
+- 用户授权的单次 `hello` 探测固定 1 个 HTTP 请求、`stream=true`、
+  `include_usage=true`、high reasoning。结果为 HTTP 200、`finish_reason=stop`、
+  86 个 chunk、完整 usage 1 份、usage-only 0 份；与正式 sidecar 的脱敏结构复算一致。
+- `/5` 同时接受两种完整终结形态：finish choice 自带有效 usage，或 finish 后独立
+  usage-only chunk。前者之后可有 `choices=[]、usage=None` 的非生成元数据块。
+  `final_usage_seen` 仍是成功必要条件；完全缺 usage、提前/重复/畸形 usage、无或空白
+  finish、finish 后新 choice、partial EOF/exception 仍全量重发且不提交 partial。
+- token/cost、API row、sidecar、retry budget、502/503、Dispatcher 隔离与方法语义
+  均不变。新正式实验必须使用新 out_dir；`/4` 仅保留只读审计兼容。活动规范见
+  `docs/API_TRANSPORT_DEEPSEEK_V5.md`。
+- 同步指纹：`transport/src/model_openai.py` 与 `HP_V8/src/model_openai.py`
+  原字节 SHA-256 均为
+  `a0a0a05ecfba59ff2acd2af802f07d470837f2eb195733af496d972ffcbc55a9`。
+- 零 API 验证：transport-core 65/65、HP 集成/dispatcher/recovery 196/196 PASS；
+  其中两边 DeepSeek terminal 状态机定向回归各 18/18 PASS。
+
 ### `minimax_official_nonstream/1`（官方非流式线，在用）
 
 - 动机：为 FR baseline 忠实翻译上游 DELEGATE-52 的官方非流式 + 盲异常重试语义，与 OpenCode v3 公平性策略分线。
