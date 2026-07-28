@@ -342,10 +342,14 @@ class IntegrationContractHelpersMixin:
     @staticmethod
     def _api_call_fixture_row(*, root, exact_id, request_id, fingerprint,
                               worker_id, worker_pid, parent=None,
-                              failure=False, http_attempts=1):
+                              failure=False, http_attempts=1,
+                              provider_called=True,
+                              response_replayed=False,
+                              replayed_from_call_id=None,
+                              include_error_type=True):
         method, sample, rt_segment, direction, call_kind = root.split("/")
         generation = int(exact_id.rsplit("/g", 1)[1])
-        return {
+        row = {
             "schema": "anchorpatch.api_call/4",
             "sample": sample, "method": method,
             "rt_index": int(rt_segment[2:]), "direction": direction,
@@ -357,8 +361,9 @@ class IntegrationContractHelpersMixin:
             "parent_semantic_call_id": parent,
             "request_id": request_id,
             "worker_launch_id": worker_id, "worker_pid": worker_pid,
-            "provider_called": True, "response_replayed": False,
-            "replayed_from_call_id": None,
+            "provider_called": bool(provider_called),
+            "response_replayed": bool(response_replayed),
+            "replayed_from_call_id": replayed_from_call_id,
             "transport_revision": "opencode_anthropic_sdk/4",
             "transport_resume_policy": "exact_payload_new_semantic_call/1",
             "transport_recovery_index": generation,
@@ -372,6 +377,9 @@ class IntegrationContractHelpersMixin:
             "transient_failure_count": 0,
             "http_attempts_used": http_attempts,
         }
+        if not include_error_type:
+            row.pop("error_type")
+        return row
 
     @staticmethod
     def _write_success_journal(out_dir, *, root, exact_id, request_id,

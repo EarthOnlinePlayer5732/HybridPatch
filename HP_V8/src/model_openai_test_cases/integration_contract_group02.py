@@ -576,62 +576,22 @@ class IntegrationContractGroup02Mixin:
                 for row in attempt_rows:
                     handle.write(json.dumps(row) + "\n")
 
-            def api_row(*, exact_id, root, rt, direction, generation,
-                        parent, request_id, fingerprint, worker, pid,
-                        provider_called=True, response_replayed=False,
-                        replayed_from=None, failure=False,
-                        http_attempts=1):
-                return {
-                    "schema": "anchorpatch.api_call/4",
-                    "sample": sample, "method": method,
-                    "rt_index": rt, "direction": direction,
-                    "call_kind": "hybridpatch_primary",
-                    "step_id": "/".join(root.split("/")[:4]),
-                    "semantic_root_id": root,
-                    "semantic_call_id": exact_id,
-                    "generation_index": generation,
-                    "parent_semantic_call_id": parent,
-                    "request_id": request_id,
-                    "worker_launch_id": worker, "worker_pid": pid,
-                    "provider_called": provider_called,
-                    "response_replayed": response_replayed,
-                    "replayed_from_call_id": replayed_from,
-                    "transport_revision": "opencode_anthropic_sdk/4",
-                    "transport_resume_policy": (
-                        "exact_payload_new_semantic_call/1"),
-                    "transport_recovery_index": generation,
-                    "request_fingerprint": fingerprint,
-                    "classification": (
-                        "provider/API failure" if failure else None),
-                    "count_as_method_failure": False,
-                    "error_type": (
-                        "incomplete_stream" if failure else None),
-                    "max_response_slots": 2,
-                    "response_slots_used": 2 if failure else 1,
-                    "max_transient_failures": 3,
-                    "transient_failure_count": 0,
-                    "http_attempts_used": http_attempts,
-                }
-
             rows = [
-                api_row(
-                    exact_id=forward_g000, root=forward_root, rt=1,
-                    direction="forward", generation=0, parent=None,
+                self._api_call_fixture_row(
+                    exact_id=forward_g000, root=forward_root, parent=None,
                     request_id="old-forward", fingerprint=forward_fp,
-                    worker=old_worker, pid=old_pid),
-                api_row(
-                    exact_id=backward_g000, root=backward_root, rt=1,
-                    direction="backward", generation=0, parent=None,
+                    worker_id=old_worker, worker_pid=old_pid),
+                self._api_call_fixture_row(
+                    exact_id=backward_g000, root=backward_root, parent=None,
                     request_id="old-backward", fingerprint=backward_fp,
-                    worker=old_worker, pid=old_pid, failure=True,
+                    worker_id=old_worker, worker_pid=old_pid, failure=True,
                     http_attempts=2),
-                api_row(
-                    exact_id=forward_g000, root=forward_root, rt=1,
-                    direction="forward", generation=0, parent=None,
+                self._api_call_fixture_row(
+                    exact_id=forward_g000, root=forward_root, parent=None,
                     request_id="replay-forward", fingerprint=forward_fp,
-                    worker=new_worker, pid=new_pid,
+                    worker_id=new_worker, worker_pid=new_pid,
                     provider_called=False, response_replayed=True,
-                    replayed_from="old-forward"),
+                    replayed_from_call_id="old-forward"),
             ]
             if variant == "provider-before":
                 rows[-1].update({
@@ -640,21 +600,19 @@ class IntegrationContractGroup02Mixin:
                     "replayed_from_call_id": None,
                 })
             if variant != "unconsumed":
-                recovery_row = api_row(
-                    exact_id=backward_g001, root=backward_root, rt=1,
-                    direction="backward", generation=1,
+                recovery_row = self._api_call_fixture_row(
+                    exact_id=backward_g001, root=backward_root,
                     parent=backward_g000, request_id="new-backward",
-                    fingerprint=backward_fp, worker=new_worker,
-                    pid=new_pid, http_attempts=3)
+                    fingerprint=backward_fp, worker_id=new_worker,
+                    worker_pid=new_pid, http_attempts=3)
                 rows.append(recovery_row)
                 if variant == "duplicate":
                     rows.append(dict(recovery_row))
             if variant == "accepted":
-                rows.append(api_row(
-                    exact_id=next_g000, root=next_root, rt=2,
-                    direction="forward", generation=0, parent=None,
+                rows.append(self._api_call_fixture_row(
+                    exact_id=next_g000, root=next_root, parent=None,
                     request_id="new-next", fingerprint=next_fp,
-                    worker=new_worker, pid=new_pid))
+                    worker_id=new_worker, worker_pid=new_pid))
             with open(
                 os.path.join(out_dir, "api_calls.jsonl"),
                 "w", encoding="utf-8",
@@ -662,56 +620,20 @@ class IntegrationContractGroup02Mixin:
                 for row in rows:
                     handle.write(json.dumps(row) + "\n")
 
-            os.makedirs(os.path.join(out_dir, "api_journal"), exist_ok=True)
-
-            def write_journal(exact_id, root, generation, parent, call_id,
-                              fingerprint, attempt_index):
-                digest = hashlib.sha256(
-                    exact_id.encode("utf-8")).hexdigest()[:24]
-                run_meta.write_json_atomic(
-                    os.path.join(
-                        out_dir, "api_journal",
-                        f"{digest}.response.json"), {
-                            "schema": "anchorpatch.api_response_journal/4",
-                            "semantic_root_id": root,
-                            "semantic_call_id": exact_id,
-                            "generation_index": generation,
-                            "parent_semantic_call_id": parent,
-                            "call_id": call_id,
-                            "request_fingerprint": fingerprint,
-                            "result": {
-                                "message": "complete",
-                                "stream_complete": True,
-                                "stop_reason": "end_turn",
-                                "input_tokens": 5, "output_tokens": 1,
-                                "transport_revision": (
-                                    "opencode_anthropic_sdk/4"),
-                                "transport_resume_policy": (
-                                    "exact_payload_new_semantic_call/1"),
-                                "call_kind": "hybridpatch_primary",
-                                "semantic_root_id": root,
-                                "semantic_call_id": exact_id,
-                                "generation_index": generation,
-                                "parent_semantic_call_id": parent,
-                                "max_response_slots": 2,
-                                "response_slots_used": 1,
-                                "max_transient_failures": 3,
-                                "transient_failure_count": 0,
-                                "http_attempts_used": attempt_index,
-                            },
-                        })
-
-            write_journal(
-                forward_g000, forward_root, 0, None,
-                "old-forward", forward_fp, 1)
+            self._write_success_journal(
+                out_dir, root=forward_root, exact_id=forward_g000,
+                request_id="old-forward", fingerprint=forward_fp,
+                parent=None, http_attempts=1)
             if variant != "unconsumed":
-                write_journal(
-                    backward_g001, backward_root, 1, backward_g000,
-                    "new-backward", backward_fp, 3)
+                self._write_success_journal(
+                    out_dir, root=backward_root, exact_id=backward_g001,
+                    request_id="new-backward", fingerprint=backward_fp,
+                    parent=backward_g000, http_attempts=3)
             if variant == "accepted":
-                write_journal(
-                    next_g000, next_root, 0, None,
-                    "new-next", next_fp, 1)
+                self._write_success_journal(
+                    out_dir, root=next_root, exact_id=next_g000,
+                    request_id="new-next", fingerprint=next_fp,
+                    parent=None, http_attempts=1)
             return manifest, rows
 
         cases = (
@@ -794,35 +716,15 @@ class IntegrationContractGroup02Mixin:
                     semantic_call_id = f"{semantic_root_id}/g000"
                     request_id = f"original-{method}-{direction}"
                     request_fingerprint = f"fingerprint-{method}-{direction}"
-                    api_rows.append({
-                        "schema": "anchorpatch.api_call/4",
-                        "sample": "sample", "method": method,
-                        "rt_index": 1, "direction": direction,
-                        "call_kind": call_kind,
-                        "step_id": step_id,
-                        "semantic_root_id": semantic_root_id,
-                        "semantic_call_id": semantic_call_id,
-                        "generation_index": 0,
-                        "parent_semantic_call_id": None,
-                        "request_id": request_id,
-                        "provider_called": True,
-                        "worker_launch_id": "worker-a",
-                        "worker_pid": 101,
-                        "response_replayed": False,
-                        "replayed_from_call_id": None,
-                        "transport_revision": "opencode_anthropic_sdk/4",
-                        "transport_resume_policy": (
-                            "exact_payload_new_semantic_call/1"),
-                        "transport_recovery_index": 0,
-                        "request_fingerprint": request_fingerprint,
-                        "classification": None,
-                        "count_as_method_failure": False,
-                        "max_response_slots": 2,
-                        "response_slots_used": 1,
-                        "max_transient_failures": 3,
-                        "transient_failure_count": 0,
-                        "http_attempts_used": 1,
-                    })
+                    api_rows.append(self._api_call_fixture_row(
+                        root=semantic_root_id,
+                        exact_id=semantic_call_id,
+                        request_id=request_id,
+                        fingerprint=request_fingerprint,
+                        worker_id="worker-a",
+                        worker_pid=101,
+                        include_error_type=False,
+                    ))
                     journal_rows.append((semantic_call_id, {
                         "schema": "anchorpatch.api_response_journal/4",
                         "semantic_root_id": semantic_root_id,

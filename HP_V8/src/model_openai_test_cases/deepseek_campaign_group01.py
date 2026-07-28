@@ -887,17 +887,7 @@ class DeepSeekOpenCodeCampaignGroup01Mixin:
                     path, identities))
 
     def test_event_metadata_recovery_binds_prefix_and_projection(self):
-        kwargs = {
-            "command": "python event-recovery-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(command="python event-recovery-test")
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(

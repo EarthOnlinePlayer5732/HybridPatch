@@ -999,3 +999,16 @@ legacy passthrough，以及离线 current/stale/pending quiescence gate。
 flush 父目录。`completed_at` 为可确定性重建的事务时间，故与 `prepared_at` 相同，不表示
 真实墙钟完成时刻。若未来要求硬件断电级承诺，应统一升级所有 atomic replace/unlink 的
 目录持久化，而不是只为 metadata recovery 旁路增加一个例外。
+
+## 2026-07-29 基础设施测试 fixture 收口
+
+机械拆分后的第二阶段只去除重复 fixture，不移动或重命名测试，也不修改生产 schema。
+`src/model_openai_test_cases/fixture_builders.py` 统一生成 fresh run-metadata 参数和精确字节
+event-append crash injector；共享 integration helper 统一合法 API terminal row、成功 journal
+与 exhausted response generation。原先分散在 metadata WAL、恢复授权、campaign integrity
+测试中的手写字典和故障函数由这些 builder 替代，故意缺字段、篡改或历史兼容 fixture 仍
+保持显式，不用通用 builder 掩盖测试意图。
+
+测试方法集合保持 `251→251`，没有 `test_*` 新增、删除或改名；四个重点恢复/campaign
+用例定向通过，完整零 API 基础设施回归为 `251/251`。本批未调用 provider API、未修改
+历史实验目录，也未改变 HybridPatch、FullRewrite、transport、dispatcher 或 recovery 行为。

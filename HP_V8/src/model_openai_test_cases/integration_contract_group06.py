@@ -371,39 +371,8 @@ class IntegrationContractGroup06Mixin:
                 step_id, root = recorder._semantic_root(
                     "hybridpatch_primary")
                 generation_zero = f"{root}/g000"
-                recorder._append_ledger(
-                    generation_zero, "semantic_request", call_id="call-0",
-                    call_kind="hybridpatch_primary",
-                    request_fingerprint="same")
-                for attempt_index in (1, 2):
-                    recorder._append_ledger(
-                        generation_zero, "attempt_start",
-                        attempt_index=attempt_index, call_id="call-0",
-                        call_kind="hybridpatch_primary",
-                        attempt_kind=(
-                            "transport_initial" if attempt_index == 1
-                            else "transport_retry"),
-                        request_fingerprint="same")
-                    recorder._append_ledger(
-                        generation_zero, "generation_progress",
-                        attempt_index=attempt_index, call_id="call-0",
-                        delta_type="text_delta")
-                    recorder._append_ledger(
-                        generation_zero, "attempt_end",
-                        attempt_index=attempt_index, call_id="call-0",
-                        **self._failed_attempt_end_fields())
-                    recorder._append_ledger(
-                        generation_zero, "attempt_budget",
-                        attempt_index=attempt_index, call_id="call-0",
-                        budget_class="response_slot",
-                        response_slots_used=attempt_index,
-                        transient_failure_count=0)
-                recorder._append_ledger(
-                    generation_zero, "call_failed", call_id="call-0",
-                    attempt_index=2, status="provider_failure",
-                    error_type="incomplete_stream", response_slots_used=2,
-                    transient_failure_count=0, http_attempts_used=2,
-                    request_fingerprint="same")
+                self._append_exhausted_response_generation(
+                    recorder, generation_zero, "call-0", "same", (1, 2))
                 exact = f"{root}/g{next_generation:03d}"
                 parent = f"{root}/g{next_generation - 1:03d}"
                 run_meta.append_jsonl_locked(
@@ -696,54 +665,12 @@ class IntegrationContractGroup06Mixin:
                 parent_semantic_call_id=generation_zero)
             generation_one = generation_one_context["semantic_call_id"]
 
-            def append_exhausted_generation(
-                    semantic_call_id, call_id, attempt_indices, generation):
-                recorder._append_ledger(
-                    semantic_call_id, "semantic_request", call_id=call_id,
-                    call_kind="hybridpatch_primary",
-                    request_fingerprint=fingerprint)
-                for local_index, attempt_index in enumerate(
-                        attempt_indices, 1):
-                    recorder._append_ledger(
-                        semantic_call_id, "attempt_start",
-                        attempt_index=attempt_index, call_id=call_id,
-                        call_kind="hybridpatch_primary",
-                        attempt_kind=(
-                            "transport_initial"
-                            if generation == 0 and local_index == 1
-                            else "transport_retry"
-                            if generation == 0
-                            else "transport_recovery_initial"
-                            if local_index == 1
-                            else "transport_recovery_retry"),
-                        request_fingerprint=fingerprint)
-                    recorder._append_ledger(
-                        semantic_call_id, "generation_progress",
-                        attempt_index=attempt_index, call_id=call_id,
-                        delta_type="text_delta")
-                    recorder._append_ledger(
-                        semantic_call_id, "attempt_end",
-                        attempt_index=attempt_index, call_id=call_id,
-                        **self._failed_attempt_end_fields())
-                    recorder._append_ledger(
-                        semantic_call_id, "attempt_budget",
-                        attempt_index=attempt_index, call_id=call_id,
-                        budget_class="response_slot",
-                        response_slots_used=local_index,
-                        transient_failure_count=0)
-                recorder._append_ledger(
-                    semantic_call_id, "call_failed", call_id=call_id,
-                    status="provider_failure",
-                    error_type="incomplete_stream",
-                    response_slots_used=2, transient_failure_count=0,
-                    http_attempts_used=attempt_indices[-1],
-                    attempt_index=attempt_indices[-1],
-                    request_fingerprint=fingerprint)
-
-            append_exhausted_generation(
-                generation_zero, "failed-g000", (1, 2), 0)
-            append_exhausted_generation(
-                generation_one, "failed-g001", (3, 4), 1)
+            self._append_exhausted_response_generation(
+                recorder, generation_zero, "failed-g000", fingerprint,
+                (1, 2))
+            self._append_exhausted_response_generation(
+                recorder, generation_one, "failed-g001", fingerprint,
+                (3, 4))
 
             observed = {}
 

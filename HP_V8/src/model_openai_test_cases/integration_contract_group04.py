@@ -34,13 +34,7 @@ class IntegrationContractGroup04Mixin:
                     )
             self.assertEqual(provider_calls, [])
 
-            kwargs = {
-                "command": "python test", "samples": ["sample"],
-                "methods": ["hybridpatch", "fullrewrite"],
-                "num_round_trips": 1, "seed": 42,
-                "model": "offline-test-model", "distractor": True,
-                "max_tokens": 16, "printing": False,
-            }
+            kwargs = run_metadata_kwargs(distractor=True)
             with mock.patch.object(
                     run_meta, "_git_identity",
                     return_value=("1" * 40, "clean")), \

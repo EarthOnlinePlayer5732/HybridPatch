@@ -533,17 +533,8 @@ class IntegrationContractGroup05Mixin:
         self.assertEqual(log.preservation_violations, 0)
 
     def test_run_metadata_v3_shares_campaign_times_and_rejects_identity_mix(self):
-        kwargs = {
-            "command": "python test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python test", num_round_trips=1, distractor=False)
         commit = "1" * 40
         fingerprint = {"hybrid_schema.py": "abc123"}
         with tempfile.TemporaryDirectory() as out_dir, \
@@ -581,17 +572,8 @@ class IntegrationContractGroup05Mixin:
                 run_meta.append_run_metadata(out_dir, **dict(kwargs, seed=43))
 
     def test_run_metadata_event_ledger_reopens_from_receipted_prefix(self):
-        kwargs = {
-            "command": "python event-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 2,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python event-test", num_round_trips=2, distractor=False)
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -652,17 +634,8 @@ class IntegrationContractGroup05Mixin:
             )
 
     def test_run_metadata_event_snapshot_failure_keeps_authoritative_terminal(self):
-        kwargs = {
-            "command": "python event-failure-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python event-failure-test", num_round_trips=1, distractor=False)
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -752,17 +725,8 @@ class IntegrationContractGroup05Mixin:
             )
 
     def test_run_metadata_event_hard_crash_publication_is_reentrant(self):
-        kwargs = {
-            "command": "python event-hard-crash-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python event-hard-crash-test", num_round_trips=1, distractor=False)
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -804,25 +768,9 @@ class IntegrationContractGroup05Mixin:
                 len(run_meta.read_quiescent_run_metadata_snapshot(out_dir)), 2)
 
     def test_run_metadata_event_pending_recovers_every_byte_cut_once(self):
-        kwargs = {
-            "command": "python event-byte-cut-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python event-byte-cut-test", num_round_trips=1, distractor=False)
         fixed_now = datetime.fromisoformat("2026-07-29T00:00:00+00:00")
-
-        def crash_after_prefix(events_path, event_bytes, *, cut):
-            with open(events_path, "ab") as handle:
-                handle.write(event_bytes[:cut])
-                handle.flush()
-                os.fsync(handle.fileno())
-            raise SystemExit(f"injected event append death at byte {cut}")
 
         # Discover the exact terminal event length from the durable intent. The
         # fixed timestamp and fixed-width invocation UUID make it stable across
@@ -836,8 +784,8 @@ class IntegrationContractGroup05Mixin:
             invocation = run_meta.append_run_metadata(probe_dir, **kwargs)
             with mock.patch.object(
                     run_meta, "_append_run_metadata_event_bytes",
-                    side_effect=lambda path, payload: crash_after_prefix(
-                        path, payload, cut=0)):
+                    side_effect=event_append_crash(
+                        0, "injected event append death", include_cut=True)):
                 with self.assertRaises(SystemExit):
                     run_meta.finish_run_metadata(
                         probe_dir, invocation["invocation_id"])
@@ -859,8 +807,9 @@ class IntegrationContractGroup05Mixin:
                 invocation = run_meta.append_run_metadata(out_dir, **kwargs)
                 with mock.patch.object(
                         run_meta, "_append_run_metadata_event_bytes",
-                        side_effect=lambda path, payload, cut=cut:
-                            crash_after_prefix(path, payload, cut=cut)):
+                        side_effect=event_append_crash(
+                            cut, "injected event append death",
+                            include_cut=True)):
                     with self.assertRaises(SystemExit):
                         run_meta.finish_run_metadata(
                             out_dir, invocation["invocation_id"])
@@ -892,25 +841,9 @@ class IntegrationContractGroup05Mixin:
                 )
 
     def test_run_metadata_event_pending_recovery_is_reentrant_at_both_barriers(self):
-        kwargs = {
-            "command": "python event-recovery-barrier-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python event-recovery-barrier-test", num_round_trips=1, distractor=False)
         fixed_now = datetime.fromisoformat("2026-07-29T00:00:00+00:00")
-
-        def seed_partial(events_path, event_bytes):
-            with open(events_path, "ab") as handle:
-                handle.write(event_bytes[:7])
-                handle.flush()
-                os.fsync(handle.fileno())
-            raise SystemExit("injected partial event")
 
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
@@ -921,7 +854,8 @@ class IntegrationContractGroup05Mixin:
             invocation = run_meta.append_run_metadata(out_dir, **kwargs)
             with mock.patch.object(
                     run_meta, "_append_run_metadata_event_bytes",
-                    side_effect=seed_partial):
+                    side_effect=event_append_crash(
+                        7, "injected partial event")):
                 with self.assertRaises(SystemExit):
                     run_meta.finish_run_metadata(
                         out_dir, invocation["invocation_id"])
@@ -988,24 +922,8 @@ class IntegrationContractGroup05Mixin:
             )
 
     def test_public_projection_reconcile_completes_pending_event_cuts(self):
-        kwargs = {
-            "command": "python public-reconcile-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
-
-        def crash_writer(events_path, event_bytes, *, cut):
-            with open(events_path, "ab") as handle:
-                handle.write(event_bytes[:cut])
-                handle.flush()
-                os.fsync(handle.fileno())
-            raise SystemExit("injected pending projection event")
+        kwargs = run_metadata_kwargs(
+            command="python public-reconcile-test", num_round_trips=1, distractor=False)
 
         for cut in (0, 7):
             with self.subTest(cut=cut), tempfile.TemporaryDirectory() as out_dir, \
@@ -1018,8 +936,8 @@ class IntegrationContractGroup05Mixin:
                 invocation = run_meta.append_run_metadata(out_dir, **kwargs)
                 with mock.patch.object(
                         run_meta, "_append_run_metadata_event_bytes",
-                        side_effect=lambda path, payload, cut=cut:
-                            crash_writer(path, payload, cut=cut)):
+                        side_effect=event_append_crash(
+                            cut, "injected pending projection event")):
                     with self.assertRaises(SystemExit):
                         run_meta.finish_run_metadata(
                             out_dir, invocation["invocation_id"])
@@ -1034,24 +952,8 @@ class IntegrationContractGroup05Mixin:
                 self.assertEqual(len(events), 2)
 
     def test_recovery_receipts_are_strict_and_projection_bound(self):
-        kwargs = {
-            "command": "python recovery-receipt-binding-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
-
-        def seed_partial(events_path, event_bytes):
-            with open(events_path, "ab") as handle:
-                handle.write(event_bytes[:7])
-                handle.flush()
-                os.fsync(handle.fileno())
-            raise SystemExit("injected partial event")
+        kwargs = run_metadata_kwargs(
+            command="python recovery-receipt-binding-test", num_round_trips=1, distractor=False)
 
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
@@ -1061,7 +963,8 @@ class IntegrationContractGroup05Mixin:
             invocation = run_meta.append_run_metadata(out_dir, **kwargs)
             with mock.patch.object(
                     run_meta, "_append_run_metadata_event_bytes",
-                    side_effect=seed_partial):
+                    side_effect=event_append_crash(
+                        7, "injected partial event")):
                 with self.assertRaises(SystemExit):
                     run_meta.finish_run_metadata(
                         out_dir, invocation["invocation_id"])
@@ -1168,20 +1071,8 @@ class IntegrationContractGroup05Mixin:
                 run_meta.read_quiescent_run_metadata_snapshot(out_dir)
 
     def test_run_metadata_event_pending_tamper_and_divergence_fail_closed(self):
-        kwargs = {
-            "command": "python event-pending-corruption-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
-
-        def stop_before_event(_events_path, _event_bytes):
-            raise SystemExit("injected event stop")
+        kwargs = run_metadata_kwargs(
+            command="python event-pending-corruption-test", num_round_trips=1, distractor=False)
 
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
@@ -1191,7 +1082,7 @@ class IntegrationContractGroup05Mixin:
             invocation = run_meta.append_run_metadata(out_dir, **kwargs)
             with mock.patch.object(
                     run_meta, "_append_run_metadata_event_bytes",
-                    side_effect=stop_before_event):
+                    side_effect=event_append_crash(0, "injected event stop")):
                 with self.assertRaises(SystemExit):
                     run_meta.finish_run_metadata(
                         out_dir, invocation["invocation_id"])
@@ -1211,7 +1102,7 @@ class IntegrationContractGroup05Mixin:
             invocation = run_meta.append_run_metadata(out_dir, **kwargs)
             with mock.patch.object(
                     run_meta, "_append_run_metadata_event_bytes",
-                    side_effect=stop_before_event):
+                    side_effect=event_append_crash(0, "injected event stop")):
                 with self.assertRaises(SystemExit):
                     run_meta.finish_run_metadata(
                         out_dir, invocation["invocation_id"])
@@ -1223,13 +1114,6 @@ class IntegrationContractGroup05Mixin:
             with self.assertRaisesRegex(RuntimeError, "suffix diverged"):
                 run_meta.read_run_metadata_snapshot(out_dir)
 
-        def seed_seven_bytes(events_path, event_bytes):
-            with open(events_path, "ab") as handle:
-                handle.write(event_bytes[:7])
-                handle.flush()
-                os.fsync(handle.fileno())
-            raise SystemExit("injected partial event")
-
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -1238,7 +1122,8 @@ class IntegrationContractGroup05Mixin:
             invocation = run_meta.append_run_metadata(out_dir, **kwargs)
             with mock.patch.object(
                     run_meta, "_append_run_metadata_event_bytes",
-                    side_effect=seed_seven_bytes):
+                    side_effect=event_append_crash(
+                        7, "injected partial event")):
                 with self.assertRaises(SystemExit):
                     run_meta.finish_run_metadata(
                         out_dir, invocation["invocation_id"])
@@ -1267,17 +1152,8 @@ class IntegrationContractGroup05Mixin:
                 run_meta.read_run_metadata_snapshot(out_dir)
 
     def test_run_metadata_legacy_v3_passthrough_never_creates_events(self):
-        kwargs = {
-            "command": "python legacy-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python legacy-test", num_round_trips=1, distractor=False)
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -1305,17 +1181,8 @@ class IntegrationContractGroup05Mixin:
             ))
 
     def test_run_metadata_event_concurrent_registration_and_finish(self):
-        kwargs = {
-            "command": "python concurrent-event-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python concurrent-event-test", num_round_trips=1, distractor=False)
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -1375,16 +1242,8 @@ class IntegrationContractGroup05Mixin:
             )
 
     def test_run_metadata_event_interrupt_and_audited_cas(self):
-        kwargs = {
-            "command": "python event-interrupt-test",
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python event-interrupt-test", samples=None)
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -1458,17 +1317,8 @@ class IntegrationContractGroup05Mixin:
             self.assertEqual(final[0]["status"], "interrupted_by_dispatcher")
 
     def test_run_metadata_event_corruption_matrix_fails_closed(self):
-        kwargs = {
-            "command": "python event-corruption-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python event-corruption-test", num_round_trips=1, distractor=False)
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -1627,17 +1477,8 @@ class IntegrationContractGroup05Mixin:
                 run_meta.read_run_metadata_snapshot(out_dir)
 
     def test_run_metadata_event_manifest_prevents_legacy_downgrade(self):
-        kwargs = {
-            "command": "python event-mode-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python event-mode-test", num_round_trips=1, distractor=False)
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
                 run_meta, "_git_identity",
                 return_value=("1" * 40, "clean")), mock.patch.object(
@@ -1663,16 +1504,9 @@ class IntegrationContractGroup05Mixin:
                 run_meta.append_run_metadata(out_dir, **kwargs)
 
     def test_run_metadata_accepts_hp_then_fr_phases_without_changing_legacy(self):
-        kwargs = {
-            "command": "python phased-test",
-            "samples": ["sample"],
-            "num_round_trips": 10,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": True,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python phased-test", methods=None,
+            num_round_trips=10, distractor=True)
         phase_env = {
             "ANCHORPATCH_CAMPAIGN_METHOD_SET": "hybridpatch,fullrewrite",
             "ANCHORPATCH_METHOD_PHASE": "hybridpatch",
@@ -1716,17 +1550,8 @@ class IntegrationContractGroup05Mixin:
         self.assertEqual(hp["campaign_config"], fr["campaign_config"])
 
     def test_run_metadata_records_exact_authorized_git_recovery_boundary(self):
-        kwargs = {
-            "command": "python test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python test", num_round_trips=1, distractor=False)
         prior_commit = "1" * 40
         recovery_commit = "2" * 40
         prior_fingerprint = {"run_meta.py": "old", "hybrid_schema.py": "same"}
@@ -1771,17 +1596,8 @@ class IntegrationContractGroup05Mixin:
                 second_recovered["run_git_commit"], recovery_commit)
 
     def test_run_metadata_accepts_sha_pinned_chained_recovery_identities(self):
-        kwargs = {
-            "command": "python chained-recovery-test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 1,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": False,
-            "max_tokens": 16,
-            "printing": False,
-        }
+        kwargs = run_metadata_kwargs(
+            command="python chained-recovery-test", num_round_trips=1, distractor=False)
         commits = [character * 40 for character in "123"]
         fingerprints = [
             {"run_meta.py": f"revision-{index}"}
@@ -1988,17 +1804,7 @@ class IntegrationContractGroup05Mixin:
                 "ANCHORPATCH_EXPECTED_GIT_COMMIT": commit,
                 "ANCHORPATCH_EXPECTED_GIT_TREE_STATE": "clean",
             }
-            kwargs = {
-                "command": "python test",
-                "samples": ["sample"],
-                "methods": ["hybridpatch", "fullrewrite"],
-                "num_round_trips": 1,
-                "seed": 42,
-                "model": "offline-test-model",
-                "distractor": True,
-                "max_tokens": 16,
-                "printing": False,
-            }
+            kwargs = run_metadata_kwargs(distractor=True)
             with mock.patch.object(run_meta, "_HERE", str(source_dir)), \
                     mock.patch.object(
                         run_meta, "code_fingerprint",
@@ -2016,20 +1822,13 @@ class IntegrationContractGroup05Mixin:
                 os.path.join(out_dir, "api_attempt_ledger.jsonl")))
 
     def test_run_metadata_locks_task_plan_hash_before_api(self):
-        kwargs = {
-            "command": "python test",
-            "samples": ["sample"],
-            "methods": ["hybridpatch", "fullrewrite"],
-            "num_round_trips": 2,
-            "seed": 42,
-            "model": "offline-test-model",
-            "distractor": True,
-            "max_tokens": 16,
-            "printing": False,
-            "context_shuffle_seeded": True,
-            "context_shuffle_seed_version": "global_random_seed_v1",
-            "stop_on_preservation_violation": True,
-        }
+        kwargs = run_metadata_kwargs(
+            num_round_trips=2,
+            distractor=True,
+            context_shuffle_seeded=True,
+            context_shuffle_seed_version="global_random_seed_v1",
+            stop_on_preservation_violation=True,
+        )
         commit = "1" * 40
         with tempfile.TemporaryDirectory() as out_dir, \
                 mock.patch.object(run_meta, "_git_identity", return_value=(commit, "clean")), \
