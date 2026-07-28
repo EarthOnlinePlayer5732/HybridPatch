@@ -1033,3 +1033,7 @@ warning；`api_calls.jsonl`、attempt/response journal、run metadata、stop lat
 新增独立 component suite `src/test_snapshot_io.py`，覆盖三种模式、长路径、保留名、
 best-effort 边界和 legacy manifest。零 API验证为 snapshot `8/8`、基础设施 `251/251`、
 hybrid executor `72/72`；实现阶段未调用 provider API，也未修改历史实验产物。
+
+append-only metadata 的离线 quiescence gate 保持不变；`test_analyze.py` 的 formal fixtures
+补齐终态 `run_metadata/3`，并新增缺失 metadata 必须拒绝的回归，恢复为 `6/6`。这是测试
+夹具同步，不通过 mock 或生产分支绕过正式 campaign 的终态要求。

@@ -24,6 +24,16 @@ def _backward(sample_id, round_trip, score, method="hybridpatch", error=None):
     }
 
 
+def _write_quiescent_run_metadata(out_dir):
+    with open(
+            os.path.join(out_dir, "run_metadata.jsonl"),
+            "w", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            "schema": "anchorpatch.run_metadata/3",
+            "status": "finished",
+        }) + "\n")
+
+
 class SampleLevelFinalEndpointTests(unittest.TestCase):
     def test_exact_final_rt_one_pair_per_sample(self):
         hybrid = [
@@ -79,6 +89,7 @@ class SampleLevelFinalEndpointTests(unittest.TestCase):
                         "num_round_trips": 2,
                     },
                 }, fh)
+            _write_quiescent_run_metadata(out_dir)
 
             old_argv = sys.argv
             sys.argv = ["analyze.py", "--dir", out_dir, "--K", "2"]
@@ -145,6 +156,7 @@ class SampleLevelFinalEndpointTests(unittest.TestCase):
                         "num_round_trips": 2,
                     },
                 }, fh)
+            _write_quiescent_run_metadata(out_dir)
             old_argv = sys.argv
             sys.argv = ["analyze.py", "--dir", out_dir, "--K", "2"]
             try:
@@ -180,6 +192,7 @@ class SampleLevelFinalEndpointTests(unittest.TestCase):
                         "num_round_trips": 1,
                     },
                 }, handle)
+            _write_quiescent_run_metadata(out_dir)
             for method, evaluation in (
                     ("hybridpatch", hybrid_evaluation),
                     ("fullrewrite", {"score": 0.5})):
@@ -248,6 +261,29 @@ class SampleLevelFinalEndpointTests(unittest.TestCase):
             try:
                 with self.assertRaisesRegex(
                         RuntimeError, "legacy anchorpatch arm"):
+                    analyze.main()
+            finally:
+                sys.argv = old_argv
+
+    def test_formal_manifest_requires_quiescent_run_metadata(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            with open(
+                    os.path.join(out_dir, "dispatch_manifest.json"),
+                    "w", encoding="utf-8") as handle:
+                json.dump({
+                    "schema": "anchorpatch.paired_campaign_manifest/1",
+                    "config": {
+                        "samples": ["s1"],
+                        "method_set": ["hybridpatch", "fullrewrite"],
+                        "num_round_trips": 1,
+                    },
+                }, handle)
+            old_argv = sys.argv
+            sys.argv = ["analyze.py", "--dir", out_dir, "--K", "1"]
+            try:
+                with self.assertRaisesRegex(
+                        RuntimeError,
+                        "formal campaign run metadata is missing"):
                     analyze.main()
             finally:
                 sys.argv = old_argv
