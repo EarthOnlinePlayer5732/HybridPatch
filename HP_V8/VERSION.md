@@ -1037,3 +1037,15 @@ hybrid executor `72/72`；实现阶段未调用 provider API，也未修改历�
 append-only metadata 的离线 quiescence gate 保持不变；`test_analyze.py` 的 formal fixtures
 补齐终态 `run_metadata/3`，并新增缺失 metadata 必须拒绝的回归，恢复为 `6/6`。这是测试
 夹具同步，不通过 mock 或生产分支绕过正式 campaign 的终态要求。
+
+## 2026-07-29 回归测试分层入口
+
+`src/run_regression_tier.py` 在不移动、不重命名现有 case 的前提下提供 `fast`、`component`、
+`recovery` 和 `all` 四个 unittest 选择入口。transport 三类进入 fast；integration/campaign
+按显式 crash、pending、parent-loss、interrupt、resume/recovery 等名称标记分成 component
+与 recovery。三层互斥且并集精确覆盖原 251 个 ID：`52 + 117 + 82 = 251`；`all` 继续
+保留原 `test_model_openai.*` ID，canonical 兼容入口仍是 `src/test_model_openai.py`。
+
+`TESTING.md` 固定 Git Bash 命令和各层失败含义；selector 自测 `3/3`、fast 实跑 `52/52`。
+该入口只改善反馈速度和故障定位，不改变 unittest 框架、生产代码、测试断言或 paid API
+边界。
