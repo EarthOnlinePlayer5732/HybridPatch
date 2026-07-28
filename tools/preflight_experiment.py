@@ -23,8 +23,8 @@ import evaluator_runtime_preflight as evaluator
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = "hybridpatch.experiment_preflight_receipt/1"
-REGRESSION_SCHEMA = "hybridpatch.zero_api_regression_receipt/1"
+SCHEMA = "hybridpatch.experiment_preflight_receipt/2"
+REGRESSION_SCHEMA = "hybridpatch.zero_api_regression_receipt/2"
 REGRESSION_SCRIPTS = (
     "src/test_hybrid_executor.py",
     "src/splitters.py",
@@ -97,6 +97,48 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _paths_digest(root: Path, paths: list[Path]) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(paths, key=lambda item: item.relative_to(root).as_posix()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _is_regression_input(path: Path) -> bool:
+    return (
+        path.is_file()
+        and not {"__pycache__", ".pytest_cache"}.intersection(path.parts)
+        and path.suffix not in {".pyc", ".pyo"}
+    )
+
+
+def regression_code_sha256(version_root: Path) -> str:
+    candidates = {
+        path
+        for path in (version_root / "src").rglob("*.py")
+        if _is_regression_input(path)
+    }
+    fixture_root = version_root / "src" / "test_fixtures"
+    if fixture_root.is_dir():
+        candidates.update(
+            path for path in fixture_root.rglob("*") if _is_regression_input(path)
+        )
+    tests_root = version_root / "tests"
+    if tests_root.is_dir():
+        candidates.update(
+            path for path in tests_root.rglob("*") if _is_regression_input(path)
+        )
+    requirements = version_root / "requirements.txt"
+    if requirements.is_file():
+        candidates.add(requirements)
+    return _paths_digest(version_root, list(candidates))
+
+
 def repo_ref(path: Path) -> str:
     try:
         return path.resolve().relative_to(ROOT.resolve()).as_posix()
@@ -165,7 +207,7 @@ def ensure_regression_receipt(
     version_root: Path,
     cache_path: Path,
 ) -> tuple[dict[str, Any], bool]:
-    code_sha256 = evaluator.evaluator_code_sha256(version_root)
+    code_sha256 = regression_code_sha256(version_root)
     runtime = evaluator.runtime_identity()
     commands = _regression_commands(version_root)
     if cache_path.is_file():
@@ -176,7 +218,7 @@ def ensure_regression_receipt(
         if (
             cached.get("schema") == REGRESSION_SCHEMA
             and cached.get("version") == version_root.name
-            and cached.get("code_sha256") == code_sha256
+            and cached.get("regression_code_sha256") == code_sha256
             and cached.get("runtime_identity") == runtime
             and cached.get("commands") == commands
             and all(item.get("exit_code") == 0 for item in cached.get("results") or [])
@@ -189,7 +231,7 @@ def ensure_regression_receipt(
         "schema": REGRESSION_SCHEMA,
         "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "version": version_root.name,
-        "code_sha256": code_sha256,
+        "regression_code_sha256": code_sha256,
         "runtime_identity": runtime,
         "commands": commands,
         "results": results,
@@ -310,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
             "cache_path": repo_ref(regression_cache),
             "cache_sha256": sha256_file(regression_cache),
             "cache_hit": regression_cached,
-            "code_sha256": regression["code_sha256"],
+            "regression_code_sha256": regression["regression_code_sha256"],
             "results": regression["results"],
         },
         "dispatcher_dry_run": dispatcher_result,

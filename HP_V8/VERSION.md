@@ -938,3 +938,9 @@ node ID 与 unittest ID，不让内部 case 模块被测试发现器重复收集
 保持原样，不追溯性放宽，也不允许 pre-split campaign 跨此边界恢复。旧 `/5` DeepSeek
 campaign 已按上节放弃；新实验必须从 clean 新提交和新 out_dir 开始。本轮未调用 provider
 API，也未修改任何历史实验产物。
+
+zero-API preflight 的 regression receipt 随后独立升级为 schema `/2`：测试缓存身份不再复用
+evaluator runtime fingerprint，并显式覆盖 `src/**/*.py`、`src/test_fixtures/**`、未来
+`tests/**` 与 `requirements.txt`。因此拆出的 case、JSON fixture 或未来 tests 树任一字节变化
+都会使 regression cache 失效；旧 `/1` receipt 只会发生一次受控 cache miss，不作原地迁移，
+evaluator runtime cache 的 schema 与身份保持不变。
