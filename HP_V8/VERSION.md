@@ -1049,3 +1049,16 @@ append-only metadata 的离线 quiescence gate 保持不变；`test_analyze.py` 
 `TESTING.md` 固定 Git Bash 命令和各层失败含义；selector 自测 `3/3`、fast 实跑 `52/52`。
 该入口只改善反馈速度和故障定位，不改变 unittest 框架、生产代码、测试断言或 paid API
 边界。
+
+## 2026-07-29 通用恢复运行时边界
+
+`authorize_ledger_lock_recovery.py` 不再同时承载全部通用 parent-loss 事务原语和历史事故
+迁移。当前通用的 dispatcher-process-lost 校验、JSONL 尾部恢复、worker reconciliation、
+incident 合并与 transport sidecar 证据处理机械迁移到 `campaign_recovery_runtime.py`；旧
+authorizer 继续作为 CLI/兼容 facade，并保留 row760/778、旧 transport revision、
+operator/provider/server/disconnect/classifier 等历史 migration。现有私有导入点仍由 facade
+原名 re-export，避免把一次边界整理伪装成恢复语义变更。
+
+抽取函数以冻结前提交 `26fefbb04f28ec2d134251dccabfedd5c8527cff` 的 source/AST digest
+逐一校验，并覆盖 facade identity、字节写入和 incident 顺序。零 API 验证为独立抽取测试
+`4/4`、parent-loss 定向 `16/16`、完整基础设施回归 `251/251`；未修改历史实验目录。
