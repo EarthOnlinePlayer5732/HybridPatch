@@ -919,3 +919,22 @@ post-exit 严格检查，通过后才补位。补位边界会再次读取 stop l
 strict-inspection cache、seal cache 和 public/private final record 均改为内容 SHA-256
 绑定；同尺寸且恢复原 mtime 的 API ledger、sidecar、source tree、archive 或 report
 变化均不得复用旧审计/封存结果，archive 内 symlink fail-closed。
+
+## 2026-07-29 基础设施回归测试机械拆分
+
+原 `src/test_model_openai.py` 已增长为覆盖 transport、runner、dispatcher、metadata、
+recovery 与 postprocess 的基础设施测试单体。本轮先做无测试语义变化的机械拆分：原路径
+保留为五个同名 `unittest.TestCase` shell，实际 case 按原顺序移入
+`src/model_openai_test_cases/` 的非 `test_*.py` mixin 模块。这样保持既有直接入口、pytest
+node ID 与 unittest ID，不让内部 case 模块被测试发现器重复收集；后续 fixture 去重、按职责
+分层和生产模块拆分另行提交，不与本次移动混做。
+
+拆分前后均为 234 项；pytest ordered node-ID SHA-256 为
+`e4a6d073d23b5da780be79682477b362c741f2c14a64561fcefee9dd60b4ec88`，sorted SHA-256 为
+`c05f8721a7d301a161c3b5f6fdb251427b5315f829e30f569b8ddc8111742311`。旧五类的 256 个方法
+（234 tests、22 helpers）源码段与 AST 均逐项相同。
+
+该拆分提交是旧 campaign 的明确恢复边界：历史 recovery authorization 中固定的路径集合
+保持原样，不追溯性放宽，也不允许 pre-split campaign 跨此边界恢复。旧 `/5` DeepSeek
+campaign 已按上节放弃；新实验必须从 clean 新提交和新 out_dir 开始。本轮未调用 provider
+API，也未修改任何历史实验产物。
