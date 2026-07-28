@@ -12410,21 +12410,288 @@ class DeepSeekOpenCodeCampaignTests(unittest.TestCase):
             ]
             self.assertEqual(len(witness), 1)
 
+    def test_deepseek_pristine_pending_reprepare_shortens_history_path(
+            self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            auth_path = os.path.join(
+                out_dir,
+                run_meta.CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME,
+            )
+            stop_path = os.path.join(out_dir, "campaign_stop.json")
+            pending_path = os.path.join(
+                out_dir,
+                run_meta.DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
+            )
+            manifest_path = os.path.join(
+                out_dir, "dispatch_manifest.json")
+            dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+            api_path = os.path.join(out_dir, "api_calls.jsonl")
+            old_authorization_id = (
+                "dsv4f-inspector-20260728T144037+0800-16a9a52c")
+            old_history_relative = (
+                "recovery_history/" + old_authorization_id)
+            old_history_dir = os.path.join(
+                out_dir, old_history_relative)
+            os.makedirs(old_history_dir)
+            prior_auth = {"authorization_id": "prior-auth"}
+            stop = {"condition": "dispatcher_integrity_failure"}
+            run_meta.write_json_atomic(
+                manifest_path, {"schema": paired_dispatch.SCHEMA})
+            run_meta.write_json_atomic(auth_path, prior_auth)
+            run_meta.write_json_atomic(stop_path, stop)
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "active_worker_set.json"),
+                {"workers": {}},
+            )
+            run_meta.append_jsonl_locked(
+                dispatch_path, {"event": "prior"})
+            run_meta.append_jsonl_locked(
+                api_path, {"request_id": "request-a"})
+            prepared_fingerprint = {
+                "model_openai.py": "same",
+                "run_meta.py": "old",
+            }
+            current_fingerprint = {
+                "model_openai.py": "same",
+                "run_meta.py": "new",
+            }
+            prepared_commit = "a" * 40
+            current_commit = "c" * 40
+            prior_recovery_commit = "b" * 40
+            prior_git_commit = "0" * 40
+            record = {
+                "schema": (
+                    run_meta.CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2),
+                "authorization_id": old_authorization_id,
+                "created_at": "2026-07-28T14:40:37+08:00",
+                "recovery_kind": run_meta.LEDGER_LOCK_RECOVERY_KIND,
+                "authorization_basis": (
+                    "explicit_user_resume_after_deepseek_recovery_"
+                    "inspector_fix"
+                ),
+                "deepseek_transport_disconnect_retry_recovery": True,
+                "deepseek_transport_disconnect_"
+                "inspector_followup_recovery": True,
+                "dispatch_manifest_sha256": (
+                    run_meta._sha256_file(manifest_path)),
+                "recovery_git_commit": prepared_commit,
+                "recovery_git_tree_state": "clean",
+                "recovery_code_fingerprint": prepared_fingerprint,
+                "prior_git_commit": prior_git_commit,
+                "deepseek_resume_samples": ["sample-a"],
+                "incident_api_rows": [{"row_number": 1}],
+                "recovered_worker_launch_ids": ["worker-a"],
+                "deepseek_pending_samples": [],
+                "archived_emergency_stop_records": [],
+                "deepseek_transport_disconnect_inspector_"
+                "prior_recovery_git_commit": prior_recovery_commit,
+                "deepseek_transport_disconnect_inspector_"
+                "delta_changed_paths": ["delta.py"],
+                "changed_tracked_paths": ["cumulative.py"],
+                "superseded_authorization_path": (
+                    old_history_relative
+                    + "/superseded_campaign_recovery_authorization.json"
+                ),
+                "superseded_authorization_sha256": (
+                    run_meta._sha256_file(auth_path)),
+                "archived_stop_path": (
+                    old_history_relative + "/campaign_stop.json"),
+                "archived_stop_sha256": (
+                    run_meta._sha256_file(stop_path)),
+                "deepseek_transport_disconnect_inspector_prefixes": {
+                    "api_calls.jsonl": (
+                        ledger_recovery._file_prefix_evidence(api_path)),
+                    "dispatch_log.jsonl": (
+                        ledger_recovery._file_prefix_evidence(
+                            dispatch_path)),
+                },
+            }
+            pending = {
+                "schema": (
+                    ledger_recovery
+                    ._DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA),
+                "created_at": "2026-07-28T14:40:37+08:00",
+                "history_dir": old_history_relative,
+                "authorization_record": record,
+            }
+            run_meta.write_json_atomic(pending_path, pending)
+            old_pending_sha256 = run_meta._sha256_file(pending_path)
+
+            tooling_paths = sorted({
+                "HP_V8/src/authorize_ledger_lock_recovery.py",
+                "HP_V8/src/run_meta.py",
+                "HP_V8/src/test_model_openai.py",
+            })
+
+            def changed_paths(prior, current):
+                self.assertEqual(current, current_commit)
+                if prior == prepared_commit:
+                    return tooling_paths
+                if prior == prior_recovery_commit:
+                    return ["delta.py"]
+                if prior == prior_git_commit:
+                    return ["cumulative.py"]
+                self.fail(f"unexpected prior commit: {prior}")
+
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(current_commit, "clean")), \
+                    mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=current_fingerprint), \
+                    mock.patch.object(
+                        ledger_recovery, "_git_changed_paths",
+                        side_effect=changed_paths), \
+                    mock.patch.object(
+                        ledger_recovery.subprocess, "run",
+                        return_value=mock.Mock(
+                            stdout=(
+                                current_commit + " "
+                                + prepared_commit + "\n"
+                            ))):
+                updated = (
+                    ledger_recovery
+                    ._reprepare_pristine_deepseek_inspector_pending(
+                        out_dir, pending_path, pending
+                    )
+                )
+                (
+                    ledger_recovery
+                    ._validate_deepseek_inspector_reprepare_evidence(
+                        out_dir, updated,
+                        updated["authorization_record"],
+                    )
+                )
+                tampered_pending = json.loads(json.dumps(updated))
+                tampered_pending["authorization_record"][
+                    "deepseek_transport_inspector_pending_reprepared_"
+                    "from_sha256"
+                ] = "f" * 64
+                with self.assertRaisesRegex(
+                        RuntimeError, "prior pending archive mismatch"):
+                    (
+                        ledger_recovery
+                        ._validate_deepseek_inspector_reprepare_evidence(
+                            out_dir, tampered_pending,
+                            tampered_pending["authorization_record"],
+                        )
+                    )
+                stripped_pending = json.loads(json.dumps(updated))
+                stripped_record = stripped_pending[
+                    "authorization_record"]
+                for key in list(stripped_record):
+                    if key.startswith(
+                            "deepseek_transport_inspector_pending_"
+                            "reprepared_"):
+                        stripped_record.pop(key)
+                stripped_pending.pop("reprepared_at")
+                with self.assertRaisesRegex(
+                        RuntimeError, "provenance was removed"):
+                    (
+                        ledger_recovery
+                        ._validate_deepseek_inspector_reprepare_evidence(
+                            out_dir, stripped_pending, stripped_record,
+                        )
+                    )
+            updated_record = updated["authorization_record"]
+            self.assertTrue(
+                updated_record["authorization_id"].startswith("dsi-"))
+            self.assertLess(
+                len(updated_record["authorization_id"]),
+                len(old_authorization_id),
+            )
+            self.assertEqual(
+                updated_record["recovery_git_commit"], current_commit)
+            self.assertEqual(
+                updated_record["recovery_code_fingerprint"],
+                current_fingerprint,
+            )
+            self.assertEqual(
+                updated_record[
+                    "deepseek_transport_inspector_pending_"
+                    "reprepared_from_sha256"
+                ],
+                old_pending_sha256,
+            )
+            self.assertEqual(
+                updated_record[
+                    "deepseek_transport_inspector_pending_reprepared_"
+                    "from_authorization_id"
+                ],
+                old_authorization_id,
+            )
+            self.assertEqual(os.listdir(old_history_dir), ["pending.json"])
+            archived_pending = os.path.join(
+                old_history_dir, "pending.json")
+            self.assertEqual(
+                run_meta._sha256_file(archived_pending),
+                old_pending_sha256,
+            )
+            self.assertTrue(os.path.isfile(auth_path))
+            self.assertTrue(os.path.isfile(stop_path))
+
+            def run_meta_git(args, **_kwargs):
+                if "rev-list" in args:
+                    return mock.Mock(stdout=(
+                        current_commit + " " + prepared_commit + "\n"))
+                self.assertEqual(args[3:5], ["diff", "--name-only"])
+                return mock.Mock(stdout=(
+                    "HP_V8/src/authorize_ledger_lock_recovery.py\n"
+                    "HP_V8/src/run_meta.py\n"
+                    "HP_V8/src/test_model_openai.py\n"
+                ))
+
+            with mock.patch.object(
+                    run_meta.subprocess, "run",
+                    side_effect=run_meta_git), mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=current_fingerprint):
+                self.assertTrue(
+                    run_meta
+                    ._deepseek_inspector_reprepare_evidence_matches(
+                        out_dir, updated_record
+                    )
+                )
+                tampered_record = json.loads(json.dumps(updated_record))
+                tampered_record[
+                    "deepseek_transport_inspector_pending_reprepared_"
+                    "from_authorization_id"
+                ] = "forged"
+                self.assertFalse(
+                    run_meta
+                    ._deepseek_inspector_reprepare_evidence_matches(
+                        out_dir, tampered_record
+                    )
+                )
+                stripped_record = json.loads(json.dumps(updated_record))
+                for key in list(stripped_record):
+                    if key.startswith(
+                            "deepseek_transport_inspector_pending_"
+                            "reprepared_"):
+                        stripped_record.pop(key)
+                self.assertFalse(
+                    run_meta
+                    ._deepseek_inspector_reprepare_evidence_matches(
+                        out_dir, stripped_record
+                    )
+                )
+
     def test_deepseek_recovery_rebuilds_partial_archive_temp(self):
         with tempfile.TemporaryDirectory() as out_dir:
             source = os.path.join(out_dir, "source.json")
             destination = os.path.join(out_dir, "archive.json")
             with open(source, "wb") as handle:
                 handle.write(b'{"authorization":"prior"}')
-            with open(destination + ".pending-copy", "wb") as handle:
+            short_temp = os.path.join(
+                out_dir, ".recovery-copy.pending")
+            with open(short_temp, "wb") as handle:
                 handle.write(b'{"authorization":')
             expected = run_meta._sha256_file(source)
             ledger_recovery._ensure_bound_file_copy(
                 source, destination, expected)
             self.assertEqual(
                 run_meta._sha256_file(destination), expected)
-            self.assertFalse(
-                os.path.exists(destination + ".pending-copy"))
+            self.assertFalse(os.path.exists(short_temp))
 
     def test_deepseek_recovery_repairs_only_expected_partial_witness(self):
         with tempfile.TemporaryDirectory() as out_dir:

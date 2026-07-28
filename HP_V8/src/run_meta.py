@@ -3246,6 +3246,146 @@ def _deepseek_dispatcher_stopped_sidecar_evidence(out_dir, api_row):
     }
 
 
+def _deepseek_inspector_reprepare_evidence_matches(out_dir, record):
+    prefix = "deepseek_transport_inspector_pending_reprepared_"
+    suffixes = {
+        "from_commit",
+        "from_sha256",
+        "from_path",
+        "from_authorization_id",
+        "from_history_dir",
+        "at",
+    }
+    present = {suffix for suffix in suffixes if prefix + suffix in record}
+    if not present:
+        history_root = os.path.join(out_dir, "recovery_history")
+        if (os.path.isdir(history_root)
+                and any(
+                    os.path.isfile(os.path.join(
+                        history_root, name, "pending.json"))
+                    for name in os.listdir(history_root)
+                )):
+            return False
+        return True
+    if present != suffixes:
+        return False
+    prepared_commit = record.get(prefix + "from_commit")
+    old_pending_sha256 = record.get(prefix + "from_sha256")
+    old_authorization_id = record.get(prefix + "from_authorization_id")
+    old_history_relative = record.get(prefix + "from_history_dir")
+    old_pending_relative = record.get(prefix + "from_path")
+    reprepared_at = record.get(prefix + "at")
+    if (not isinstance(prepared_commit, str)
+            or not re.fullmatch(r"[0-9a-f]{40}", prepared_commit)
+            or not isinstance(old_pending_sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", old_pending_sha256)
+            or not isinstance(old_authorization_id, str)
+            or not old_authorization_id
+            or "/" in old_authorization_id
+            or "\\" in old_authorization_id
+            or old_history_relative
+            != "recovery_history/" + old_authorization_id
+            or old_pending_relative
+            != old_history_relative + "/pending.json"
+            or not isinstance(reprepared_at, str)
+            or not reprepared_at):
+        return False
+    old_pending_path = os.path.realpath(os.path.join(
+        out_dir, old_pending_relative))
+    try:
+        old_pending_inside = (
+            os.path.commonpath([out_dir, old_pending_path]) == out_dir)
+    except ValueError:
+        old_pending_inside = False
+    if (not old_pending_inside
+            or not os.path.isfile(old_pending_path)
+            or _sha256_file(old_pending_path) != old_pending_sha256):
+        return False
+    try:
+        with open(old_pending_path, encoding="utf-8") as handle:
+            old_pending = json.load(handle)
+    except (OSError, ValueError):
+        return False
+    old_record = (
+        old_pending.get("authorization_record")
+        if isinstance(old_pending, dict) else None
+    )
+    if (not isinstance(old_record, dict)
+            or old_pending.get("schema")
+            != "anchorpatch.deepseek_transport_inspector_recovery/1"
+            or old_pending.get("history_dir") != old_history_relative
+            or old_pending.get("created_at") != record.get("created_at")
+            or old_record.get("authorization_id")
+            != old_authorization_id
+            or old_record.get("recovery_git_commit") != prepared_commit):
+        return False
+
+    current_commit = record.get("recovery_git_commit")
+    old_fingerprint = old_record.get("recovery_code_fingerprint")
+    current_fingerprint = record.get("recovery_code_fingerprint")
+    if (not isinstance(old_fingerprint, dict)
+            or not isinstance(current_fingerprint, dict)
+            or sorted(
+                key for key in set(old_fingerprint) | set(
+                    current_fingerprint)
+                if old_fingerprint.get(key)
+                != current_fingerprint.get(key)
+            ) != ["run_meta.py"]
+            or current_fingerprint != code_fingerprint()):
+        return False
+    try:
+        parent_line = subprocess.run(
+            [
+                "git", "-C", _HERE, "rev-list", "--parents",
+                "-n", "1", current_commit,
+            ],
+            check=True, capture_output=True, text=True,
+            encoding="utf-8",
+        ).stdout.split()
+        changed_paths = {
+            item.replace("\\", "/")
+            for item in subprocess.run(
+                [
+                    "git", "-C", _HERE, "diff", "--name-only",
+                    prepared_commit, current_commit, "--",
+                ],
+                check=True, capture_output=True, text=True,
+                encoding="utf-8",
+            ).stdout.splitlines()
+            if item
+        }
+    except (OSError, subprocess.CalledProcessError, TypeError):
+        return False
+    if (parent_line != [current_commit, prepared_commit]
+            or changed_paths != {
+                "HP_V8/src/authorize_ledger_lock_recovery.py",
+                "HP_V8/src/run_meta.py",
+                "HP_V8/src/test_model_openai.py",
+            }):
+        return False
+
+    expected_record = json.loads(json.dumps(old_record))
+    current_authorization_id = record.get("authorization_id")
+    if (not isinstance(current_authorization_id, str)
+            or re.fullmatch(
+                r"dsi-[0-9a-f]{12}", current_authorization_id) is None):
+        return False
+    current_history_relative = (
+        "recovery_history/" + current_authorization_id)
+    expected_record["recovery_git_commit"] = current_commit
+    expected_record["recovery_code_fingerprint"] = current_fingerprint
+    expected_record["authorization_id"] = current_authorization_id
+    expected_record["superseded_authorization_path"] = (
+        current_history_relative
+        + "/superseded_campaign_recovery_authorization.json"
+    )
+    expected_record["archived_stop_path"] = (
+        current_history_relative + "/campaign_stop.json")
+    for suffix in suffixes:
+        expected_record[prefix + suffix] = record[prefix + suffix]
+    return expected_record == record
+
+
 def _load_recovery_authorization_chain(out_dir, path, record):
     """Load the exact V2 authorization chain pinned by nested SHA-256 links."""
     history = []
@@ -3622,6 +3762,13 @@ def read_campaign_recovery_authorization(
             or current_fingerprint
             != record.get("recovery_code_fingerprint")):
         raise RuntimeError("campaign recovery current identity mismatch")
+    if (record.get(
+            "deepseek_transport_disconnect_inspector_followup_recovery"
+            ) is True
+            and not _deepseek_inspector_reprepare_evidence_matches(
+                out_dir, record)):
+        raise RuntimeError(
+            "DeepSeek inspector pending reprepare evidence mismatch")
     if (record.get(
             "deepseek_transport_disconnect_initial_transaction") is True
             and record.get(

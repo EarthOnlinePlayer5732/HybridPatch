@@ -11,6 +11,7 @@ from datetime import datetime
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 import uuid
@@ -129,7 +130,10 @@ def _ensure_bound_file_copy(source, destination, expected_sha256):
         return
     if _sha256_file(source) != expected_sha256:
         raise RuntimeError("recovery archive source digest mismatch")
-    temp_path = destination + ".pending-copy"
+    temp_path = os.path.join(
+        os.path.dirname(destination), ".recovery-copy.pending")
+    legacy_temp_path = destination + ".pending-copy"
+    _unlink_with_sharing_retry(legacy_temp_path)
     _unlink_with_sharing_retry(temp_path)
     try:
         with open(temp_path, "xb") as writer:
@@ -144,6 +148,7 @@ def _ensure_bound_file_copy(source, destination, expected_sha256):
         _replace_with_sharing_retry(temp_path, destination)
     finally:
         _unlink_with_sharing_retry(temp_path)
+        _unlink_with_sharing_retry(legacy_temp_path)
 
 
 def _recoverable_jsonl_tail(handle, prefix_evidence, record):
@@ -347,6 +352,334 @@ def _git_changed_paths(prior_commit, recovery_commit):
         item.replace("\\", "/")
         for item in result.stdout.splitlines() if item
     )
+
+
+def _reprepare_pristine_deepseek_inspector_pending(
+        out_dir, pending_path, pending):
+    """Rebind a side-effect-free pending record to one tooling-only fix."""
+    record = (
+        pending.get("authorization_record")
+        if isinstance(pending, dict) else None
+    )
+    if (not isinstance(record, dict)
+            or pending.get("schema")
+            != _DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA
+            or record.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or record.get("recovery_kind") != LEDGER_LOCK_RECOVERY_KIND
+            or record.get(
+                "deepseek_transport_disconnect_retry_recovery") is not True
+            or record.get(
+                "deepseek_transport_disconnect_"
+                "inspector_followup_recovery") is not True
+            or record.get("authorization_basis")
+            != (
+                "explicit_user_resume_after_deepseek_recovery_"
+                "inspector_fix"
+            )
+            or pending.get("created_at") != record.get("created_at")
+            or not isinstance(record.get("created_at"), str)
+            or not record.get("created_at")
+            or record.get("recovery_git_tree_state") != "clean"
+            or not isinstance(record.get("deepseek_resume_samples"), list)
+            or not record.get("deepseek_resume_samples")
+            or not isinstance(record.get("incident_api_rows"), list)
+            or not isinstance(
+                record.get("recovered_worker_launch_ids"), list)
+            or not isinstance(
+                record.get("deepseek_pending_samples"), list)
+            or record.get("archived_emergency_stop_records") != []
+            or _sha256_file(os.path.join(
+                out_dir, "dispatch_manifest.json"))
+            != record.get("dispatch_manifest_sha256")):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending recovery is invalid")
+    prepared_commit = record.get("recovery_git_commit")
+    current_commit, current_tree = _git_identity()
+    if current_commit == prepared_commit:
+        return pending
+    prepared_fingerprint = record.get("recovery_code_fingerprint")
+    current_fingerprint = code_fingerprint()
+    prepared_fingerprint_map = (
+        prepared_fingerprint
+        if isinstance(prepared_fingerprint, dict) else {}
+    )
+    fingerprint_changes = sorted(
+        key for key in set(prepared_fingerprint_map) | set(
+            current_fingerprint)
+        if prepared_fingerprint_map.get(key)
+        != current_fingerprint.get(key)
+    )
+    if (current_tree != "clean"
+            or not isinstance(prepared_commit, str)
+            or not isinstance(prepared_fingerprint, dict)
+            or fingerprint_changes != ["run_meta.py"]):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending identity has drifted")
+    parent_line = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", current_commit],
+        check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout.split()
+    tooling_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/run_meta.py",
+        "HP_V8/src/test_model_openai.py",
+    }
+    prior_recovery_commit = record.get(
+        "deepseek_transport_disconnect_inspector_"
+        "prior_recovery_git_commit")
+    if (parent_line != [current_commit, prepared_commit]
+            or set(_git_changed_paths(prepared_commit, current_commit))
+            != tooling_paths
+            or sorted(_git_changed_paths(
+                prior_recovery_commit, current_commit))
+            != sorted(record.get(
+                "deepseek_transport_disconnect_inspector_"
+                "delta_changed_paths") or [])
+            or sorted(_git_changed_paths(
+                record.get("prior_git_commit"), current_commit))
+            != sorted(record.get("changed_tracked_paths") or [])):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending tooling delta is invalid")
+
+    authorization_id = record.get("authorization_id")
+    expected_history_relative = (
+        f"recovery_history/{authorization_id}")
+    history_dir = os.path.join(out_dir, expected_history_relative)
+    auth_path = os.path.join(
+        out_dir, CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME)
+    stop_path = os.path.join(out_dir, "campaign_stop.json")
+    active = _read_json(os.path.join(
+        out_dir, "active_worker_set.json"))
+    history_entries = (
+        set(os.listdir(history_dir))
+        if os.path.isdir(history_dir) else set()
+    )
+    if (not isinstance(authorization_id, str)
+            or not authorization_id
+            or authorization_id in {".", ".."}
+            or "/" in authorization_id
+            or "\\" in authorization_id
+            or pending.get("history_dir") != expected_history_relative
+            or record.get("superseded_authorization_path")
+            != (
+                expected_history_relative
+                + "/superseded_campaign_recovery_authorization.json"
+            )
+            or record.get("archived_stop_path")
+            != expected_history_relative + "/campaign_stop.json"
+            or active.get("workers") != {}
+            or not os.path.isfile(auth_path)
+            or _sha256_file(auth_path)
+            != record.get("superseded_authorization_sha256")
+            or not os.path.isfile(stop_path)
+            or _sha256_file(stop_path)
+            != record.get("archived_stop_sha256")
+            or history_entries - {
+                "pending.json", ".recovery-copy.pending"}
+            or (os.path.exists(history_dir)
+                and not os.path.isdir(history_dir))):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending is not pristine")
+    _assert_worker_leases_free(
+        out_dir, record["deepseek_resume_samples"])
+    prefix_evidence = record.get(
+        "deepseek_transport_disconnect_inspector_prefixes")
+    if (not isinstance(prefix_evidence, dict)
+            or set(prefix_evidence) != {
+                "api_calls.jsonl", "dispatch_log.jsonl"}
+            or any(
+                _file_prefix_evidence(os.path.join(out_dir, name))
+                != evidence
+                for name, evidence in prefix_evidence.items()
+            )):
+        raise RuntimeError(
+            "DeepSeek transport inspector pending prefix has drifted")
+
+    old_pending_sha256 = _sha256_file(pending_path)
+    old_pending_archive_relative = (
+        expected_history_relative + "/pending.json")
+    old_pending_archive_path = os.path.join(
+        out_dir, old_pending_archive_relative)
+    os.makedirs(history_dir, exist_ok=True)
+    _ensure_bound_file_copy(
+        pending_path, old_pending_archive_path, old_pending_sha256)
+    updated = json.loads(json.dumps(pending))
+    updated_record = updated["authorization_record"]
+    replacement_authorization_id = "dsi-" + uuid.uuid4().hex[:12]
+    replacement_history_relative = (
+        "recovery_history/" + replacement_authorization_id)
+    updated_record["recovery_git_commit"] = current_commit
+    updated_record["recovery_code_fingerprint"] = current_fingerprint
+    updated_record["authorization_id"] = replacement_authorization_id
+    updated_record["superseded_authorization_path"] = (
+        replacement_history_relative
+        + "/superseded_campaign_recovery_authorization.json"
+    )
+    updated_record["archived_stop_path"] = (
+        replacement_history_relative + "/campaign_stop.json")
+    updated_record[
+        "deepseek_transport_inspector_pending_reprepared_from_commit"
+    ] = prepared_commit
+    updated_record[
+        "deepseek_transport_inspector_pending_reprepared_from_sha256"
+    ] = old_pending_sha256
+    updated_record[
+        "deepseek_transport_inspector_pending_reprepared_from_path"
+    ] = old_pending_archive_relative
+    updated_record[
+        "deepseek_transport_inspector_pending_reprepared_from_"
+        "authorization_id"
+    ] = authorization_id
+    updated_record[
+        "deepseek_transport_inspector_pending_reprepared_from_history_dir"
+    ] = expected_history_relative
+    reprepared_at = datetime.now().astimezone().isoformat(
+        timespec="seconds")
+    updated_record[
+        "deepseek_transport_inspector_pending_reprepared_at"
+    ] = reprepared_at
+    updated["history_dir"] = replacement_history_relative
+    updated["reprepared_at"] = reprepared_at
+    write_json_atomic(pending_path, updated)
+    return _read_json(pending_path)
+
+
+def _validate_deepseek_inspector_reprepare_evidence(
+        out_dir, pending, record):
+    prefix = "deepseek_transport_inspector_pending_reprepared_"
+    provenance_keys = {
+        "from_commit",
+        "from_sha256",
+        "from_path",
+        "from_authorization_id",
+        "from_history_dir",
+        "at",
+    }
+    present = {
+        suffix for suffix in provenance_keys
+        if prefix + suffix in record
+    }
+    history_root = os.path.join(out_dir, "recovery_history")
+    pending_archives = (
+        sorted(
+            os.path.join(history_root, name, "pending.json")
+            for name in os.listdir(history_root)
+            if os.path.isfile(os.path.join(
+                history_root, name, "pending.json"))
+        )
+        if os.path.isdir(history_root) else []
+    )
+    if not present and "reprepared_at" not in pending:
+        if pending_archives:
+            raise RuntimeError(
+                "DeepSeek transport inspector reprepare provenance was "
+                "removed")
+        return
+    if present != provenance_keys:
+        raise RuntimeError(
+            "DeepSeek transport inspector reprepare provenance is "
+            "incomplete")
+    prepared_commit = record[prefix + "from_commit"]
+    old_pending_sha256 = record[prefix + "from_sha256"]
+    old_authorization_id = record[prefix + "from_authorization_id"]
+    old_history_relative = record[prefix + "from_history_dir"]
+    old_pending_relative = record[prefix + "from_path"]
+    reprepared_at = record[prefix + "at"]
+    if (not isinstance(prepared_commit, str)
+            or not isinstance(old_pending_sha256, str)
+            or len(old_pending_sha256) != 64
+            or not isinstance(old_authorization_id, str)
+            or not old_authorization_id
+            or "/" in old_authorization_id
+            or "\\" in old_authorization_id
+            or old_history_relative
+            != "recovery_history/" + old_authorization_id
+            or old_pending_relative
+            != old_history_relative + "/pending.json"
+            or pending.get("reprepared_at") != reprepared_at
+            or not isinstance(reprepared_at, str)
+            or not reprepared_at):
+        raise RuntimeError(
+            "DeepSeek transport inspector reprepare provenance is invalid")
+    old_pending_path = os.path.realpath(os.path.join(
+        out_dir, old_pending_relative))
+    try:
+        old_pending_inside = (
+            os.path.commonpath([out_dir, old_pending_path]) == out_dir)
+    except ValueError:
+        old_pending_inside = False
+    if (not old_pending_inside
+            or not os.path.isfile(old_pending_path)
+            or _sha256_file(old_pending_path) != old_pending_sha256):
+        raise RuntimeError(
+            "DeepSeek transport inspector prior pending archive mismatch")
+    old_pending = _read_json(old_pending_path)
+    old_record = old_pending.get("authorization_record")
+    if (not isinstance(old_record, dict)
+            or old_pending.get("schema")
+            != _DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA
+            or old_pending.get("history_dir") != old_history_relative
+            or old_record.get("authorization_id")
+            != old_authorization_id
+            or old_record.get("recovery_git_commit") != prepared_commit):
+        raise RuntimeError(
+            "DeepSeek transport inspector prior pending identity mismatch")
+
+    current_commit = record.get("recovery_git_commit")
+    old_fingerprint = old_record.get("recovery_code_fingerprint")
+    current_fingerprint = record.get("recovery_code_fingerprint")
+    if (not isinstance(old_fingerprint, dict)
+            or not isinstance(current_fingerprint, dict)
+            or sorted(
+                key for key in set(old_fingerprint) | set(
+                    current_fingerprint)
+                if old_fingerprint.get(key)
+                != current_fingerprint.get(key)
+            ) != ["run_meta.py"]
+            or current_fingerprint != code_fingerprint()):
+        raise RuntimeError(
+            "DeepSeek transport inspector reprepare fingerprint mismatch")
+    parent_line = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", current_commit],
+        check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout.split()
+    tooling_paths = {
+        "HP_V8/src/authorize_ledger_lock_recovery.py",
+        "HP_V8/src/run_meta.py",
+        "HP_V8/src/test_model_openai.py",
+    }
+    if (parent_line != [current_commit, prepared_commit]
+            or set(_git_changed_paths(prepared_commit, current_commit))
+            != tooling_paths):
+        raise RuntimeError(
+            "DeepSeek transport inspector reprepare commit mismatch")
+
+    expected = json.loads(json.dumps(old_pending))
+    expected_record = expected["authorization_record"]
+    current_authorization_id = record.get("authorization_id")
+    current_history_relative = (
+        "recovery_history/" + str(current_authorization_id))
+    expected_record["recovery_git_commit"] = current_commit
+    expected_record["recovery_code_fingerprint"] = current_fingerprint
+    expected_record["authorization_id"] = current_authorization_id
+    expected_record["superseded_authorization_path"] = (
+        current_history_relative
+        + "/superseded_campaign_recovery_authorization.json"
+    )
+    expected_record["archived_stop_path"] = (
+        current_history_relative + "/campaign_stop.json")
+    for suffix in provenance_keys:
+        expected_record[prefix + suffix] = record[prefix + suffix]
+    expected["history_dir"] = current_history_relative
+    expected["reprepared_at"] = reprepared_at
+    if (not isinstance(current_authorization_id, str)
+            or re.fullmatch(
+                r"dsi-[0-9a-f]{12}", current_authorization_id) is None
+            or expected != pending
+            or expected_record != record):
+        raise RuntimeError(
+            "DeepSeek transport inspector reprepared pending mismatch")
 
 
 def _incident_entry(number, row, incident_kind):
@@ -2812,6 +3145,8 @@ def _commit_deepseek_transport_inspector_followup(
                 "prior_recovery_git_commit")):
         raise RuntimeError(
             "DeepSeek transport inspector pending record is invalid")
+    _validate_deepseek_inspector_reprepare_evidence(
+        out_dir, pending, record)
 
     history_relative = pending.get("history_dir")
     authorization_id = record.get("authorization_id")
@@ -2875,6 +3210,7 @@ def _commit_deepseek_transport_inspector_followup(
             "superseded_campaign_recovery_authorization.json"
             ".pending-copy"
         ),
+        ".recovery-copy.pending",
         "campaign_stop.json",
         EMERGENCY_STOP_DIRECTORY,
     }
@@ -3200,11 +3536,7 @@ def _authorize_deepseek_transport_inspector_followup(
         os.path.join(out_dir, "run_metadata.jsonl"))
     created_at = datetime.now().astimezone().isoformat(
         timespec="seconds")
-    authorization_id = (
-        "dsv4f-inspector-"
-        + datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
-        + "-" + uuid.uuid4().hex[:8]
-    )
+    authorization_id = "dsi-" + uuid.uuid4().hex[:12]
     history_dir = os.path.join(
         out_dir, "recovery_history", authorization_id)
     archived_authorization = os.path.join(
@@ -3830,6 +4162,11 @@ def authorize(
                             "must be completed first")
                     if os.path.isfile(pending_path):
                         pending = _read_json(pending_path)
+                        pending = (
+                            _reprepare_pristine_deepseek_inspector_pending(
+                                out_dir, pending_path, pending
+                            )
+                        )
                         return (
                             _commit_deepseek_transport_inspector_followup(
                                 out_dir, manifest, stop_path, auth_path,
