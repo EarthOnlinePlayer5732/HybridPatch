@@ -560,12 +560,10 @@ class IntegrationContractGroup05Mixin:
             self.assertIsNotNone(datetime.fromisoformat(first["started_at"]).tzinfo)
 
             run_meta.finish_run_metadata(out_dir, first["invocation_id"])
-            records = run_meta._read_run_metadata_strict(
-                os.path.join(out_dir, "run_metadata.jsonl"))
+            records = run_meta.read_run_metadata_snapshot(out_dir)
             self.assertTrue(all(record["finished_at"] is None for record in records))
             run_meta.finish_run_metadata(out_dir, second["invocation_id"])
-            records = run_meta._read_run_metadata_strict(
-                os.path.join(out_dir, "run_metadata.jsonl"))
+            records = run_meta.read_run_metadata_snapshot(out_dir)
             finished = {record["finished_at"] for record in records}
             self.assertEqual(len(finished), 1)
             self.assertNotIn(None, finished)
@@ -581,6 +579,1088 @@ class IntegrationContractGroup05Mixin:
                     run_meta.append_run_metadata(out_dir, **kwargs)
             with self.assertRaises(RuntimeError):
                 run_meta.append_run_metadata(out_dir, **dict(kwargs, seed=43))
+
+    def test_run_metadata_event_ledger_reopens_from_receipted_prefix(self):
+        kwargs = {
+            "command": "python event-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 2,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "v1"}):
+            first = run_meta.append_run_metadata(out_dir, **kwargs)
+            events_path = os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)
+            snapshot_path = os.path.join(out_dir, "run_metadata.jsonl")
+            receipt_path = os.path.join(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)
+            self.assertTrue(os.path.isfile(events_path))
+            self.assertFalse(os.path.exists(snapshot_path))
+            self.assertFalse(os.path.exists(receipt_path))
+
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(
+                plan_path, ["state-a", "state-b"])
+            plan = run_meta.register_task_plan(
+                out_dir, "sample", plan_path, num_round_trips=2)
+            event_bytes_after_plan = pathlib.Path(events_path).read_bytes()
+            self.assertEqual(
+                run_meta.register_task_plan(
+                    out_dir, "sample", plan_path, num_round_trips=2),
+                plan,
+            )
+            self.assertEqual(
+                pathlib.Path(events_path).read_bytes(), event_bytes_after_plan)
+
+            run_meta.finish_run_metadata(out_dir, first["invocation_id"])
+            prefix = pathlib.Path(events_path).read_bytes()
+            cached_snapshot = pathlib.Path(snapshot_path).read_bytes()
+            cached_receipt = pathlib.Path(receipt_path).read_bytes()
+
+            second = run_meta.append_run_metadata(out_dir, **kwargs)
+            self.assertTrue(pathlib.Path(events_path).read_bytes().startswith(prefix))
+            self.assertEqual(pathlib.Path(snapshot_path).read_bytes(), cached_snapshot)
+            self.assertEqual(pathlib.Path(receipt_path).read_bytes(), cached_receipt)
+            live = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertEqual(len(live), 2)
+            self.assertTrue(all(row["finished_at"] is None for row in live))
+            self.assertTrue(all(row["task_plans"] == {"sample": plan}
+                                for row in live))
+
+            run_meta.finish_run_metadata(out_dir, second["invocation_id"])
+            final = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertEqual(len(final), 2)
+            self.assertTrue(all(row["status"] == "finished" for row in final))
+            receipt = json.loads(pathlib.Path(receipt_path).read_text(
+                encoding="utf-8"))
+            self.assertEqual(
+                receipt["event_prefix_size_bytes"],
+                os.path.getsize(events_path),
+            )
+            self.assertEqual(
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir),
+                final,
+            )
+
+    def test_run_metadata_event_snapshot_failure_keeps_authoritative_terminal(self):
+        kwargs = {
+            "command": "python event-failure-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "v1"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            with self.assertRaises(ValueError):
+                run_meta.finish_run_metadata(
+                    out_dir, invocation["invocation_id"], status="bogus")
+            with mock.patch.object(
+                    run_meta, "_write_jsonl_atomic",
+                    side_effect=OSError("injected snapshot replace failure")):
+                with self.assertRaisesRegex(RuntimeError, "retry is safe"):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            terminal = run_meta.finish_run_metadata(
+                out_dir, invocation["invocation_id"])
+            self.assertEqual(terminal["status"], "finished")
+            self.assertTrue(os.path.isfile(os.path.join(
+                out_dir, "run_metadata.jsonl")))
+            self.assertTrue(os.path.isfile(os.path.join(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)))
+            events = run_meta._read_jsonl_records_with_retry(os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME))
+            self.assertEqual(
+                [event["event"] for event in events],
+                ["invocation_registered", "invocation_terminal"],
+            )
+            self.assertEqual(
+                run_meta.read_run_metadata_snapshot(out_dir)[0]["status"],
+                "finished",
+            )
+            self.assertEqual(
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir),
+                [terminal],
+            )
+            before_retry = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME).read_bytes()
+            self.assertEqual(
+                run_meta.finish_run_metadata(
+                    out_dir, invocation["invocation_id"]),
+                terminal,
+            )
+            self.assertEqual(
+                pathlib.Path(
+                    out_dir, run_meta.METADATA_EVENTS_FILENAME).read_bytes(),
+                before_retry,
+            )
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "v1"}):
+            first = run_meta.append_run_metadata(out_dir, **kwargs)
+            run_meta.finish_run_metadata(out_dir, first["invocation_id"])
+            snapshot_path = pathlib.Path(out_dir, "run_metadata.jsonl")
+            receipt_path = pathlib.Path(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)
+            old_snapshot = snapshot_path.read_bytes()
+            old_receipt = receipt_path.read_bytes()
+            second = run_meta.append_run_metadata(out_dir, **kwargs)
+            real_write_json = run_meta.write_json_atomic
+
+            def fail_receipt(path, record):
+                if os.path.abspath(path) == os.path.abspath(receipt_path):
+                    raise OSError("injected receipt replace failure")
+                return real_write_json(path, record)
+
+            with mock.patch.object(
+                    run_meta, "write_json_atomic", side_effect=fail_receipt):
+                with self.assertRaisesRegex(RuntimeError, "retry is safe"):
+                    run_meta.finish_run_metadata(
+                        out_dir, second["invocation_id"])
+            terminal = run_meta.finish_run_metadata(
+                out_dir, second["invocation_id"])
+            self.assertEqual(terminal["status"], "finished")
+            self.assertNotEqual(snapshot_path.read_bytes(), old_snapshot)
+            self.assertNotEqual(receipt_path.read_bytes(), old_receipt)
+            self.assertTrue(all(
+                row["status"] == "finished"
+                for row in run_meta.read_run_metadata_snapshot(out_dir)
+            ))
+            self.assertEqual(
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir),
+                run_meta.read_run_metadata_snapshot(out_dir),
+            )
+
+    def test_run_metadata_event_hard_crash_publication_is_reentrant(self):
+        kwargs = {
+            "command": "python event-hard-crash-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "hard-crash"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            real_write_json = run_meta.write_json_atomic
+
+            def crash_before_receipt(path, record):
+                if path.endswith(run_meta.METADATA_PROJECTION_RECEIPT_FILENAME):
+                    raise SystemExit("injected process death")
+                return real_write_json(path, record)
+
+            with mock.patch.object(
+                    run_meta, "write_json_atomic",
+                    side_effect=crash_before_receipt):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            self.assertTrue(os.path.isfile(os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)))
+            self.assertTrue(os.path.isfile(os.path.join(
+                out_dir, "run_metadata.jsonl")))
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)))
+            self.assertEqual(
+                run_meta.finish_run_metadata(
+                    out_dir, invocation["invocation_id"])["status"],
+                "finished",
+            )
+            self.assertEqual(
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir),
+                run_meta.read_run_metadata_snapshot(out_dir),
+            )
+
+            reopened = run_meta.append_run_metadata(out_dir, **kwargs)
+            run_meta.finish_run_metadata(out_dir, reopened["invocation_id"])
+            self.assertEqual(
+                len(run_meta.read_quiescent_run_metadata_snapshot(out_dir)), 2)
+
+    def test_run_metadata_event_pending_recovers_every_byte_cut_once(self):
+        kwargs = {
+            "command": "python event-byte-cut-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        fixed_now = datetime.fromisoformat("2026-07-29T00:00:00+00:00")
+
+        def crash_after_prefix(events_path, event_bytes, *, cut):
+            with open(events_path, "ab") as handle:
+                handle.write(event_bytes[:cut])
+                handle.flush()
+                os.fsync(handle.fileno())
+            raise SystemExit(f"injected event append death at byte {cut}")
+
+        # Discover the exact terminal event length from the durable intent. The
+        # fixed timestamp and fixed-width invocation UUID make it stable across
+        # every isolated subcase below.
+        with tempfile.TemporaryDirectory() as probe_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "byte-cut"}), mock.patch.object(
+                        run_meta, "_aware_now", return_value=fixed_now):
+            invocation = run_meta.append_run_metadata(probe_dir, **kwargs)
+            with mock.patch.object(
+                    run_meta, "_append_run_metadata_event_bytes",
+                    side_effect=lambda path, payload: crash_after_prefix(
+                        path, payload, cut=0)):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        probe_dir, invocation["invocation_id"])
+            pending = json.loads(pathlib.Path(
+                probe_dir, run_meta.METADATA_EVENT_PENDING_FILENAME
+            ).read_text(encoding="utf-8"))
+            terminal_size = len(pending["event_line"].encode("utf-8"))
+
+        for cut in range(terminal_size + 1):
+            with self.subTest(cut=cut), tempfile.TemporaryDirectory() as out_dir, \
+                    mock.patch.object(
+                        run_meta, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value={"event": "byte-cut"}), \
+                    mock.patch.object(
+                        run_meta, "_aware_now", return_value=fixed_now):
+                invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+                with mock.patch.object(
+                        run_meta, "_append_run_metadata_event_bytes",
+                        side_effect=lambda path, payload, cut=cut:
+                            crash_after_prefix(path, payload, cut=cut)):
+                    with self.assertRaises(SystemExit):
+                        run_meta.finish_run_metadata(
+                            out_dir, invocation["invocation_id"])
+                pending_path = pathlib.Path(
+                    out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME)
+                self.assertTrue(pending_path.is_file())
+                terminal = run_meta.finish_run_metadata(
+                    out_dir, invocation["invocation_id"])
+                self.assertEqual(terminal["status"], "finished")
+                self.assertFalse(pending_path.exists())
+                events = run_meta._read_jsonl_records_with_retry(os.path.join(
+                    out_dir, run_meta.METADATA_EVENTS_FILENAME))
+                self.assertEqual(
+                    [event["event"] for event in events],
+                    ["invocation_registered", "invocation_terminal"],
+                )
+                recovery_paths = list(pathlib.Path(
+                    out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY
+                ).glob("*.json"))
+                self.assertEqual(len(recovery_paths), 1)
+                recovery = json.loads(recovery_paths[0].read_text(
+                    encoding="utf-8"))
+                self.assertEqual(recovery["state"], "completed")
+                self.assertEqual(
+                    recovery["observed_suffix_size_bytes"], cut)
+                self.assertEqual(
+                    run_meta.read_quiescent_run_metadata_snapshot(out_dir),
+                    [terminal],
+                )
+
+    def test_run_metadata_event_pending_recovery_is_reentrant_at_both_barriers(self):
+        kwargs = {
+            "command": "python event-recovery-barrier-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        fixed_now = datetime.fromisoformat("2026-07-29T00:00:00+00:00")
+
+        def seed_partial(events_path, event_bytes):
+            with open(events_path, "ab") as handle:
+                handle.write(event_bytes[:7])
+                handle.flush()
+                os.fsync(handle.fileno())
+            raise SystemExit("injected partial event")
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "barrier"}), mock.patch.object(
+                        run_meta, "_aware_now", return_value=fixed_now):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            with mock.patch.object(
+                    run_meta, "_append_run_metadata_event_bytes",
+                    side_effect=seed_partial):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+
+            real_write_json = run_meta.write_json_atomic
+
+            def crash_before_completed_receipt(path, record):
+                if (isinstance(record, dict)
+                        and record.get("schema")
+                        == run_meta.METADATA_EVENT_RECOVERY_SCHEMA
+                        and record.get("state") == "completed"):
+                    raise SystemExit("injected death after ledger completion")
+                return real_write_json(path, record)
+
+            with mock.patch.object(
+                    run_meta, "write_json_atomic",
+                    side_effect=crash_before_completed_receipt):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            recovery_path = next(pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY
+            ).glob("*.json"))
+            prepared = json.loads(recovery_path.read_text(encoding="utf-8"))
+            self.assertEqual(prepared["state"], "prepared")
+            self.assertEqual(prepared["observed_suffix_size_bytes"], 7)
+            recovery_path.unlink()
+
+            real_clear = run_meta._clear_run_metadata_event_pending
+
+            def crash_before_pending_clear(_out_dir):
+                raise SystemExit("injected death after completed receipt")
+
+            with mock.patch.object(
+                    run_meta, "_clear_run_metadata_event_pending",
+                    side_effect=crash_before_pending_clear):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            completed = json.loads(recovery_path.read_text(encoding="utf-8"))
+            self.assertEqual(completed["state"], "completed")
+            self.assertEqual(completed["observed_suffix_size_bytes"], 7)
+            self.assertTrue(pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME).exists())
+            recovery_path.unlink()
+
+            with mock.patch.object(
+                    run_meta, "_clear_run_metadata_event_pending",
+                    side_effect=real_clear):
+                terminal = run_meta.finish_run_metadata(
+                    out_dir, invocation["invocation_id"])
+            self.assertEqual(terminal["status"], "finished")
+            recreated = json.loads(recovery_path.read_text(encoding="utf-8"))
+            self.assertEqual(recreated["state"], "completed")
+            self.assertEqual(recreated["observed_suffix_size_bytes"], 7)
+            self.assertFalse(pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME).exists())
+            events = run_meta._read_jsonl_records_with_retry(os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME))
+            self.assertEqual(len(events), 2)
+            self.assertEqual(
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir),
+                [terminal],
+            )
+
+    def test_public_projection_reconcile_completes_pending_event_cuts(self):
+        kwargs = {
+            "command": "python public-reconcile-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+
+        def crash_writer(events_path, event_bytes, *, cut):
+            with open(events_path, "ab") as handle:
+                handle.write(event_bytes[:cut])
+                handle.flush()
+                os.fsync(handle.fileno())
+            raise SystemExit("injected pending projection event")
+
+        for cut in (0, 7):
+            with self.subTest(cut=cut), tempfile.TemporaryDirectory() as out_dir, \
+                    mock.patch.object(
+                        run_meta, "_git_identity",
+                        return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value={"event": "public-reconcile"}):
+                invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+                with mock.patch.object(
+                        run_meta, "_append_run_metadata_event_bytes",
+                        side_effect=lambda path, payload, cut=cut:
+                            crash_writer(path, payload, cut=cut)):
+                    with self.assertRaises(SystemExit):
+                        run_meta.finish_run_metadata(
+                            out_dir, invocation["invocation_id"])
+                self.assertTrue(run_meta.reconcile_run_metadata_projection(out_dir))
+                self.assertFalse(pathlib.Path(
+                    out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME).exists())
+                rows = run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["status"], "finished")
+                events = run_meta._read_jsonl_records_with_retry(os.path.join(
+                    out_dir, run_meta.METADATA_EVENTS_FILENAME))
+                self.assertEqual(len(events), 2)
+
+    def test_recovery_receipts_are_strict_and_projection_bound(self):
+        kwargs = {
+            "command": "python recovery-receipt-binding-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+
+        def seed_partial(events_path, event_bytes):
+            with open(events_path, "ab") as handle:
+                handle.write(event_bytes[:7])
+                handle.flush()
+                os.fsync(handle.fileno())
+            raise SystemExit("injected partial event")
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "receipt-binding"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            with mock.patch.object(
+                    run_meta, "_append_run_metadata_event_bytes",
+                    side_effect=seed_partial):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            terminal = run_meta.finish_run_metadata(
+                out_dir, invocation["invocation_id"])
+            self.assertEqual(terminal["status"], "finished")
+            recovery_path = next(pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY
+            ).glob("*.json"))
+            projection_receipt_path = pathlib.Path(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)
+            projection_receipt = json.loads(
+                projection_receipt_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                projection_receipt["event_recovery_receipt_count"], 1)
+            original = recovery_path.read_bytes()
+
+            recovery_path.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(
+                    RuntimeError, "recovery receipt is invalid"):
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+            recovery_path.write_bytes(original)
+
+            events_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)
+            receipt = json.loads(original.decode("utf-8"))
+            receipt["pending_sha256"] = "0" * 64
+            run_meta.write_json_atomic(recovery_path, receipt)
+            with self.assertRaisesRegex(
+                    RuntimeError, "pending identity is invalid"):
+                run_meta._read_run_metadata_event_recovery_receipts(
+                    out_dir, events_path)
+            recovery_path.write_bytes(original)
+
+            receipt = json.loads(original.decode("utf-8"))
+            ledger = events_path.read_bytes()
+            receipt["prior_prefix_size_bytes"] += 1
+            prior_size = receipt["prior_prefix_size_bytes"]
+            final_size = receipt["final_ledger_size_bytes"]
+            shifted_event = ledger[prior_size:final_size]
+            receipt["prior_prefix_sha256"] = hashlib.sha256(
+                ledger[:prior_size]).hexdigest()
+            receipt["event_sha256"] = hashlib.sha256(
+                shifted_event).hexdigest()
+            receipt["observed_suffix_size_bytes"] = min(
+                receipt["observed_suffix_size_bytes"], len(shifted_event))
+            receipt["observed_suffix_sha256"] = hashlib.sha256(
+                shifted_event[:receipt["observed_suffix_size_bytes"]]
+            ).hexdigest()
+            reconstructed_pending = {
+                "schema": run_meta.METADATA_EVENT_PENDING_SCHEMA,
+                "events_file": run_meta.METADATA_EVENTS_FILENAME,
+                "event_schema": run_meta.METADATA_EVENT_SCHEMA,
+                "prior_prefix_size_bytes": prior_size,
+                "prior_prefix_sha256": receipt["prior_prefix_sha256"],
+                "prior_event_count": receipt["prior_event_count"],
+                "event_index": receipt["event_index"],
+                "event_line": shifted_event.decode("utf-8"),
+                "event_sha256": receipt["event_sha256"],
+                "recovery_observation": {
+                    "prepared_at": receipt["prepared_at"],
+                    "observed_suffix_size_bytes": receipt[
+                        "observed_suffix_size_bytes"],
+                    "observed_suffix_sha256": receipt[
+                        "observed_suffix_sha256"],
+                },
+            }
+            receipt["pending_sha256"] = run_meta._canonical_record_sha256(
+                reconstructed_pending)
+            shifted_path = recovery_path.with_name(
+                f"{receipt['event_index']:08d}_"
+                f"{receipt['event_sha256'][:16]}.json")
+            recovery_path.unlink()
+            run_meta.write_json_atomic(shifted_path, receipt)
+            with self.assertRaisesRegex(
+                    RuntimeError, "prefix|uncommitted"):
+                run_meta._read_run_metadata_event_recovery_receipts(
+                    out_dir, events_path)
+            shifted_path.unlink()
+            recovery_path.write_bytes(original)
+            self.assertEqual(
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir),
+                [terminal],
+            )
+
+            recovery_path.unlink()
+            with self.assertRaisesRegex(RuntimeError, "receipt is invalid"):
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+            recovery_path.write_bytes(original)
+
+            extra = recovery_path.with_name("00000099_deadbeefdeadbeef.json")
+            extra.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(
+                    RuntimeError, "recovery receipt is invalid"):
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+            extra.unlink()
+
+            prepared = json.loads(recovery_path.read_text(encoding="utf-8"))
+            prepared["state"] = "prepared"
+            prepared["completed_at"] = None
+            run_meta.write_json_atomic(recovery_path, prepared)
+            with self.assertRaisesRegex(
+                    RuntimeError, "recovery receipt is invalid"):
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+
+    def test_run_metadata_event_pending_tamper_and_divergence_fail_closed(self):
+        kwargs = {
+            "command": "python event-pending-corruption-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+
+        def stop_before_event(_events_path, _event_bytes):
+            raise SystemExit("injected event stop")
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "pending-corruption"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            with mock.patch.object(
+                    run_meta, "_append_run_metadata_event_bytes",
+                    side_effect=stop_before_event):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            pending_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME)
+            pending = json.loads(pending_path.read_text(encoding="utf-8"))
+            pending["event_sha256"] = "0" * 64
+            run_meta.write_json_atomic(pending_path, pending)
+            with self.assertRaisesRegex(RuntimeError, "pending intent is invalid"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "pending-divergence"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            with mock.patch.object(
+                    run_meta, "_append_run_metadata_event_bytes",
+                    side_effect=stop_before_event):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            with open(os.path.join(
+                    out_dir, run_meta.METADATA_EVENTS_FILENAME), "ab") as handle:
+                handle.write(b"X")
+                handle.flush()
+                os.fsync(handle.fileno())
+            with self.assertRaisesRegex(RuntimeError, "suffix diverged"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+
+        def seed_seven_bytes(events_path, event_bytes):
+            with open(events_path, "ab") as handle:
+                handle.write(event_bytes[:7])
+                handle.flush()
+                os.fsync(handle.fileno())
+            raise SystemExit("injected partial event")
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "completed-regression"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            with mock.patch.object(
+                    run_meta, "_append_run_metadata_event_bytes",
+                    side_effect=seed_seven_bytes):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+
+            def stop_after_completed_receipt(_out_dir):
+                raise SystemExit("injected stop before pending unlink")
+
+            with mock.patch.object(
+                    run_meta, "_clear_run_metadata_event_pending",
+                    side_effect=stop_after_completed_receipt):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            pending = json.loads(pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME
+            ).read_text(encoding="utf-8"))
+            events_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)
+            events_path.write_bytes(
+                events_path.read_bytes()[:
+                    pending["prior_prefix_size_bytes"] + 7
+                ]
+            )
+            with self.assertRaisesRegex(
+                    RuntimeError, "regressed after completed recovery"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+
+    def test_run_metadata_legacy_v3_passthrough_never_creates_events(self):
+        kwargs = {
+            "command": "python legacy-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"legacy": "v3"}):
+            pathlib.Path(out_dir, "run_metadata.jsonl").write_text(
+                "", encoding="utf-8")
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)))
+            self.assertEqual(
+                run_meta.read_run_metadata_snapshot(out_dir)[0]["invocation_id"],
+                invocation["invocation_id"],
+            )
+            run_meta.finish_run_metadata(out_dir, invocation["invocation_id"])
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)))
+            reopened = run_meta.append_run_metadata(out_dir, **kwargs)
+            run_meta.finish_run_metadata(out_dir, reopened["invocation_id"])
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)))
+            self.assertTrue(all(
+                row["status"] == "finished"
+                for row in run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+            ))
+
+    def test_run_metadata_event_concurrent_registration_and_finish(self):
+        kwargs = {
+            "command": "python concurrent-event-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "v1"}):
+            invocations = []
+            errors = []
+
+            def register():
+                try:
+                    invocations.append(
+                        run_meta.append_run_metadata(out_dir, **kwargs))
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=register) for _ in range(4)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(errors, [])
+            self.assertEqual(len(invocations), 4)
+            self.assertEqual(
+                len(run_meta.read_run_metadata_snapshot(out_dir)), 4)
+
+            def finish(invocation_id):
+                try:
+                    run_meta.finish_run_metadata(out_dir, invocation_id)
+                except Exception as exc:  # pragma: no cover - asserted below
+                    errors.append(exc)
+
+            threads = [
+                threading.Thread(
+                    target=finish, args=(record["invocation_id"],))
+                for record in invocations
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            self.assertEqual(errors, [])
+            events = run_meta._read_jsonl_records_with_retry(os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME))
+            self.assertEqual(
+                [event["event_index"] for event in events],
+                list(range(1, 9)),
+            )
+            final = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertTrue(all(record["status"] == "finished"
+                                for record in final))
+            self.assertEqual(
+                {record["finished_at"] for record in final},
+                {max(
+                    (record["invocation_finished_at"] for record in final),
+                    key=datetime.fromisoformat,
+                )},
+            )
+
+    def test_run_metadata_event_interrupt_and_audited_cas(self):
+        kwargs = {
+            "command": "python event-interrupt-test",
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "interrupt"}):
+            with mock.patch.dict(
+                    os.environ,
+                    {"ANCHORPATCH_WORKER_LAUNCH_ID": "worker-a"},
+                    clear=False):
+                first = run_meta.append_run_metadata(
+                    out_dir, samples=["sample-a"], **kwargs)
+            with mock.patch.dict(
+                    os.environ,
+                    {"ANCHORPATCH_WORKER_LAUNCH_ID": "worker-b"},
+                    clear=False):
+                second = run_meta.append_run_metadata(
+                    out_dir, samples=["sample-b"], **kwargs)
+            changed = run_meta.interrupt_running_invocations(
+                out_dir,
+                status="interrupted_by_dispatcher",
+                worker_launch_ids={"worker-a"},
+            )
+            self.assertEqual(
+                [item["worker_launch_id"] for item in changed], ["worker-a"])
+            live = {
+                row["worker_launch_id"]: row
+                for row in run_meta.read_run_metadata_snapshot(out_dir)
+            }
+            self.assertEqual(live["worker-a"]["status"],
+                             "interrupted_by_dispatcher")
+            self.assertEqual(live["worker-b"]["status"], "running")
+            self.assertFalse(os.path.exists(os.path.join(
+                out_dir, "run_metadata.jsonl")))
+            run_meta.finish_run_metadata(out_dir, second["invocation_id"])
+            self.assertTrue(os.path.isfile(os.path.join(
+                out_dir, "run_metadata.jsonl")))
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "cas"}), mock.patch.dict(
+                        os.environ,
+                        {"ANCHORPATCH_WORKER_LAUNCH_ID": "worker-c"},
+                        clear=False):
+            record = run_meta.append_run_metadata(
+                out_dir, samples=["sample-c"], **kwargs)
+            events_path = os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)
+            before = pathlib.Path(events_path).read_bytes()
+            audited = [{
+                "invocation_id": record["invocation_id"],
+                "worker_launch_id": "worker-c",
+                "worker_pid": record["worker_pid"] + 1,
+                "sample": "sample-c",
+            }]
+            with self.assertRaisesRegex(RuntimeError, "identity changed"):
+                run_meta.interrupt_audited_running_invocations(
+                    out_dir,
+                    status="interrupted_by_dispatcher",
+                    audited=audited,
+                )
+            self.assertEqual(pathlib.Path(events_path).read_bytes(), before)
+            audited[0]["worker_pid"] = record["worker_pid"]
+            run_meta.interrupt_audited_running_invocations(
+                out_dir,
+                status="interrupted_by_dispatcher",
+                audited=audited,
+            )
+            final = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertEqual(final[0]["status"], "interrupted_by_dispatcher")
+
+    def test_run_metadata_event_corruption_matrix_fails_closed(self):
+        kwargs = {
+            "command": "python event-corruption-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "corruption"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            events_path = os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)
+            registered = run_meta._read_jsonl_records_with_retry(events_path)[0]
+            missing_campaign = copy.deepcopy(registered)
+            missing_campaign["record"].pop("campaign_config")
+            drifted_record = copy.deepcopy(registered["record"])
+            drifted_record.update({
+                "invocation_id": "drifted-invocation",
+                "run_git_commit": "2" * 40,
+                "code_fingerprint": {"event": "drifted"},
+                "campaign_recovery_authorization": None,
+            })
+            wrong_boundary_record = copy.deepcopy(drifted_record)
+            wrong_boundary_record["campaign_recovery_authorization"] = {
+                "authorization_id": "wrong-boundary",
+                "authorization_sha256": "a" * 64,
+                "prior_git_commit": "3" * 40,
+                "recovery_git_commit": "2" * 40,
+            }
+            task_plan = {"sha256": "a" * 64, "round_trips": 1}
+            mutations = {
+                "float_index": [{**registered, "event_index": 1.0}],
+                "index_gap": [{**registered, "event_index": 2}],
+                "unknown_event": [{**registered, "event": "unknown"}],
+                "extra_field": [{**registered, "extra": True}],
+                "missing_campaign_config": [missing_campaign],
+                "duplicate_registration": [
+                    registered, {**registered, "event_index": 2}],
+                "identity_drift_without_boundary": [
+                    registered, {
+                        "schema": run_meta.METADATA_EVENT_SCHEMA,
+                        "event": "invocation_registered",
+                        "event_index": 2,
+                        "record": drifted_record,
+                    },
+                ],
+                "identity_drift_wrong_boundary": [
+                    registered, {
+                        "schema": run_meta.METADATA_EVENT_SCHEMA,
+                        "event": "invocation_registered",
+                        "event_index": 2,
+                        "record": wrong_boundary_record,
+                    },
+                ],
+                "foreign_task_plan": [
+                    registered, {
+                        "schema": run_meta.METADATA_EVENT_SCHEMA,
+                        "event": "task_plan_registered",
+                        "event_index": 2,
+                        "sample_id": "foreign",
+                        "task_plan": task_plan,
+                    },
+                ],
+                "wrong_task_plan_round_trips": [
+                    registered, {
+                        "schema": run_meta.METADATA_EVENT_SCHEMA,
+                        "event": "task_plan_registered",
+                        "event_index": 2,
+                        "sample_id": "sample",
+                        "task_plan": {**task_plan, "round_trips": 2},
+                    },
+                ],
+                "terminal_before_start": [
+                    registered, {
+                        "schema": run_meta.METADATA_EVENT_SCHEMA,
+                        "event": "invocation_terminal",
+                        "event_index": 2,
+                        "invocation_id": registered["record"]["invocation_id"],
+                        "status": "finished",
+                        "finished_at": "2000-01-01T00:00:00+00:00",
+                    },
+                ],
+            }
+            for label, events in mutations.items():
+                with self.subTest(label=label), self.assertRaises(RuntimeError):
+                    run_meta._fold_run_metadata_events(events)
+
+            run_meta.finish_run_metadata(out_dir, invocation["invocation_id"])
+            complete = run_meta._read_jsonl_records_with_retry(events_path)
+            duplicate_terminal = dict(complete[-1], event_index=3)
+            with self.assertRaises(RuntimeError):
+                run_meta._fold_run_metadata_events(
+                    complete + [duplicate_terminal])
+            post_terminal_plan = {
+                "schema": run_meta.METADATA_EVENT_SCHEMA,
+                "event": "task_plan_registered",
+                "event_index": 3,
+                "sample_id": "sample",
+                "task_plan": task_plan,
+            }
+            with self.assertRaises(RuntimeError):
+                run_meta._fold_run_metadata_events(
+                    complete + [post_terminal_plan])
+
+            receipt_path = os.path.join(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)
+            receipt = json.loads(pathlib.Path(receipt_path).read_text(
+                encoding="utf-8"))
+            receipt["projection_sha256"] = "0" * 64
+            run_meta.write_json_atomic(receipt_path, receipt)
+            with self.assertRaisesRegex(
+                    RuntimeError, "receipt is invalid|snapshot drifted"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            run_meta.write_json_atomic(
+                os.path.join(
+                    out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME),
+                {},
+            )
+            with self.assertRaisesRegex(RuntimeError, "without event ledger"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "corruption"}):
+            run_meta.append_run_metadata(out_dir, **kwargs)
+            run_meta._write_jsonl_atomic(
+                os.path.join(out_dir, "run_metadata.jsonl"),
+                run_meta.read_run_metadata_snapshot(out_dir),
+            )
+            with self.assertRaisesRegex(RuntimeError, "incomplete"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "corruption"}):
+            run_meta.append_run_metadata(out_dir, **kwargs)
+            with open(os.path.join(
+                    out_dir, run_meta.METADATA_EVENTS_FILENAME), "ab") as handle:
+                handle.write(b'{"torn":')
+            with self.assertRaisesRegex(
+                    RuntimeError, "uncommitted tail|invalid JSONL record"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "uncommitted"}):
+            run_meta.append_run_metadata(out_dir, **kwargs)
+            events_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)
+            events_path.write_bytes(events_path.read_bytes().rstrip(b"\n"))
+            with self.assertRaisesRegex(RuntimeError, "uncommitted"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+
+    def test_run_metadata_event_manifest_prevents_legacy_downgrade(self):
+        kwargs = {
+            "command": "python event-mode-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "mode"}):
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "dispatch_manifest.json"), {
+                    "config": {
+                        "run_metadata_storage": (
+                            run_meta.RUN_METADATA_STORAGE_EVENT_V1),
+                    },
+                })
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            run_meta.finish_run_metadata(out_dir, invocation["invocation_id"])
+            os.unlink(os.path.join(out_dir, run_meta.METADATA_EVENTS_FILENAME))
+            os.unlink(os.path.join(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME))
+            with self.assertRaisesRegex(RuntimeError, "requires a missing"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+            with self.assertRaisesRegex(RuntimeError, "requires a missing"):
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+            with self.assertRaisesRegex(RuntimeError, "requires a missing"):
+                run_meta.append_run_metadata(out_dir, **kwargs)
 
     def test_run_metadata_accepts_hp_then_fr_phases_without_changing_legacy(self):
         kwargs = {
@@ -965,15 +2045,13 @@ class IntegrationContractGroup05Mixin:
                 with self.assertRaises(RuntimeError):
                     run_meta.register_task_plan(
                         out_dir, "sample", plan_path, num_round_trips=2)
-            records = run_meta._read_run_metadata_strict(
-                os.path.join(out_dir, "run_metadata.jsonl"))
+            records = run_meta.read_run_metadata_snapshot(out_dir)
             self.assertEqual(records[0]["task_plans"], {})
 
             entry = run_meta.register_task_plan(
                 out_dir, "sample", plan_path, num_round_trips=2)
             self.assertEqual(len(entry["sha256"]), 64)
-            records = run_meta._read_run_metadata_strict(
-                os.path.join(out_dir, "run_metadata.jsonl"))
+            records = run_meta.read_run_metadata_snapshot(out_dir)
             self.assertEqual(records[0]["task_plans"]["sample"], entry)
             self.assertFalse(any(".tmp-" in name for name in os.listdir(out_dir)))
 

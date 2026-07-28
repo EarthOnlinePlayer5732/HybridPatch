@@ -377,6 +377,69 @@ class DeepSeekOpenCodeCampaignGroup04Mixin:
                 ledger_recovery._DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
             )))
 
+    def test_event_metadata_parent_loss_binds_prefix_and_projection(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            fixture = self._write_dispatcher_parent_loss_fixture(
+                out_dir,
+                ["running"],
+                methods=["fullrewrite", "hybridpatch"],
+                metadata_mode="event",
+            )
+            commit = fixture["commit"]
+            fingerprint = fixture["fingerprint"]
+            worker = fixture["workers"][0]
+            api_row = self._deepseek_api_row(
+                out_dir,
+                worker["sample"],
+                worker["worker_launch_id"],
+                worker["worker_pid"],
+                "forward",
+            )
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), api_row)
+            events_path = os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)
+            prefix = pathlib.Path(events_path).read_bytes()
+            git_result = mock.Mock(stdout="")
+            with mock.patch.object(
+                    ledger_recovery, "_git_identity",
+                    return_value=(commit, "clean")), mock.patch.object(
+                        ledger_recovery, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            ledger_recovery, "_git_changed_paths",
+                            return_value=[]), mock.patch.object(
+                                run_meta, "_git_identity",
+                                return_value=(commit, "clean")), \
+                    mock.patch.object(
+                        run_meta, "code_fingerprint",
+                        return_value=fingerprint), mock.patch.object(
+                            run_meta.subprocess, "run",
+                            return_value=git_result):
+                ledger_recovery.authorize(
+                    out_dir, dispatcher_process_lost=True)
+                authorization = run_meta.read_campaign_recovery_authorization(
+                    out_dir)
+
+            evidence = authorization[
+                "dispatcher_parent_loss_run_metadata_identities"]
+            self.assertEqual(
+                evidence["schema"], run_meta.METADATA_RECOVERY_EVIDENCE_SCHEMA)
+            self.assertTrue(pathlib.Path(events_path).read_bytes().startswith(
+                prefix))
+            self.assertTrue(run_meta._run_metadata_recovery_prefix_matches(
+                os.path.join(out_dir, "run_metadata.jsonl"), evidence))
+            metadata = run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertEqual(
+                [row["status"] for row in metadata],
+                ["interrupted_by_dispatcher"],
+            )
+
+            with open(events_path, "r+b") as handle:
+                handle.write(b"X")
+            with self.assertRaisesRegex(
+                    RuntimeError, "identity mismatch"):
+                run_meta.read_campaign_recovery_authorization(out_dir)
+
     def test_parent_loss_preserves_prior_server_retry_incident_validation(self):
         with tempfile.TemporaryDirectory() as out_dir:
             fixture = self._write_dispatcher_parent_loss_fixture(

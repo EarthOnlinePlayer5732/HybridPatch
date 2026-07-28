@@ -42,8 +42,10 @@ from run_meta import (
     DISPATCHER_PROCESS_LOST_RECOVERY_KIND,
     EMERGENCY_STOP_DIRECTORY,
     LEDGER_LOCK_RECOVERY_KIND,
+    METADATA_EVENTS_FILENAME,
     STOP_CONDITION_SCHEMA,
     _canonical_record_sha256,
+    _capture_run_metadata_recovery_snapshot,
     _campaign_stop_publication_lock,
     _deepseek_dispatcher_stopped_sidecar_evidence,
     _git_identity,
@@ -51,6 +53,7 @@ from run_meta import (
     _read_deepseek_transport_sidecar,
     _sha256_file,
     _run_metadata_recovery_identities,
+    _write_jsonl_atomic,
     _validate_deepseek_compact_records,
     _validate_deepseek_linear_records,
     _validate_dispatcher_parent_loss_pending_reprepare_witnesses,
@@ -5152,9 +5155,23 @@ def _authorize_dispatcher_process_lost(
     archived_metadata = os.path.join(
         history_dir, "run_metadata.before.jsonl")
     _copy_file_durable(active_path, archived_active)
-    _copy_file_durable(
-        metadata_path, archived_metadata, allow_missing=True)
-    metadata_before = _read_jsonl(archived_metadata)
+    has_metadata = (
+        os.path.isfile(metadata_path)
+        or os.path.isfile(os.path.join(out_dir, METADATA_EVENTS_FILENAME))
+    )
+    captured_metadata_identities, metadata_before = (
+        _capture_run_metadata_recovery_snapshot(metadata_path)
+        if has_metadata else (None, [])
+    )
+    metadata_identities = (
+        captured_metadata_identities
+        if isinstance(captured_metadata_identities, dict) else None
+    )
+    if metadata_identities is not None:
+        _write_jsonl_atomic(archived_metadata, metadata_before)
+    else:
+        _copy_file_durable(
+            metadata_path, archived_metadata, allow_missing=True)
 
     recovery_scope = _reconcile_deepseek_parent_loss_workers(
         out_dir, manifest, stop_records, apply=False)
@@ -5326,6 +5343,8 @@ def _authorize_dispatcher_process_lost(
         "dispatcher_parent_loss_registered_prelaunch_worker_launch_ids": (
             registered_prelaunch_worker_ids),
         "dispatcher_parent_loss_metadata_rows": parent_metadata,
+        "dispatcher_parent_loss_run_metadata_identities": (
+            metadata_identities),
         "dispatch_manifest_sha256": manifest_digest,
         "prior_git_commit": prior_commit,
         "prior_git_tree_state": "clean",
@@ -5543,7 +5562,7 @@ def _authorize_dispatcher_parent_loss_reader_sha_fix(
             isinstance(row.get("campaign_recovery_authorization"), dict)
             and row["campaign_recovery_authorization"].get(
                 "authorization_id") == record["authorization_id"]
-            for row in _read_jsonl(metadata_path)):
+            for row in read_run_metadata_snapshot(out_dir)):
         raise RuntimeError(
             "dispatcher parent-loss reader-SHA fix cannot amend an "
             "authorization already bound into run metadata")
@@ -6109,7 +6128,7 @@ def authorize(
                 out_dir, "api_journal", f"{digest}.response.json")):
             raise RuntimeError("interrupted open attempt has a response journal")
 
-    metadata = _read_jsonl(os.path.join(out_dir, "run_metadata.jsonl"))
+    metadata = read_run_metadata_snapshot(out_dir)
     metadata_by_worker = {}
     for row in metadata:
         worker_id = row.get("worker_launch_id")

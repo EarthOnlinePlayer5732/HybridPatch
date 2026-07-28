@@ -4,6 +4,9 @@ The builder is intentionally offline.  It never calls a model, mutates an
 experiment archive, or re-runs result verification.  Historical gaps remain
 explicitly null; archived per-file fingerprints are preferred over the current
 checkout.
+
+For event-ledger campaigns, the owner-local reducer must prove that the final
+compatibility snapshot and receipt cover the complete quiescent event ledger.
 """
 
 from __future__ import annotations
@@ -23,6 +26,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
+
+from versioned_run_metadata import read_quiescent_run_metadata
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -2192,6 +2197,12 @@ def build_experiment(
     archive = ROOT / entry["archive_path"]
     if not archive.exists():
         raise RuntimeError(f"archive missing: {entry['archive_path']}")
+    metadata = read_quiescent_run_metadata(
+        archive,
+        repository_root=ROOT,
+        owner=owner,
+        required=False,
+    )
     methods = list(entry["arms"])
     source_experiments: list[str] = []
     if entry.get("kind") == "manifest_view":
@@ -2311,8 +2322,6 @@ def build_experiment(
     failures = failure_stats_document(entry, sample_rows)
     reports = report_records(entry)
 
-    metadata_path = archive / "run_metadata.jsonl"
-    metadata = read_jsonl(metadata_path) if metadata_path.exists() else []
     code_provenance = resolve_metadata_code_provenance(archive, metadata)
     fingerprints = code_provenance["code_fingerprints"]
     command_templates = sorted(

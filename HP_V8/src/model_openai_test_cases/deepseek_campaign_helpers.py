@@ -102,7 +102,10 @@ class DeepSeekOpenCodeCampaignHelpersMixin:
 
     @staticmethod
     def _write_dispatcher_parent_loss_fixture(
-            out_dir, stages, *, record_stop=True, methods=None):
+            out_dir, stages, *, record_stop=True, methods=None,
+            metadata_mode="legacy"):
+        if metadata_mode not in {"legacy", "event"}:
+            raise ValueError("metadata_mode must be legacy or event")
         commit = "1" * 40
         fingerprint = {
             "model_openai.py": "2" * 64,
@@ -155,6 +158,9 @@ class DeepSeekOpenCodeCampaignHelpersMixin:
             ],
             "task_plans": {},
         }
+        if metadata_mode == "event":
+            manifest["config"]["run_metadata_storage"] = (
+                run_meta.RUN_METADATA_STORAGE_EVENT_V1)
         run_meta.write_json_atomic(
             os.path.join(out_dir, "dispatch_manifest.json"), manifest)
         workers = []
@@ -221,7 +227,7 @@ class DeepSeekOpenCodeCampaignHelpersMixin:
                 "dispatcher_pid": dispatcher_pid,
                 "dispatcher_instance_id": dispatcher_instance_id,
             })
-            run_meta.append_jsonl_locked(metadata_path, {
+            metadata_record = {
                 "schema": run_meta.METADATA_SCHEMA,
                 "invocation_id": item["invocation_id"],
                 "worker_launch_id": item["worker_launch_id"],
@@ -231,7 +237,13 @@ class DeepSeekOpenCodeCampaignHelpersMixin:
                 "samples": [item["sample"]],
                 "methods": methods,
                 "method_phase": None,
+                "command": "python parent-loss-fixture",
+                "out_dir": os.path.abspath(out_dir),
+                "num_round_trips": (
+                    paired_dispatch.DEEPSEEK_FULL234_ROUND_TRIPS),
+                "seed": 42,
                 "model": paired_dispatch.DEEPSEEK_MODEL,
+                "distractor": True,
                 "provider": "opencode_zen",
                 "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
                 "transport_revision": (
@@ -242,15 +254,38 @@ class DeepSeekOpenCodeCampaignHelpersMixin:
                     paired_dispatch.DEEPSEEK_REASONING_EFFORT),
                 "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
                 "campaign_config": {
+                    "method_set": methods,
+                    "num_round_trips": (
+                        paired_dispatch.DEEPSEEK_FULL234_ROUND_TRIPS),
+                    "seed": 42,
+                    "model": paired_dispatch.DEEPSEEK_MODEL,
+                    "distractor": True,
+                    "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
                     "reasoning_effort": (
                         paired_dispatch.DEEPSEEK_REASONING_EFFORT),
                 },
                 "run_git_commit": commit,
                 "git_tree_state": "clean",
                 "code_fingerprint": fingerprint,
+                "campaign_recovery_authorization": None,
                 "status": "running",
                 "finished_at": None,
-            })
+            }
+            if metadata_mode == "event":
+                started_at = "2026-07-28T20:00:00+08:00"
+                metadata_record.update({
+                    "created_local": started_at,
+                    "invocation_started_at": started_at,
+                    "invocation_finished_at": None,
+                    "started_at": started_at,
+                    "timezone": "Asia/Singapore",
+                })
+                run_meta._append_run_metadata_event_unlocked(out_dir, {
+                    "event": "invocation_registered",
+                    "record": metadata_record,
+                })
+            else:
+                run_meta.append_jsonl_locked(metadata_path, metadata_record)
 
         if record_stop:
             stop_worker = next(

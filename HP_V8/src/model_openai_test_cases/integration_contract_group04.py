@@ -579,6 +579,8 @@ class IntegrationContractGroup04Mixin:
                     "transport_revision": "opencode_anthropic_sdk/4",
                     "transport_resume_policy": (
                         "exact_payload_new_semantic_call/1"),
+                    "run_metadata_storage": (
+                        run_meta.RUN_METADATA_STORAGE_EVENT_V1),
                     "stop_on_preservation_violation": True,
                 },
                 "task_plans": {},
@@ -616,7 +618,10 @@ class IntegrationContractGroup04Mixin:
                     paired_dispatch, "inspect_campaign",
                     return_value={
                         "errors": [], "preservation_violations": 0,
-                    }):
+                    }), \
+                mock.patch.object(
+                    paired_dispatch, "read_quiescent_run_metadata_snapshot",
+                    return_value=[{"status": "finished"}]):
             make_smoke(smoke_dir, 2.0)
             gate = paired_dispatch.evaluate_smoke_cost_gate(
                 smoke_dir, main_dir)
@@ -662,7 +667,10 @@ class IntegrationContractGroup04Mixin:
                     paired_dispatch, "inspect_campaign",
                     return_value={
                         "errors": [], "preservation_violations": 0,
-                    }):
+                    }), \
+                mock.patch.object(
+                    paired_dispatch, "read_quiescent_run_metadata_snapshot",
+                    return_value=[{"status": "finished"}]):
             make_smoke(smoke_dir, 2.01)
             with self.assertRaisesRegex(RuntimeError, "NO_GO"):
                 paired_dispatch.evaluate_smoke_cost_gate(

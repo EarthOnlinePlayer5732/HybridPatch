@@ -11,6 +11,8 @@ from pathlib import Path
 import re
 import time
 
+from run_meta import read_run_metadata_snapshot
+
 
 _TRANSPORT_NAME = re.compile(
     r"rt(?P<rt>\d+|NA)_(?P<direction>forward|backward|unknown)_.*\.transport\.jsonl$"
@@ -59,7 +61,7 @@ def _tail_json(path, block_size=8192):
 
 
 def _target_round_trips(out_dir, method, fallback=10):
-    rows = _read_jsonl(Path(out_dir) / "run_metadata.jsonl")
+    rows = read_run_metadata_snapshot(str(out_dir))
     matching = [row for row in rows if method in (row.get("methods") or [])]
     if matching:
         return int(matching[-1].get("num_round_trips") or fallback)

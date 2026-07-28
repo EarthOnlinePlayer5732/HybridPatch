@@ -1369,6 +1369,11 @@ def _record_evaluator_incomplete(out_dir, sample_id, methods,
             "api_calls": "api_calls.jsonl",
             "attempt_ledger": "api_attempt_ledger.jsonl",
             "run_metadata": "run_metadata.jsonl",
+            "run_metadata_events": "run_metadata_events.jsonl",
+            "run_metadata_projection_receipt": (
+                "run_metadata_projection_receipt.json"),
+            "run_metadata_event_pending": "run_metadata_event_pending.json",
+            "run_metadata_event_recoveries": "run_metadata_event_recoveries/",
             "sample_outcomes": "sample_outcomes.jsonl",
         },
     }
@@ -1543,6 +1548,13 @@ def main():
                     "api_calls": "api_calls.jsonl",
                     "attempt_ledger": "api_attempt_ledger.jsonl",
                     "run_metadata": "run_metadata.jsonl",
+                    "run_metadata_events": "run_metadata_events.jsonl",
+                    "run_metadata_projection_receipt": (
+                        "run_metadata_projection_receipt.json"),
+                    "run_metadata_event_pending": (
+                        "run_metadata_event_pending.json"),
+                    "run_metadata_event_recoveries": (
+                        "run_metadata_event_recoveries/"),
                 },
                 **outcome_phase,
             )

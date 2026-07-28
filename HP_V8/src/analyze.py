@@ -31,6 +31,8 @@ for _p in (_ROOT, _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from run_meta import read_quiescent_run_metadata_snapshot
+
 RESULTS = os.path.join(_HERE, "results")
 
 
@@ -524,24 +526,13 @@ def _hybrid_fingerprint_mixture(out_dir):
         return []
     if not os.path.isdir(os.path.join(out_dir, "hybridpatch")):
         return []
-    path = os.path.join(out_dir, "run_metadata.jsonl")
-    if not os.path.exists(path):
-        return []
     fps = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except Exception:
-                continue
-            if "hybridpatch" not in (rec.get("methods") or []):
-                continue
-            fp = rec.get("code_fingerprint")
-            if isinstance(fp, dict):
-                fps.append(json.dumps(fp, sort_keys=True))
+    for rec in read_quiescent_run_metadata_snapshot(out_dir):
+        if "hybridpatch" not in (rec.get("methods") or []):
+            continue
+        fp = rec.get("code_fingerprint")
+        if isinstance(fp, dict):
+            fps.append(json.dumps(fp, sort_keys=True))
     return sorted(set(fps))
 
 
@@ -603,6 +594,11 @@ def main():
                     help="calibrate theta from positive nonzero adjacent dev drops")
     args = ap.parse_args()
     out_dir = args.out or os.path.join(args.dir, "analysis")
+    if (os.path.exists(os.path.join(args.dir, "run_metadata_events.jsonl"))
+            or os.path.exists(os.path.join(
+                args.dir, "run_metadata_projection_receipt.json"))):
+        if not read_quiescent_run_metadata_snapshot(args.dir):
+            raise RuntimeError("event campaign run metadata is missing")
     expected_samples = None
     manifest_path = os.path.join(args.dir, "dispatch_manifest.json")
     if os.path.isfile(manifest_path):
@@ -619,6 +615,8 @@ def main():
             raise RuntimeError(
                 "formal campaign manifest does not match requested analysis"
             )
+        if not read_quiescent_run_metadata_snapshot(args.dir):
+            raise RuntimeError("formal campaign run metadata is missing")
     mixed_fps = _hybrid_fingerprint_mixture(args.dir)
     if len(mixed_fps) > 1:
         raise RuntimeError(

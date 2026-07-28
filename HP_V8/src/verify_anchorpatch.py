@@ -31,6 +31,7 @@ from hybrid_prompt import extract_hybrid_json
 from hybrid_executor import apply_hybrid as execute_hybrid
 from hybrid_gate import validate_hybrid_output, partial_acceptance_eligible
 from hybrid_schema import PROTOCOL_V8, validate_hybrid_envelope
+from run_meta import read_quiescent_run_metadata_snapshot
 
 SAMPLES_ROOT = os.path.join(_ROOT, "data", "samples_delegate52")
 TOL = 1e-6
@@ -220,25 +221,14 @@ def _duplicate_keys(rows):
 
 
 def _load_seed_map(out_dir):
-    path = os.path.join(out_dir, "run_metadata.jsonl")
-    if not os.path.exists(path):
-        return {}
     out = {}
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except Exception:
-                continue
-            if not rec.get("context_shuffle_seeded"):
-                continue
-            seed = rec.get("seed")
-            for method in rec.get("methods") or []:
-                for sample in rec.get("samples") or []:
-                    out[(method, sample)] = seed
+    for rec in read_quiescent_run_metadata_snapshot(out_dir):
+        if not rec.get("context_shuffle_seeded"):
+            continue
+        seed = rec.get("seed")
+        for method in rec.get("methods") or []:
+            for sample in rec.get("samples") or []:
+                out[(method, sample)] = seed
     return out
 
 
@@ -248,24 +238,13 @@ def _hybrid_fingerprint_mixture(out_dir):
         return []
     if not os.path.isdir(os.path.join(out_dir, "hybridpatch")):
         return []
-    path = os.path.join(out_dir, "run_metadata.jsonl")
-    if not os.path.exists(path):
-        return []
     fps = []
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except Exception:
-                continue
-            if "hybridpatch" not in (rec.get("methods") or []):
-                continue
-            fp = rec.get("code_fingerprint")
-            if isinstance(fp, dict):
-                fps.append(json.dumps(fp, sort_keys=True))
+    for rec in read_quiescent_run_metadata_snapshot(out_dir):
+        if "hybridpatch" not in (rec.get("methods") or []):
+            continue
+        fp = rec.get("code_fingerprint")
+        if isinstance(fp, dict):
+            fps.append(json.dumps(fp, sort_keys=True))
     return sorted(set(fps))
 
 
@@ -278,6 +257,9 @@ def main():
 
     ok = True
     total_checked = 0
+    if os.path.isfile(os.path.join(args.dir, "dispatch_manifest.json")):
+        if not read_quiescent_run_metadata_snapshot(args.dir):
+            raise RuntimeError("formal campaign run metadata is missing")
     mixed_fps = _hybrid_fingerprint_mixture(args.dir)
     if len(mixed_fps) > 1:
         ok = False

@@ -22,6 +22,24 @@ class ConfirmationCampaignAnalysisTests(unittest.TestCase):
     samples = ["alpha1", "beta2"]
     round_trips = 2
 
+    def test_analysis_rejects_non_quiescent_event_metadata_before_results(
+            self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with mock.patch.object(
+                analysis,
+                "read_quiescent_run_metadata",
+                side_effect=RuntimeError("stale event metadata"),
+            ) as reader:
+                with self.assertRaisesRegex(
+                        analysis.AnalysisError, "stale event metadata"):
+                    analysis.analyze_campaign(root)
+            reader.assert_called_once_with(
+                root.resolve(),
+                repository_root=analysis.ROOT.resolve(),
+                required=False,
+            )
+
     def _write_jsonl(self, path: Path, rows: list[dict]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(

@@ -1100,18 +1100,59 @@ class IntegrationContractGroup03Mixin:
                 def fake_popen(_command, **kwargs):
                     worker_id = kwargs["env"][
                         "ANCHORPATCH_WORKER_LAUNCH_ID"]
-                    run_meta._write_jsonl_atomic(
-                        os.path.join(out_dir, "run_metadata.jsonl"),
-                        [{
+                    with open(os.path.join(
+                            out_dir, "dispatch_manifest.json"),
+                            encoding="utf-8") as handle:
+                        manifest = json.load(handle)
+                    config = manifest["config"]
+                    started_at = "2026-07-28T12:00:00+08:00"
+                    run_meta._append_run_metadata_event_unlocked(
+                        out_dir, {
+                            "event": "invocation_registered",
+                            "record": {
+                            "schema": run_meta.METADATA_SCHEMA,
                             "invocation_id": f"invocation-{worker_id}",
                             "worker_launch_id": worker_id,
                             "worker_pid": 101,
+                            "dispatcher_pid": None,
+                            "dispatcher_instance_id": None,
                             "samples": ["sample"],
+                            "methods": ["hybridpatch", "fullrewrite"],
+                            "command": "python fake-worker",
+                            "out_dir": os.path.abspath(out_dir),
+                            "num_round_trips": 1,
+                            "seed": 42,
+                            "model": config["model"],
+                            "distractor": True,
+                            "max_tokens": config["max_tokens"],
+                            "reasoning_effort": config.get("reasoning_effort"),
+                            "campaign_config": {
+                                "method_set": ["fullrewrite", "hybridpatch"],
+                                "num_round_trips": 1,
+                                "seed": 42,
+                                "model": config["model"],
+                                "distractor": True,
+                                "max_tokens": config["max_tokens"],
+                                "reasoning_effort": config.get(
+                                    "reasoning_effort"),
+                            },
+                            "run_git_commit": "1" * 40,
+                            "git_tree_state": "clean",
+                            "code_fingerprint": {"unit": "test"},
+                            "campaign_recovery_authorization": None,
+                            "transport": config.get("transport"),
+                            "transport_revision": config.get(
+                                "transport_revision"),
+                            "transport_resume_policy": config.get(
+                                "transport_resume_policy"),
                             "status": "running",
+                            "created_local": started_at,
+                            "invocation_started_at": started_at,
                             "invocation_finished_at": None,
+                            "started_at": started_at,
                             "finished_at": None,
-                        }],
-                    )
+                            "timezone": "Asia/Singapore",
+                        }})
                     if hold_lease:
                         lease = open(
                             kwargs["env"]["ANCHORPATCH_WORKER_LOCK_PATH"],

@@ -8,6 +8,7 @@ and delegates Git-record generation to finalize_experiment.py; it can consume
 a parallel artifact seal and optionally restore a private generated bundle.
 
 This tool is offline: it never calls a model. It refuses frozen HP_V3-HP_V7.
+Event-ledger archives must have a current receipt-bound quiescent projection.
 """
 
 from __future__ import annotations
@@ -28,6 +29,11 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import yaml
+
+from versioned_run_metadata import (
+    read_quiescent_run_metadata,
+    run_metadata_artifact_paths,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -557,14 +563,13 @@ def result_protocols(rows: Iterable[dict[str, Any]]) -> list[str]:
 
 def collect_facts(owner: str, archive: Path) -> dict[str, Any]:
     plan = experiment_plan(owner, archive.name)
-    metadata_path = archive / "run_metadata.jsonl"
-    if not metadata_path.is_file():
-        raise RuntimeError("run_metadata.jsonl is required")
     if list(archive.rglob(".env*")):
         raise RuntimeError("experiment archive contains a forbidden .env* file")
-    metadata = load_jsonl(metadata_path)
+    metadata = read_quiescent_run_metadata(
+        archive, repository_root=ROOT, owner=owner
+    )
     if not metadata:
-        raise RuntimeError("run_metadata.jsonl is empty")
+        raise RuntimeError("run metadata is empty")
 
     round_trips = int(one_value(metadata, "num_round_trips", required=True))
     seed = one_value(metadata, "seed", required=True)
@@ -600,7 +605,10 @@ def collect_facts(owner: str, archive: Path) -> dict[str, Any]:
     if not planned:
         raise RuntimeError("no *.task_plan.json files found")
 
-    input_paths = [metadata_path, *archive.glob("*.task_plan.json")]
+    input_paths = [
+        *run_metadata_artifact_paths(archive),
+        *archive.glob("*.task_plan.json"),
+    ]
     per_method: dict[str, dict[str, dict[str, int]]] = {}
     all_result_rows: list[dict[str, Any]] = []
     result_samples: set[str] = set()

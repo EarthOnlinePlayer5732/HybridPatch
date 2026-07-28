@@ -944,3 +944,58 @@ evaluator runtime fingerprint，并显式覆盖 `src/**/*.py`、`src/test_fixtur
 `tests/**` 与 `requirements.txt`。因此拆出的 case、JSON fixture 或未来 tests 树任一字节变化
 都会使 regression cache 失效；旧 `/1` receipt 只会发生一次受控 cache miss，不作原地迁移，
 evaluator runtime cache 的 schema 与身份保持不变。
+
+## 2026-07-29 append-only run metadata 与离线终态边界
+
+正式并发 campaign 的 `run_metadata.jsonl` 全量重写曾让每个 invocation 在同一全局锁内
+反复复制全部历史 row 和全部 task plan。新 out_dir 现在以
+`run_metadata_events.jsonl`（`anchorpatch.run_metadata_event/1`）为唯一权威来源，只追加
+`invocation_registered`、`task_plan_registered`、`invocation_terminal` 和
+`invocations_interrupted`。`dispatch_manifest.json` 显式声明
+`run_metadata_storage=event_v1`，因此事件文件与收据同时丢失时也不能静默降级为 legacy。
+已有、无 event ledger 的 `anchorpatch.run_metadata/3` 目录继续走原逻辑，不自动迁移，
+也不重写其历史解释。
+
+每个新事件先原子写入 `run_metadata_event_pending.json`，绑定此前 byte prefix 的
+size/SHA/count 与完整待写事件；随后 append、`flush+fsync`，成功后才清 pending。恢复器
+接受从 0 到完整事件长度的任一精确 prefix，先把首次观察到的断点写成 immutable
+`prepared` recovery receipt，再补齐剩余字节、验证完整 reducer，标记 `completed` 后清除
+pending。因而在补齐 ledger 后、写 completed receipt 后或清 pending 前再次掉电，重入也
+不会改变原断点、截断证据或重复事件；suffix 分叉、pending/receipt 篡改继续 fail closed。
+
+`read_run_metadata_snapshot()` 是 event campaign 的唯一 reducer，并继续向现有调用方提供
+`run_metadata/3` row contract。只有全部 invocation terminal 后才发布可重建的
+`run_metadata.jsonl` compatibility snapshot 和
+`run_metadata_projection_receipt.json`（schema `/2`）；receipt 同时绑定 event byte prefix、
+事件数、projection/snapshot digest，以及该 prefix 之前全部 WAL recovery receipt 的有序
+manifest count/SHA。每个 recovery receipt 还会按文件名、event index 与 prior/event/final
+ledger prefix 逐字节复核；删除、替换、添加无效 receipt 或留下无 pending 的 `prepared`
+receipt 均 fail closed。运行期允许保留一个仍可验证的旧 quiescent prefix，
+但 reducer 始终读取完整 event ledger，因此不会把旧 `finished_at` 当作当前状态。snapshot
+替换后、receipt 替换前的硬崩溃可从权威 event ledger 幂等 republish；terminal event 已
+durable 时重复 finish/interrupt 只完成 publication，不追加第二个 terminal event。
+
+恢复证据按 metadata mode fail closed：历史 `/3` 继续使用原 identities list；event mode
+使用 tagged evidence，精确绑定 event prefix 的 size/SHA/count 及该 prefix reducer 后的
+projection SHA/count。inspector、classifier 与 dispatcher parent-loss 都复用同一 matcher；
+模式错配、prefix 修改/截断、projection 漂移或 parent-loss archive 不一致均拒绝恢复。
+
+离线 `process_experiment.py`、`build_experiment_records.py` 与
+`analyze_confirmation_campaign.py` 统一通过 owner-local reader 读取 event metadata。它们只
+接受无 running invocation、且最终 snapshot/receipt 覆盖当前完整 event ledger 的输入；
+pending intent、stale prefix 或未发布 cache 不得进入 prepare/build/analyze。`process` 的
+input digest 同时绑定 events、pending、recovery receipts、snapshot 与 projection receipt。
+legacy `/3` archive 保持原读取边界。
+
+本轮未调用 provider API，也未修改历史实验目录。零 API 回归为 HP transport/runner/
+dispatcher/recovery `251/251`，离线 process/record/analyze/postprocess 合计 `68/68`
+（Windows symlink 权限相关 `1` 项 skip）；覆盖并发注册/完成、task-plan 幂等、
+partial/all interrupt、audited CAS、event corruption、每个 terminal event byte cut、两阶段
+recovery 的二次硬崩溃、snapshot/receipt 发布失败、reopen、recovery prefix/parent-loss、
+legacy passthrough，以及离线 current/stale/pending quiescence gate。
+
+这里的 durability 边界是进程 `kill`/硬崩溃重入，不宣称机器掉电后的 parent-directory
+持久性：现有 Python/Windows 原子 replace、unlink 会 `fsync` 文件内容，但没有跨平台可靠地
+flush 父目录。`completed_at` 为可确定性重建的事务时间，故与 `prepared_at` 相同，不表示
+真实墙钟完成时刻。若未来要求硬件断电级承诺，应统一升级所有 atomic replace/unlink 的
+目录持久化，而不是只为 metadata recovery 旁路增加一个例外。

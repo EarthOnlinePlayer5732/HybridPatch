@@ -183,6 +183,8 @@ def _inspection_dependency_identity(
     dependencies.extend((
         ("tools/postprocess_experiment.py", Path(__file__).resolve()),
         ("tools/process_experiment.py", Path(process.__file__).resolve()),
+        ("tools/versioned_run_metadata.py",
+         ROOT / "tools" / "versioned_run_metadata.py"),
         ("tools/experiment_artifacts.py", Path(artifacts.__file__).resolve()),
     ))
     for identity, path in dependencies:

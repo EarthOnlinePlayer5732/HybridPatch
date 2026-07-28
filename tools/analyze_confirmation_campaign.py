@@ -4,6 +4,7 @@
 The source result rows keep their native 0--1 scores.  This tool emits both the
 raw values and presentation-only percentages/percentage-point differences.
 It never calls a provider and never mutates the experiment directory.
+Event-ledger inputs must expose a current, receipt-bound quiescent projection.
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import statistics
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
+
+from versioned_run_metadata import read_quiescent_run_metadata
 
 
 SCHEMA = "hybridpatch.confirmation_campaign_analysis/1"
@@ -317,7 +320,8 @@ def _confirmation_identity(
 
 
 def _postrun_verification(
-        experiment_dir: Path, *, expected_backward_rows: int
+        experiment_dir: Path, *, expected_backward_rows: int,
+        metadata_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     verification_path = experiment_dir / "analysis" / "verification.log"
     inspection_path = experiment_dir / "analysis" / "strict_inspection_postrun.json"
@@ -354,8 +358,15 @@ def _postrun_verification(
             registered_evaluator_incomplete: set[str] = set()
             sample_outcome_rows = _read_jsonl(
                 experiment_dir / "sample_outcomes.jsonl", required=False)
-            metadata_rows = _read_jsonl(
-                experiment_dir / "run_metadata.jsonl", required=False)
+            if metadata_rows is None:
+                try:
+                    metadata_rows = read_quiescent_run_metadata(
+                        experiment_dir,
+                        repository_root=ROOT,
+                        required=False,
+                    )
+                except RuntimeError as exc:
+                    raise AnalysisError(str(exc)) from exc
             for row in _read_jsonl(
                     experiment_dir / "evaluator_incomplete_samples.jsonl",
                     required=False):
@@ -1314,6 +1325,14 @@ def analyze_campaign(
     repository_root = Path(repository_root).resolve()
     if not experiment_dir.is_dir():
         raise AnalysisError(f"experiment directory does not exist: {experiment_dir}")
+    try:
+        metadata_rows = read_quiescent_run_metadata(
+            experiment_dir,
+            repository_root=repository_root,
+            required=False,
+        )
+    except RuntimeError as exc:
+        raise AnalysisError(str(exc)) from exc
     manifest, samples, round_trips = _manifest_scope(experiment_dir)
     confirmation_identity = _confirmation_identity(
         manifest, samples, round_trips, repository_root=repository_root
@@ -1370,6 +1389,7 @@ def analyze_campaign(
             expected_backward_rows=sum(
                 cell[3] == "backward" for cell in rows_by_cell
             ),
+            metadata_rows=metadata_rows,
         )
     else:
         postrun_verification = {

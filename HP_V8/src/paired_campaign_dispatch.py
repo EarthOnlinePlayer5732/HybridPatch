@@ -38,6 +38,7 @@ from fr_baseline_dispatch import read_keys
 from run_meta import (
     DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
     DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
+    RUN_METADATA_STORAGE_EVENT_V1,
     _canonical_record_sha256,
     _deepseek_dispatcher_stopped_sidecar_evidence,
     _git_identity,
@@ -52,6 +53,7 @@ from run_meta import (
     read_campaign_stop_conditions,
     read_sample_outcomes,
     read_run_metadata_snapshot,
+    read_quiescent_run_metadata_snapshot,
     record_campaign_stop_condition,
     write_json_atomic,
 )
@@ -1849,7 +1851,7 @@ def _queued_pending_evidence(
             evidence.append(os.path.relpath(log_path, out_dir))
 
     record_files = (
-        "sample_outcomes.jsonl", "run_metadata.jsonl", "api_calls.jsonl",
+        "sample_outcomes.jsonl", "api_calls.jsonl",
         "api_anomalies.jsonl", "evaluator_incomplete_samples.jsonl",
     )
     for filename in record_files:
@@ -1859,6 +1861,17 @@ def _queued_pending_evidence(
                     and (method_phase is None
                          or _record_mentions_method(record, method_phase))):
                 evidence.append(f"{filename}:{row_number}")
+    metadata_source = (
+        "run_metadata_events.jsonl:projection"
+        if os.path.isfile(os.path.join(out_dir, "run_metadata_events.jsonl"))
+        else "run_metadata.jsonl"
+    )
+    for row_number, record in enumerate(
+            read_run_metadata_snapshot(out_dir), 1):
+        if (_record_mentions_sample(record, sample)
+                and (method_phase is None
+                     or _record_mentions_method(record, method_phase))):
+            evidence.append(f"{metadata_source}:{row_number}")
 
     attempt_path = os.path.join(out_dir, "api_attempt_ledger.jsonl")
     for row_number, record in enumerate(_read_jsonl(attempt_path), 1):
@@ -2292,7 +2305,7 @@ def _verify_pristine_method_phase(out_dir, assignments, method_phase):
                 evidence[sample].append(os.path.relpath(path, out_dir))
 
     for filename in (
-            "sample_outcomes.jsonl", "run_metadata.jsonl", "api_calls.jsonl",
+            "sample_outcomes.jsonl", "api_calls.jsonl",
             "api_anomalies.jsonl", "evaluator_incomplete_samples.jsonl"):
         for row_number, record in enumerate(
                 _read_jsonl(os.path.join(out_dir, filename)), 1):
@@ -2301,6 +2314,19 @@ def _verify_pristine_method_phase(out_dir, assignments, method_phase):
             for sample in samples:
                 if _record_mentions_sample(record, sample):
                     evidence[sample].append(f"{filename}:{row_number}")
+    metadata_source = (
+        "run_metadata_events.jsonl:projection"
+        if os.path.isfile(os.path.join(out_dir, "run_metadata_events.jsonl"))
+        else "run_metadata.jsonl"
+    )
+    for row_number, record in enumerate(
+            read_run_metadata_snapshot(out_dir), 1):
+        if not _record_mentions_method(record, method_phase):
+            continue
+        for sample in samples:
+            if _record_mentions_sample(record, sample):
+                evidence[sample].append(
+                    f"{metadata_source}:{row_number}")
 
     for row_number, record in enumerate(_read_jsonl(os.path.join(
             out_dir, "api_attempt_ledger.jsonl")), 1):
@@ -3886,6 +3912,7 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
         "transport_revision": runtime["transport_revision"],
         "transport_resume_policy": runtime["transport_resume_policy"],
         "reasoning_effort": runtime["reasoning_effort"],
+        "run_metadata_storage": RUN_METADATA_STORAGE_EVENT_V1,
         "stop_on_preservation_violation": True,
     }
     for optional in (
@@ -4881,16 +4908,29 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     if require_terminal_provenance is None:
         require_terminal_provenance = require_complete
     config = manifest["config"]
+    quiescent_metadata_error = None
+    if (require_complete and config.get("run_metadata_storage")
+            == RUN_METADATA_STORAGE_EVENT_V1):
+        try:
+            if not read_quiescent_run_metadata_snapshot(out_dir):
+                quiescent_metadata_error = "run metadata is missing"
+        except RuntimeError as exc:
+            quiescent_metadata_error = str(exc)
     if config.get("campaign_role") in DEEPSEEK_CAMPAIGN_ROLES:
         if method_phase is not None:
             raise RuntimeError(
                 "DeepSeek campaigns do not support phased inspection")
-        return _inspect_deepseek_campaign(
+        result = _inspect_deepseek_campaign(
             out_dir, manifest, require_complete=require_complete,
             require_terminal_provenance=require_terminal_provenance,
             active_samples=active_samples,
             required_complete_samples=required_complete_samples,
         )
+        if quiescent_metadata_error is not None:
+            result["errors"] = list(result.get("errors") or []) + [
+                "run metadata is not quiescent: " + quiescent_metadata_error
+            ]
+        return result
     declared_phases = config.get("method_phases")
     if method_phase is None and declared_phases is not None:
         if declared_phases != list(REMAINING134_METHOD_PHASES):
@@ -4924,6 +4964,9 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     expected_methods = set(config["method_set"])
     target_rt = config["num_round_trips"]
     errors = []
+    if quiescent_metadata_error is not None:
+        errors.append(
+            "run metadata is not quiescent: " + quiescent_metadata_error)
     preservation = 0
     latched_preservation = 0
     preservation_not_applicable = 0
@@ -5992,6 +6035,9 @@ def _campaign_evidence_digest(out_dir, manifest):
         os.path.join(out_dir, name) for name in (
             "dispatch_manifest.json", "api_calls.jsonl",
             "api_attempt_ledger.jsonl", "run_metadata.jsonl",
+            "run_metadata_events.jsonl",
+            "run_metadata_projection_receipt.json",
+            "run_metadata_event_pending.json",
             "dispatch_log.jsonl",
             "sample_outcomes.jsonl",
             "evaluator_incomplete_samples.jsonl",
@@ -6007,6 +6053,11 @@ def _campaign_evidence_digest(out_dir, manifest):
     journal_dir = os.path.join(out_dir, "api_journal")
     if os.path.isdir(journal_dir):
         paths.update(str(path) for path in Path(journal_dir).glob("*.json"))
+    metadata_recovery_dir = os.path.join(
+        out_dir, "run_metadata_event_recoveries")
+    if os.path.isdir(metadata_recovery_dir):
+        paths.update(
+            str(path) for path in Path(metadata_recovery_dir).glob("*.json"))
     digest = hashlib.sha256()
     for path in sorted(paths):
         if not os.path.isfile(path):
@@ -6051,6 +6102,7 @@ def evaluate_smoke_cost_gate(smoke_dir, main_out_dir):
             "minimax_transport": "opencode",
             "transport_revision": TRANSPORT_REVISION,
             "transport_resume_policy": TRANSPORT_RESUME_POLICY,
+            "run_metadata_storage": RUN_METADATA_STORAGE_EVENT_V1,
             "stop_on_preservation_violation": True,
         }
         if any(config.get(key) != value
@@ -6068,6 +6120,8 @@ def evaluate_smoke_cost_gate(smoke_dir, main_out_dir):
             smoke_dir, smoke_manifest, require_complete=True)
         if inspection["errors"]:
             failure_codes.append("smoke_campaign_incomplete")
+        if not read_quiescent_run_metadata_snapshot(smoke_dir):
+            failure_codes.append("smoke_run_metadata_missing")
         for sample in SMOKE_SAMPLES:
             for method in ("fullrewrite", "hybridpatch"):
                 rows = _read_jsonl(

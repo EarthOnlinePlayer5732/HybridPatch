@@ -682,29 +682,21 @@ class DeepSeekOpenCodeCampaignGroup05Mixin:
                     "read_campaign_recovery_authorization",
                     side_effect=read_updated_authorization),
             )
-            metadata_path = os.path.join(out_dir, "run_metadata.jsonl")
-            original_read_jsonl = ledger_recovery._read_jsonl
-
-            def metadata_bound_rows(path):
-                if os.path.realpath(path) == os.path.realpath(metadata_path):
-                    return [{
-                        "campaign_recovery_authorization": {
-                            "authorization_id": (
-                                api_validator_updated_record[
-                                    "authorization_id"
-                                ]
-                            ),
-                        },
-                    }]
-                return original_read_jsonl(path)
+            metadata_bound_rows = [{
+                "campaign_recovery_authorization": {
+                    "authorization_id": (
+                        api_validator_updated_record["authorization_id"]
+                    ),
+                },
+            }]
 
             with contextlib.ExitStack() as stack:
                 for patcher in reader_patches:
                     stack.enter_context(patcher)
                 stack.enter_context(mock.patch.object(
                     ledger_recovery,
-                    "_read_jsonl",
-                    side_effect=metadata_bound_rows,
+                    "read_run_metadata_snapshot",
+                    return_value=metadata_bound_rows,
                 ))
                 with self.assertRaisesRegex(
                         RuntimeError, "already bound into run metadata"):

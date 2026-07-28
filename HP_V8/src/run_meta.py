@@ -7,13 +7,13 @@ Provides the four mechanisms the runner uses to keep a run dir self-describing:
   code_fingerprint()         12-char sha1 per key source file — distinguishes
                              code versions without git (a run dir may outlive
                              any checkout). The "which code produced this?" fix.
-  append_run_metadata(...)   register one process invocation in the locked
-                             <out_dir>/run_metadata.jsonl campaign ledger,
-                             capturing Git identity, shared timezone-aware
-                             timestamps, params, model, and code fingerprint;
-                             incompatible resumes are rejected.
-  finish_run_metadata(...)   close an invocation and publish one shared campaign
-                             finish time after every concurrent worker stops.
+  append_run_metadata(...)   register one process invocation. Fresh campaigns
+                             append canonical events under one metadata lock;
+                             existing run_metadata/3 directories retain their
+                             historical in-place contract.
+  finish_run_metadata(...)   append the terminal transition and, only after all
+                             invocations stop, publish a receipt-bound
+                             run_metadata.jsonl compatibility projection.
   RunLogger                  per-(method,sample) structured log under logs/:
                              tees progress to stdout + an ANSI-free file, and
                              captures noisy domain-evaluator stdout separately.
@@ -52,6 +52,25 @@ _FINGERPRINT_FILES = [
 ]
 
 METADATA_SCHEMA = "anchorpatch.run_metadata/3"
+METADATA_EVENT_SCHEMA = "anchorpatch.run_metadata_event/1"
+METADATA_EVENTS_FILENAME = "run_metadata_events.jsonl"
+METADATA_PROJECTION_RECEIPT_SCHEMA = (
+    "anchorpatch.run_metadata_projection_receipt/2"
+)
+METADATA_PROJECTION_RECEIPT_FILENAME = "run_metadata_projection_receipt.json"
+METADATA_EVENT_PENDING_SCHEMA = "anchorpatch.run_metadata_event_pending/1"
+METADATA_EVENT_PENDING_FILENAME = "run_metadata_event_pending.json"
+METADATA_EVENT_RECOVERY_SCHEMA = "anchorpatch.run_metadata_event_recovery/1"
+METADATA_EVENT_RECOVERY_DIRECTORY = "run_metadata_event_recoveries"
+RUN_METADATA_STORAGE_EVENT_V1 = "event_v1"
+RUN_METADATA_TERMINAL_STATUSES = frozenset({
+    "finished", "failed", "evaluator_incomplete",
+    "infrastructure_incomplete", "interrupted",
+    "interrupted_by_dispatcher", "interrupted_before_audited_resume",
+})
+METADATA_RECOVERY_EVIDENCE_SCHEMA = (
+    "anchorpatch.run_metadata_recovery_evidence/1"
+)
 STOP_CONDITION_SCHEMA = "anchorpatch.campaign_stop_condition/1"
 EMERGENCY_STOP_DIRECTORY = "campaign_stop_emergency"
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
@@ -3658,42 +3677,64 @@ def _run_metadata_recovery_identity(record):
     return _canonical_record_sha256(identity)
 
 
-def _run_metadata_recovery_identities(path):
-    rows = _read_jsonl_records_with_retry(path)
-    if not rows:
-        raise RuntimeError("run metadata recovery evidence is empty")
-    return [
-        {
-            "row_number": number,
-            "canonical_sha256": _run_metadata_recovery_identity(row),
-            "task_plans": json.loads(json.dumps(
-                row.get("task_plans") or {})),
-        }
-        for number, row in enumerate(rows, 1)
-    ]
-
-
-def _run_metadata_recovery_prefix_matches(path, identities):
-    if not isinstance(identities, list) or not identities:
-        return False
-    try:
+def _capture_run_metadata_recovery_snapshot(path):
+    """Atomically bind a recoverable prefix identity to its folded projection."""
+    out_dir = os.path.dirname(os.path.abspath(path))
+    events_path = _run_metadata_events_path(out_dir)
+    with _campaign_metadata_lock(out_dir) as metadata_path:
+        _reconcile_run_metadata_event_pending_unlocked(out_dir)
+        mode = _run_metadata_storage_mode_unlocked(out_dir, metadata_path)
+        if mode == "event" and os.path.isfile(events_path):
+            events = _read_run_metadata_events_strict(events_path)
+            if not events:
+                raise RuntimeError("run metadata recovery evidence is empty")
+            projection = _read_run_metadata_snapshot_unlocked(
+                out_dir, metadata_path)
+            identities = {
+                "schema": METADATA_RECOVERY_EVIDENCE_SCHEMA,
+                "mode": "event_prefix",
+                "event_schema": METADATA_EVENT_SCHEMA,
+                "events_file": METADATA_EVENTS_FILENAME,
+                "event_prefix_size_bytes": os.path.getsize(events_path),
+                "event_prefix_sha256": _sha256_file(events_path),
+                "event_count": len(events),
+                "projection_schema": METADATA_SCHEMA,
+                "projection_record_count": len(projection),
+                "projection_sha256": _run_metadata_projection_sha256(
+                    projection),
+            }
+            return identities, [dict(record) for record in projection]
         rows = _read_jsonl_records_with_retry(path)
-    except (OSError, ValueError, RuntimeError):
-        return False
-    if len(rows) < len(identities):
-        return False
+        if not rows:
+            raise RuntimeError("run metadata recovery evidence is empty")
+        identities = [
+            {
+                "row_number": number,
+                "canonical_sha256": _run_metadata_recovery_identity(row),
+                "task_plans": json.loads(json.dumps(
+                    row.get("task_plans") or {})),
+            }
+            for number, row in enumerate(rows, 1)
+        ]
+        return identities, [dict(record) for record in rows]
+
+
+def _run_metadata_recovery_identities(path):
+    identities, _projection = _capture_run_metadata_recovery_snapshot(path)
+    return identities
+
+
+def _run_metadata_task_plans_match_manifest(out_dir, rows):
     try:
         with open(
-                os.path.join(
-                    os.path.dirname(path), "dispatch_manifest.json"),
+                os.path.join(out_dir, "dispatch_manifest.json"),
                 encoding="utf-8",
         ) as handle:
             dispatch_manifest = json.load(handle)
     except (OSError, ValueError):
         return False
     target_round_trips = (
-        (dispatch_manifest.get("config") or {}).get(
-            "num_round_trips")
+        (dispatch_manifest.get("config") or {}).get("num_round_trips")
         if isinstance(dispatch_manifest, dict) else None
     )
     manifest_task_plans = (
@@ -3708,17 +3749,76 @@ def _run_metadata_recovery_prefix_matches(path, identities):
         for sample, plan in manifest_task_plans.items()
         if isinstance(sample, str) and isinstance(plan, dict)
     }
-    shared_task_plans = rows[0].get("task_plans") or {}
-    if (not isinstance(shared_task_plans, dict)
-            or any(
-                (row.get("task_plans") or {}) != shared_task_plans
-                for row in rows
-            )
-            or any(
-                expected_task_plans.get(sample) != plan
-                for sample, plan in shared_task_plans.items()
-            )):
+    if not rows:
         return False
+    shared_task_plans = rows[0].get("task_plans") or {}
+    return bool(
+        isinstance(shared_task_plans, dict)
+        and all((row.get("task_plans") or {}) == shared_task_plans
+                for row in rows)
+        and all(expected_task_plans.get(sample) == plan
+                for sample, plan in shared_task_plans.items())
+    )
+
+
+def _run_metadata_recovery_prefix_matches(path, identities):
+    out_dir = os.path.dirname(os.path.abspath(path))
+    events_path = _run_metadata_events_path(out_dir)
+    if os.path.exists(_run_metadata_event_pending_path(out_dir)):
+        return False
+    if isinstance(identities, dict):
+        expected_keys = {
+            "schema", "mode", "event_schema", "events_file",
+            "event_prefix_size_bytes", "event_prefix_sha256", "event_count",
+            "projection_schema", "projection_record_count",
+            "projection_sha256",
+        }
+        if (set(identities) != expected_keys
+                or identities.get("schema")
+                != METADATA_RECOVERY_EVIDENCE_SCHEMA
+                or identities.get("mode") != "event_prefix"
+                or identities.get("event_schema") != METADATA_EVENT_SCHEMA
+                or identities.get("events_file") != METADATA_EVENTS_FILENAME
+                or identities.get("projection_schema") != METADATA_SCHEMA
+                or not os.path.isfile(events_path)):
+            return False
+        receipt = {
+            "event_prefix_size_bytes": identities.get(
+                "event_prefix_size_bytes"),
+            "event_prefix_sha256": identities.get("event_prefix_sha256"),
+            "event_count": identities.get("event_count"),
+        }
+        try:
+            with _campaign_metadata_lock(out_dir) as metadata_path:
+                prefix_events, _current_size = _read_run_metadata_event_prefix(
+                    events_path, receipt)
+                prefix_projection = _fold_run_metadata_events(prefix_events)
+                current_projection = _read_run_metadata_snapshot_unlocked(
+                    out_dir, metadata_path)
+        except (OSError, ValueError, RuntimeError):
+            return False
+        return (
+            identities.get("projection_record_count")
+            == len(prefix_projection)
+            and identities.get("projection_sha256")
+            == _run_metadata_projection_sha256(prefix_projection)
+            and bool(current_projection)
+            and _run_metadata_task_plans_match_manifest(
+                out_dir, current_projection)
+        )
+    if os.path.isfile(events_path):
+        return False
+    if not isinstance(identities, list) or not identities:
+        return False
+    try:
+        rows = _read_jsonl_records_with_retry(path)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    if len(rows) < len(identities):
+        return False
+    if not _run_metadata_task_plans_match_manifest(out_dir, rows):
+        return False
+    shared_task_plans = rows[0].get("task_plans") or {}
     statuses = [row.get("status") for row in rows]
     finished_values = [row.get("finished_at") for row in rows]
     if "running" in statuses:
@@ -5953,8 +6053,7 @@ def read_campaign_recovery_authorization(
         if not set(worker_ids) <= set(launches):
             raise RuntimeError("campaign recovery worker cohort is not dispatched")
         preauthorization_set = set(preauthorization_worker_ids)
-        metadata_rows = _read_jsonl_records_with_retry(
-            os.path.join(out_dir, "run_metadata.jsonl"))
+        metadata_rows = read_run_metadata_snapshot(out_dir)
         metadata_workers = {
             row.get("worker_launch_id") for row in metadata_rows
             if row.get("worker_launch_id") in set(worker_ids)
@@ -6364,6 +6463,24 @@ def read_campaign_recovery_authorization(
         except RuntimeError as exc:
             raise RuntimeError(
                 "dispatcher parent-loss metadata archive is invalid") from exc
+        metadata_identity_evidence = record.get(
+            "dispatcher_parent_loss_run_metadata_identities")
+        current_has_event_metadata = os.path.isfile(
+            _run_metadata_events_path(out_dir))
+        if current_has_event_metadata:
+            if (not isinstance(metadata_identity_evidence, dict)
+                    or not _run_metadata_recovery_prefix_matches(
+                        os.path.join(out_dir, "run_metadata.jsonl"),
+                        metadata_identity_evidence)
+                    or metadata_identity_evidence.get(
+                        "projection_record_count") != len(archived_metadata)
+                    or metadata_identity_evidence.get("projection_sha256")
+                    != _run_metadata_projection_sha256(archived_metadata)):
+                raise RuntimeError(
+                    "dispatcher parent-loss event metadata identity mismatch")
+        elif metadata_identity_evidence is not None:
+            raise RuntimeError(
+                "dispatcher parent-loss metadata identity mode mismatch")
         metadata_entries = record.get(
             "dispatcher_parent_loss_metadata_rows")
         if not isinstance(metadata_entries, list):
@@ -6435,12 +6552,7 @@ def read_campaign_recovery_authorization(
             raise RuntimeError(
                 "dispatcher parent-loss recovered workers remain active")
 
-        current_metadata_path = os.path.join(
-            out_dir, "run_metadata.jsonl")
-        metadata_now = (
-            _read_jsonl_records_with_retry(current_metadata_path)
-            if os.path.isfile(current_metadata_path) else []
-        )
+        metadata_now = read_run_metadata_snapshot(out_dir)
         current_metadata = {}
         for row in metadata_now:
             worker_id = row.get("worker_launch_id")
@@ -7329,6 +7441,1105 @@ def _one_prior_value(records, key):
     return json.loads(next(iter(values)))
 
 
+def _run_metadata_events_path(out_dir):
+    return os.path.join(out_dir, METADATA_EVENTS_FILENAME)
+
+
+def _run_metadata_event_pending_path(out_dir):
+    return os.path.join(out_dir, METADATA_EVENT_PENDING_FILENAME)
+
+
+def _decode_run_metadata_event_bytes(payload, *, label):
+    if not payload or not payload.endswith(b"\n"):
+        raise RuntimeError(
+            f"{label} has an uncommitted tail (missing newline commit marker)")
+    try:
+        rows = [
+            json.loads(line)
+            for line in payload.decode("utf-8").splitlines()
+            if line.strip()
+        ]
+    except (UnicodeError, ValueError) as exc:
+        raise RuntimeError(f"{label} is invalid") from exc
+    if not rows or any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError(f"{label} is invalid")
+    return rows
+
+
+def _read_run_metadata_events_strict(events_path):
+    """Read only newline-committed event records."""
+    try:
+        with open(events_path, "rb") as handle:
+            payload = handle.read()
+    except OSError as exc:
+        raise RuntimeError("run metadata event ledger is empty") from exc
+    return _decode_run_metadata_event_bytes(
+        payload, label="run metadata event ledger")
+
+
+def _run_metadata_projection_receipt_path(out_dir):
+    return os.path.join(out_dir, METADATA_PROJECTION_RECEIPT_FILENAME)
+
+
+def _run_metadata_storage_mode_unlocked(out_dir, metadata_path):
+    """Classify the three-file metadata store without allowing downgrades."""
+    events_exists = os.path.isfile(_run_metadata_events_path(out_dir))
+    pending_exists = os.path.isfile(_run_metadata_event_pending_path(out_dir))
+    snapshot_exists = os.path.exists(metadata_path)
+    receipt_exists = os.path.exists(
+        _run_metadata_projection_receipt_path(out_dir))
+    declared_storage = None
+    manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+    if os.path.isfile(manifest_path):
+        try:
+            with open(manifest_path, encoding="utf-8") as handle:
+                manifest = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("dispatch manifest is invalid") from exc
+        config = manifest.get("config") if isinstance(manifest, dict) else None
+        declared_storage = (
+            config.get("run_metadata_storage")
+            if isinstance(config, dict) else None
+        )
+        if declared_storage not in {None, RUN_METADATA_STORAGE_EVENT_V1}:
+            raise RuntimeError("dispatch manifest run metadata storage is invalid")
+    if events_exists or pending_exists:
+        return "event"
+    if receipt_exists:
+        raise RuntimeError(
+            "run metadata projection receipt exists without event ledger")
+    if declared_storage == RUN_METADATA_STORAGE_EVENT_V1 and snapshot_exists:
+        raise RuntimeError(
+            "dispatch manifest requires a missing run metadata event ledger")
+    if snapshot_exists:
+        return "legacy"
+    return "event"
+
+
+def _run_metadata_projection_sha256(records):
+    payload = json.dumps(
+        records,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _metadata_timestamp_is_aware(value):
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return parsed.tzinfo is not None and parsed.utcoffset() is not None
+
+
+def _fold_run_metadata_events(events):
+    """Strictly reduce one canonical append-only metadata event sequence."""
+    if not isinstance(events, list):
+        raise RuntimeError("run metadata events are invalid")
+    records = []
+    by_invocation = {}
+    task_plans = {}
+    for expected_index, event in enumerate(events, 1):
+        if (not isinstance(event, dict)
+                or event.get("schema") != METADATA_EVENT_SCHEMA
+                or event.get("event_index") != expected_index
+                or not isinstance(event.get("event_index"), int)
+                or isinstance(event.get("event_index"), bool)):
+            raise RuntimeError(
+                f"run metadata event {expected_index} has invalid identity")
+        event_kind = event.get("event")
+        if event_kind == "invocation_registered":
+            if set(event) != {"schema", "event", "event_index", "record"}:
+                raise RuntimeError(
+                    "run metadata invocation registration schema is invalid")
+            source = event.get("record")
+            required = {
+                "schema", "invocation_id", "status", "created_local",
+                "invocation_started_at", "invocation_finished_at",
+                "started_at", "finished_at", "timezone",
+                "run_git_commit", "git_tree_state", "command", "out_dir",
+                "samples", "methods", "num_round_trips", "seed", "model",
+                "distractor", "max_tokens", "reasoning_effort",
+                "code_fingerprint", "campaign_config", "worker_pid",
+                "campaign_recovery_authorization",
+            }
+            invocation_id = (
+                source.get("invocation_id") if isinstance(source, dict) else None
+            )
+            campaign_config = (
+                source.get("campaign_config")
+                if isinstance(source, dict) else None
+            )
+            samples = source.get("samples") if isinstance(source, dict) else None
+            methods = source.get("methods") if isinstance(source, dict) else None
+            num_round_trips = (
+                source.get("num_round_trips")
+                if isinstance(source, dict) else None
+            )
+            worker_pid = (
+                source.get("worker_pid") if isinstance(source, dict) else None
+            )
+            if (not isinstance(source, dict)
+                    or not required <= set(source)
+                    or "task_plans" in source
+                    or source.get("schema") != METADATA_SCHEMA
+                    or not isinstance(invocation_id, str) or not invocation_id
+                    or invocation_id in by_invocation
+                    or source.get("status") != "running"
+                    or source.get("invocation_finished_at") is not None
+                    or source.get("finished_at") is not None
+                    or not _metadata_timestamp_is_aware(
+                        source.get("created_local"))
+                    or not _metadata_timestamp_is_aware(
+                        source.get("invocation_started_at"))
+                    or not _metadata_timestamp_is_aware(source.get("started_at"))
+                    or not isinstance(source.get("timezone"), str)
+                    or not source.get("timezone")
+                    or not isinstance(source.get("run_git_commit"), str)
+                    or not re.fullmatch(
+                        r"[0-9a-f]{40}", source.get("run_git_commit", ""))
+                    or source.get("git_tree_state") not in {"clean", "dirty"}
+                    or not isinstance(source.get("command"), str)
+                    or not source.get("command")
+                    or not isinstance(source.get("out_dir"), str)
+                    or not source.get("out_dir")
+                    or not isinstance(samples, list) or not samples
+                    or any(not isinstance(item, str) or not item
+                           for item in samples)
+                    or not isinstance(methods, list) or not methods
+                    or any(not isinstance(item, str) or not item
+                           for item in methods)
+                    or not isinstance(num_round_trips, int)
+                    or isinstance(num_round_trips, bool)
+                    or num_round_trips <= 0
+                    or not isinstance(source.get("seed"), int)
+                    or isinstance(source.get("seed"), bool)
+                    or not isinstance(source.get("model"), str)
+                    or not source.get("model")
+                    or not isinstance(source.get("distractor"), bool)
+                    or not isinstance(source.get("max_tokens"), int)
+                    or isinstance(source.get("max_tokens"), bool)
+                    or source.get("max_tokens") <= 0
+                    or not isinstance(source.get("code_fingerprint"), dict)
+                    or not source.get("code_fingerprint")
+                    or not isinstance(campaign_config, dict)
+                    or campaign_config.get("num_round_trips")
+                    != num_round_trips
+                    or campaign_config.get("seed") != source.get("seed")
+                    or campaign_config.get("model") != source.get("model")
+                    or campaign_config.get("distractor")
+                    != source.get("distractor")
+                    or campaign_config.get("max_tokens")
+                    != source.get("max_tokens")
+                    or campaign_config.get("reasoning_effort")
+                    != source.get("reasoning_effort")
+                    or not isinstance(campaign_config.get("method_set"), list)
+                    or not set(methods) <= set(campaign_config["method_set"])
+                    or not isinstance(worker_pid, int)
+                    or isinstance(worker_pid, bool) or worker_pid <= 0):
+                raise RuntimeError(
+                    "run metadata invocation registration is invalid")
+            if records:
+                first = records[0]
+                invariant_fields = {
+                    "started_at", "timezone", "out_dir", "campaign_config",
+                    "transport", "transport_revision",
+                    "transport_resume_policy",
+                }
+                if any(source.get(field) != first.get(field)
+                       for field in invariant_fields):
+                    raise RuntimeError(
+                        "run metadata campaign registration identity drifted")
+                previous = records[-1]
+                previous_identity = (
+                    previous.get("run_git_commit"),
+                    previous.get("git_tree_state"),
+                    previous.get("code_fingerprint"),
+                )
+                current_identity = (
+                    source.get("run_git_commit"),
+                    source.get("git_tree_state"),
+                    source.get("code_fingerprint"),
+                )
+                if current_identity != previous_identity:
+                    boundary = source.get("campaign_recovery_authorization")
+                    if (not isinstance(boundary, dict)
+                            or not isinstance(
+                                boundary.get("authorization_id"), str)
+                            or not boundary.get("authorization_id")
+                            or not isinstance(
+                                boundary.get("authorization_sha256"), str)
+                            or not re.fullmatch(
+                                r"[0-9a-f]{64}",
+                                boundary.get("authorization_sha256", ""))
+                            or boundary.get("prior_git_commit") not in {
+                                record.get("run_git_commit")
+                                for record in records
+                            }
+                            or boundary.get("recovery_git_commit")
+                            != source.get("run_git_commit")
+                            or previous.get("git_tree_state") != "clean"
+                            or source.get("git_tree_state") != "clean"):
+                        raise RuntimeError(
+                            "run metadata recovery identity transition is invalid")
+            for record in records:
+                record["finished_at"] = None
+            record = dict(source)
+            record["task_plans"] = dict(task_plans)
+            records.append(record)
+            by_invocation[invocation_id] = record
+            continue
+
+        if event_kind == "task_plan_registered":
+            if set(event) != {
+                    "schema", "event", "event_index", "sample_id",
+                    "task_plan"}:
+                raise RuntimeError(
+                    "run metadata task-plan event schema is invalid")
+            sample_id = event.get("sample_id")
+            task_plan = event.get("task_plan")
+            round_trips = (
+                task_plan.get("round_trips")
+                if isinstance(task_plan, dict) else None
+            )
+            registered_samples = {
+                item
+                for record in records
+                for item in (record.get("samples") or [])
+            }
+            active_samples = {
+                item
+                for record in records
+                if record.get("status") == "running"
+                for item in (record.get("samples") or [])
+            }
+            expected_round_trips = records[0].get("num_round_trips") if records else None
+            if (not records
+                    or not isinstance(sample_id, str) or not sample_id
+                    or sample_id not in registered_samples
+                    or sample_id not in active_samples
+                    or sample_id in task_plans
+                    or not isinstance(task_plan, dict)
+                    or set(task_plan) != {"sha256", "round_trips"}
+                    or not isinstance(task_plan.get("sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", task_plan["sha256"])
+                    or not isinstance(round_trips, int)
+                    or isinstance(round_trips, bool) or round_trips <= 0
+                    or round_trips != expected_round_trips):
+                raise RuntimeError("run metadata task-plan event is invalid")
+            task_plans[sample_id] = dict(task_plan)
+            for record in records:
+                record["task_plans"] = dict(task_plans)
+            continue
+
+        if event_kind == "invocation_terminal":
+            if set(event) != {
+                    "schema", "event", "event_index", "invocation_id",
+                    "status", "finished_at"}:
+                raise RuntimeError(
+                    "run metadata terminal event schema is invalid")
+            invocation_id = event.get("invocation_id")
+            status = event.get("status")
+            finished_at = event.get("finished_at")
+            target = by_invocation.get(invocation_id)
+            if (target is None or target.get("status") != "running"
+                    or status not in RUN_METADATA_TERMINAL_STATUSES
+                    or not _metadata_timestamp_is_aware(finished_at)
+                    or datetime.fromisoformat(finished_at)
+                    < datetime.fromisoformat(
+                        target["invocation_started_at"])):
+                raise RuntimeError("run metadata terminal event is invalid")
+            target["status"] = status
+            target["invocation_finished_at"] = finished_at
+            campaign_finished_at = (
+                None
+                if any(record.get("status") == "running" for record in records)
+                else max(
+                    (record["invocation_finished_at"] for record in records),
+                    key=datetime.fromisoformat,
+                )
+            )
+            for record in records:
+                record["finished_at"] = campaign_finished_at
+            continue
+
+        if event_kind == "invocations_interrupted":
+            if set(event) != {
+                    "schema", "event", "event_index", "finished_at",
+                    "invocations"}:
+                raise RuntimeError(
+                    "run metadata interruption event schema is invalid")
+            finished_at = event.get("finished_at")
+            transitions = event.get("invocations")
+            if (not _metadata_timestamp_is_aware(finished_at)
+                    or not isinstance(transitions, list) or not transitions):
+                raise RuntimeError("run metadata interruption event is invalid")
+            seen = set()
+            resolved = []
+            for transition in transitions:
+                if (not isinstance(transition, dict)
+                        or set(transition) != {
+                            "invocation_id", "worker_launch_id", "worker_pid",
+                            "samples", "status"}
+                        or not isinstance(
+                            transition.get("invocation_id"), str)
+                        or not transition.get("invocation_id")
+                        or transition["invocation_id"] in seen
+                        or transition.get("status")
+                        not in RUN_METADATA_TERMINAL_STATUSES):
+                    raise RuntimeError(
+                        "run metadata interruption transition is invalid")
+                target = by_invocation.get(transition["invocation_id"])
+                if (target is None or target.get("status") != "running"
+                        or target.get("worker_launch_id")
+                        != transition.get("worker_launch_id")
+                        or target.get("worker_pid")
+                        != transition.get("worker_pid")
+                        or list(target.get("samples") or [])
+                        != transition.get("samples")
+                        or datetime.fromisoformat(finished_at)
+                        < datetime.fromisoformat(
+                            target["invocation_started_at"])):
+                    raise RuntimeError(
+                        "run metadata interruption identity is invalid")
+                seen.add(transition["invocation_id"])
+                resolved.append((target, transition["status"]))
+            for target, status in resolved:
+                target["status"] = status
+                target["invocation_finished_at"] = finished_at
+            campaign_finished_at = (
+                None
+                if any(record.get("status") == "running" for record in records)
+                else max(
+                    (record["invocation_finished_at"] for record in records),
+                    key=datetime.fromisoformat,
+                )
+            )
+            for record in records:
+                record["finished_at"] = campaign_finished_at
+            continue
+
+        raise RuntimeError(
+            f"run metadata event {expected_index} has unknown type {event_kind!r}")
+    return [dict(record) for record in records]
+
+
+def _append_run_metadata_event_bytes(events_path, event_bytes):
+    with open(events_path, "ab") as handle:
+        handle.write(event_bytes)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _clear_run_metadata_event_pending(out_dir):
+    path = _run_metadata_event_pending_path(out_dir)
+    if os.path.exists(path):
+        os.unlink(path)
+
+
+def _read_run_metadata_event_pending(out_dir):
+    path = _run_metadata_event_pending_path(out_dir)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            pending = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("run metadata event pending intent is invalid") from exc
+    required = {
+        "schema", "events_file", "event_schema", "prior_prefix_size_bytes",
+        "prior_prefix_sha256", "prior_event_count", "event_index",
+        "event_line", "event_sha256",
+    }
+    event_line = pending.get("event_line") if isinstance(pending, dict) else None
+    event_bytes = (
+        event_line.encode("utf-8") if isinstance(event_line, str) else None
+    )
+    recovery_observation = (
+        pending.get("recovery_observation")
+        if isinstance(pending, dict) else None
+    )
+    allowed_keys = required | (
+        {"recovery_observation"}
+        if recovery_observation is not None else set()
+    )
+    if (not isinstance(pending, dict) or set(pending) != allowed_keys
+            or pending.get("schema") != METADATA_EVENT_PENDING_SCHEMA
+            or pending.get("events_file") != METADATA_EVENTS_FILENAME
+            or pending.get("event_schema") != METADATA_EVENT_SCHEMA
+            or not isinstance(pending.get("prior_prefix_size_bytes"), int)
+            or isinstance(pending.get("prior_prefix_size_bytes"), bool)
+            or pending["prior_prefix_size_bytes"] < 0
+            or not isinstance(pending.get("prior_event_count"), int)
+            or isinstance(pending.get("prior_event_count"), bool)
+            or pending["prior_event_count"] < 0
+            or not isinstance(pending.get("event_index"), int)
+            or isinstance(pending.get("event_index"), bool)
+            or pending["event_index"] != pending["prior_event_count"] + 1
+            or not isinstance(pending.get("prior_prefix_sha256"), str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", pending["prior_prefix_sha256"])
+            or event_bytes is None or not event_bytes.endswith(b"\n")
+            or not isinstance(pending.get("event_sha256"), str)
+            or hashlib.sha256(event_bytes).hexdigest()
+            != pending.get("event_sha256")):
+        raise RuntimeError("run metadata event pending intent is invalid")
+    event_rows = _decode_run_metadata_event_bytes(
+        event_bytes, label="run metadata pending event")
+    if len(event_rows) != 1 or event_rows[0].get("event_index") != pending["event_index"]:
+        raise RuntimeError("run metadata event pending intent is invalid")
+    if recovery_observation is not None:
+        observed_size = (
+            recovery_observation.get("observed_suffix_size_bytes")
+            if isinstance(recovery_observation, dict) else None
+        )
+        if (not isinstance(recovery_observation, dict)
+                or set(recovery_observation) != {
+                    "prepared_at", "observed_suffix_size_bytes",
+                    "observed_suffix_sha256",
+                }
+                or not _metadata_timestamp_is_aware(
+                    recovery_observation.get("prepared_at"))
+                or not isinstance(observed_size, int)
+                or isinstance(observed_size, bool)
+                or observed_size < 0 or observed_size > len(event_bytes)
+                or recovery_observation.get("observed_suffix_sha256")
+                != hashlib.sha256(event_bytes[:observed_size]).hexdigest()):
+            raise RuntimeError("run metadata event pending intent is invalid")
+    return pending, event_bytes, event_rows[0]
+
+
+def _reconcile_run_metadata_event_pending_unlocked(out_dir):
+    loaded = _read_run_metadata_event_pending(out_dir)
+    if loaded is None:
+        return False
+    pending, event_bytes, event = loaded
+    events_path = _run_metadata_events_path(out_dir)
+    try:
+        with open(events_path, "rb") as handle:
+            current = handle.read()
+    except FileNotFoundError:
+        current = b""
+    prior_size = pending["prior_prefix_size_bytes"]
+    if len(current) < prior_size:
+        raise RuntimeError("run metadata event ledger was truncated before pending intent")
+    prior = current[:prior_size]
+    if (hashlib.sha256(prior).hexdigest()
+            != pending["prior_prefix_sha256"]):
+        raise RuntimeError("run metadata event pending prefix digest mismatch")
+    prior_events = (
+        _decode_run_metadata_event_bytes(
+            prior, label="run metadata pending prefix")
+        if prior else []
+    )
+    if len(prior_events) != pending["prior_event_count"]:
+        raise RuntimeError("run metadata event pending prefix count mismatch")
+    _fold_run_metadata_events(prior_events + [event])
+    suffix = current[prior_size:]
+    if (len(suffix) > len(event_bytes)
+            or not event_bytes.startswith(suffix)):
+        raise RuntimeError("run metadata event pending suffix diverged")
+    observation = pending.get("recovery_observation")
+    if observation is None:
+        observation = {
+            "prepared_at": _iso_with_timezone(_aware_now()),
+            "observed_suffix_size_bytes": len(suffix),
+            "observed_suffix_sha256": hashlib.sha256(suffix).hexdigest(),
+        }
+        pending = dict(pending)
+        pending["recovery_observation"] = observation
+        # The pending intent is the authoritative owner of the immutable crash
+        # cut.  Persist it before the separate human-audit receipt or any ledger
+        # completion so deleting/recreating that receipt cannot move the cut.
+        write_json_atomic(_run_metadata_event_pending_path(out_dir), pending)
+    observed_size = observation["observed_suffix_size_bytes"]
+    if (len(suffix) < observed_size
+            or event_bytes[:observed_size] != suffix[:observed_size]):
+        raise RuntimeError(
+            "run metadata event ledger regressed after recovery preparation")
+
+    recovery_dir = os.path.join(out_dir, METADATA_EVENT_RECOVERY_DIRECTORY)
+    os.makedirs(recovery_dir, exist_ok=True)
+    receipt_path = os.path.join(
+        recovery_dir,
+        f"{pending['event_index']:08d}_{pending['event_sha256'][:16]}.json",
+    )
+    final_bytes = prior + event_bytes
+    immutable_receipt = {
+        "schema": METADATA_EVENT_RECOVERY_SCHEMA,
+        "pending_sha256": _canonical_record_sha256(pending),
+        "prior_prefix_size_bytes": prior_size,
+        "prior_prefix_sha256": pending["prior_prefix_sha256"],
+        "prior_event_count": pending["prior_event_count"],
+        "event_index": pending["event_index"],
+        "event_sha256": pending["event_sha256"],
+        "final_event_count": pending["event_index"],
+        "final_ledger_size_bytes": len(final_bytes),
+        "final_ledger_sha256": hashlib.sha256(final_bytes).hexdigest(),
+    }
+    receipt = None
+    if os.path.isfile(receipt_path):
+        try:
+            with open(receipt_path, encoding="utf-8") as handle:
+                receipt = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "run metadata event recovery receipt is invalid") from exc
+        required = set(immutable_receipt) | {
+            "state", "prepared_at", "completed_at",
+            "observed_suffix_size_bytes", "observed_suffix_sha256",
+        }
+        receipt_observed_size = (
+            receipt.get("observed_suffix_size_bytes")
+            if isinstance(receipt, dict) else None
+        )
+        if (not isinstance(receipt, dict) or set(receipt) != required
+                or any(receipt.get(key) != value
+                       for key, value in immutable_receipt.items())
+                or receipt.get("state") not in {"prepared", "completed"}
+                or receipt.get("prepared_at") != observation["prepared_at"]
+                or (receipt.get("state") == "prepared"
+                    and receipt.get("completed_at") is not None)
+                or (receipt.get("state") == "completed"
+                    and receipt.get("completed_at") != receipt.get("prepared_at"))
+                or not isinstance(receipt_observed_size, int)
+                or isinstance(receipt_observed_size, bool)
+                or receipt_observed_size != observed_size
+                or receipt.get("observed_suffix_sha256")
+                != observation["observed_suffix_sha256"]):
+            raise RuntimeError(
+                "run metadata event recovery receipt is invalid")
+        if (receipt.get("state") == "completed"
+                and len(suffix) != len(event_bytes)):
+            raise RuntimeError(
+                "run metadata event ledger regressed after completed recovery")
+    else:
+        receipt = {
+            **immutable_receipt,
+            "state": "prepared",
+            "prepared_at": observation["prepared_at"],
+            "completed_at": None,
+            "observed_suffix_size_bytes": observed_size,
+            "observed_suffix_sha256": observation[
+                "observed_suffix_sha256"],
+        }
+        # Persist the immutable crash observation before adding any remaining
+        # event bytes.  A later recovery reuses this observation instead of
+        # inferring a different cut point from the now-longer ledger.
+        write_json_atomic(receipt_path, receipt)
+    if len(suffix) < len(event_bytes):
+        _append_run_metadata_event_bytes(
+            events_path, event_bytes[len(suffix):])
+    final_events = _read_run_metadata_events_strict(events_path)
+    _fold_run_metadata_events(final_events)
+    if (len(final_events) != pending["event_index"]
+            or final_events[-1] != event):
+        raise RuntimeError("run metadata pending event reconciliation failed")
+    if (os.path.getsize(events_path) != immutable_receipt[
+            "final_ledger_size_bytes"]
+            or _sha256_file(events_path)
+            != immutable_receipt["final_ledger_sha256"]):
+        raise RuntimeError("run metadata pending event reconciliation failed")
+    if receipt["state"] == "prepared":
+        receipt = dict(receipt)
+        receipt["state"] = "completed"
+        receipt["completed_at"] = receipt["prepared_at"]
+        write_json_atomic(receipt_path, receipt)
+    _clear_run_metadata_event_pending(out_dir)
+    return True
+
+
+def _read_run_metadata_event_recovery_receipts(out_dir, events_path):
+    """Validate every durable WAL-recovery receipt against the event ledger."""
+    recovery_dir = os.path.join(out_dir, METADATA_EVENT_RECOVERY_DIRECTORY)
+    if not os.path.isdir(recovery_dir):
+        return []
+    try:
+        names = sorted(
+            name for name in os.listdir(recovery_dir)
+            if name.endswith(".json")
+        )
+        with open(events_path, "rb") as handle:
+            ledger = handle.read()
+    except OSError as exc:
+        raise RuntimeError(
+            "run metadata event recovery evidence is unreadable") from exc
+    ledger_events = _read_run_metadata_events_strict(events_path)
+    required = {
+        "schema", "state", "prepared_at", "completed_at",
+        "pending_sha256", "prior_prefix_size_bytes", "prior_prefix_sha256",
+        "prior_event_count", "event_index", "event_sha256",
+        "observed_suffix_size_bytes", "observed_suffix_sha256",
+        "final_event_count", "final_ledger_size_bytes",
+        "final_ledger_sha256",
+    }
+    validated = []
+    seen_indexes = set()
+    for name in names:
+        path = os.path.join(recovery_dir, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                receipt = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "run metadata event recovery receipt is invalid") from exc
+        prior_size = (
+            receipt.get("prior_prefix_size_bytes")
+            if isinstance(receipt, dict) else None
+        )
+        prior_count = (
+            receipt.get("prior_event_count")
+            if isinstance(receipt, dict) else None
+        )
+        event_index = (
+            receipt.get("event_index")
+            if isinstance(receipt, dict) else None
+        )
+        final_size = (
+            receipt.get("final_ledger_size_bytes")
+            if isinstance(receipt, dict) else None
+        )
+        observed_size = (
+            receipt.get("observed_suffix_size_bytes")
+            if isinstance(receipt, dict) else None
+        )
+        if (not isinstance(receipt, dict) or set(receipt) != required
+                or receipt.get("schema") != METADATA_EVENT_RECOVERY_SCHEMA
+                or receipt.get("state") != "completed"
+                or not _metadata_timestamp_is_aware(receipt.get("prepared_at"))
+                or not _metadata_timestamp_is_aware(receipt.get("completed_at"))
+                or receipt.get("completed_at") != receipt.get("prepared_at")
+                or not isinstance(receipt.get("pending_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", receipt["pending_sha256"])
+                or not isinstance(prior_size, int) or isinstance(prior_size, bool)
+                or prior_size < 0
+                or not isinstance(prior_count, int)
+                or isinstance(prior_count, bool) or prior_count < 0
+                or not isinstance(event_index, int)
+                or isinstance(event_index, bool)
+                or event_index != prior_count + 1
+                or event_index in seen_indexes
+                or not isinstance(final_size, int)
+                or isinstance(final_size, bool) or final_size <= prior_size
+                or final_size > len(ledger)
+                or receipt.get("final_event_count") != event_index
+                or not isinstance(observed_size, int)
+                or isinstance(observed_size, bool) or observed_size < 0
+                or not isinstance(receipt.get("prior_prefix_sha256"), str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", receipt["prior_prefix_sha256"])
+                or not isinstance(receipt.get("event_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", receipt["event_sha256"])
+                or not isinstance(receipt.get("observed_suffix_sha256"), str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", receipt["observed_suffix_sha256"])
+                or not isinstance(receipt.get("final_ledger_sha256"), str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}", receipt["final_ledger_sha256"])):
+            raise RuntimeError(
+                "run metadata event recovery receipt is invalid")
+        event_bytes = ledger[prior_size:final_size]
+        if (observed_size > len(event_bytes)
+                or name != f"{event_index:08d}_{receipt['event_sha256'][:16]}.json"
+                or hashlib.sha256(ledger[:prior_size]).hexdigest()
+                != receipt["prior_prefix_sha256"]
+                or hashlib.sha256(event_bytes).hexdigest()
+                != receipt["event_sha256"]
+                or hashlib.sha256(event_bytes[:observed_size]).hexdigest()
+                != receipt["observed_suffix_sha256"]
+                or hashlib.sha256(ledger[:final_size]).hexdigest()
+                != receipt["final_ledger_sha256"]):
+            raise RuntimeError(
+                "run metadata event recovery receipt does not match the ledger")
+        prior_bytes = ledger[:prior_size]
+        prior_events = (
+            _decode_run_metadata_event_bytes(
+                prior_bytes, label="run metadata recovery prior prefix")
+            if prior_bytes else []
+        )
+        event_rows = _decode_run_metadata_event_bytes(
+            event_bytes, label="run metadata recovered event")
+        if ((prior_count == 0 and prior_size != 0)
+                or len(prior_events) != prior_count
+                or prior_events != ledger_events[:prior_count]
+                or len(event_rows) != 1
+                or event_rows[0].get("event_index") != event_index
+                or len(ledger_events) < event_index
+                or event_rows[0] != ledger_events[event_index - 1]
+                ):
+            raise RuntimeError(
+                "run metadata event recovery receipt prefix is invalid")
+        reconstructed_pending = {
+            "schema": METADATA_EVENT_PENDING_SCHEMA,
+            "events_file": METADATA_EVENTS_FILENAME,
+            "event_schema": METADATA_EVENT_SCHEMA,
+            "prior_prefix_size_bytes": prior_size,
+            "prior_prefix_sha256": receipt["prior_prefix_sha256"],
+            "prior_event_count": prior_count,
+            "event_index": event_index,
+            "event_line": event_bytes.decode("utf-8"),
+            "event_sha256": receipt["event_sha256"],
+            "recovery_observation": {
+                "prepared_at": receipt["prepared_at"],
+                "observed_suffix_size_bytes": observed_size,
+                "observed_suffix_sha256": receipt[
+                    "observed_suffix_sha256"],
+            },
+        }
+        if (_canonical_record_sha256(reconstructed_pending)
+                != receipt["pending_sha256"]):
+            raise RuntimeError(
+                "run metadata event recovery receipt pending identity is invalid")
+        seen_indexes.add(event_index)
+        validated.append({
+            "event_index": event_index,
+            "filename": name,
+            "sha256": _sha256_file(path),
+        })
+    return validated
+
+
+def _run_metadata_event_recovery_manifest(receipts, *, event_count):
+    selected = [
+        dict(receipt) for receipt in receipts
+        if receipt["event_index"] <= event_count
+    ]
+    payload = json.dumps(
+        selected,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        "event_recovery_receipt_count": len(selected),
+        "event_recovery_receipts_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _append_run_metadata_event_unlocked(out_dir, event):
+    _reconcile_run_metadata_event_pending_unlocked(out_dir)
+    events_path = _run_metadata_events_path(out_dir)
+    events = (
+        _read_run_metadata_events_strict(events_path)
+        if os.path.isfile(events_path) else []
+    )
+    payload = dict(event)
+    payload.update({
+        "schema": METADATA_EVENT_SCHEMA,
+        "event_index": len(events) + 1,
+    })
+    _fold_run_metadata_events(events + [payload])
+    os.makedirs(out_dir, exist_ok=True)
+    prior = b""
+    if os.path.isfile(events_path):
+        with open(events_path, "rb") as handle:
+            prior = handle.read()
+    event_bytes = (
+        json.dumps(payload, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
+    pending = {
+        "schema": METADATA_EVENT_PENDING_SCHEMA,
+        "events_file": METADATA_EVENTS_FILENAME,
+        "event_schema": METADATA_EVENT_SCHEMA,
+        "prior_prefix_size_bytes": len(prior),
+        "prior_prefix_sha256": hashlib.sha256(prior).hexdigest(),
+        "prior_event_count": len(events),
+        "event_index": payload["event_index"],
+        "event_line": event_bytes.decode("utf-8"),
+        "event_sha256": hashlib.sha256(event_bytes).hexdigest(),
+    }
+    write_json_atomic(_run_metadata_event_pending_path(out_dir), pending)
+    _append_run_metadata_event_bytes(events_path, event_bytes)
+    _clear_run_metadata_event_pending(out_dir)
+    return payload
+
+
+def _read_run_metadata_event_prefix(events_path, receipt):
+    size_bytes = receipt.get("event_prefix_size_bytes")
+    event_count = receipt.get("event_count")
+    if (not isinstance(size_bytes, int) or isinstance(size_bytes, bool)
+            or size_bytes <= 0
+            or not isinstance(event_count, int) or isinstance(event_count, bool)
+            or event_count <= 0):
+        raise RuntimeError("run metadata projection receipt prefix is invalid")
+    with open(events_path, "rb") as handle:
+        current = handle.read()
+    if len(current) < size_bytes:
+        raise RuntimeError("run metadata event prefix was truncated")
+    prefix = current[:size_bytes]
+    if (not prefix.endswith(b"\n")
+            or hashlib.sha256(prefix).hexdigest()
+            != receipt.get("event_prefix_sha256")):
+        raise RuntimeError("run metadata event prefix digest mismatch")
+    try:
+        rows = [
+            json.loads(line)
+            for line in prefix.decode("utf-8").splitlines()
+            if line.strip()
+        ]
+    except (UnicodeError, ValueError) as exc:
+        raise RuntimeError("run metadata event prefix is invalid") from exc
+    if len(rows) != event_count or any(not isinstance(row, dict) for row in rows):
+        raise RuntimeError("run metadata event prefix count mismatch")
+    return rows, len(current)
+
+
+def _read_run_metadata_projection_receipt(receipt_path):
+    try:
+        with open(receipt_path, encoding="utf-8") as handle:
+            receipt = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            "run metadata projection receipt is invalid") from exc
+    receipt_keys = {
+        "schema", "events_file", "event_schema", "event_count",
+        "event_prefix_size_bytes", "event_prefix_sha256", "projection_sha256",
+        "projection_record_count", "snapshot_file", "snapshot_sha256",
+        "event_recovery_receipt_count",
+        "event_recovery_receipts_sha256",
+    }
+    if (not isinstance(receipt, dict) or set(receipt) != receipt_keys
+            or receipt.get("schema") != METADATA_PROJECTION_RECEIPT_SCHEMA
+            or receipt.get("events_file") != METADATA_EVENTS_FILENAME
+            or receipt.get("event_schema") != METADATA_EVENT_SCHEMA
+            or receipt.get("snapshot_file") != "run_metadata.jsonl"
+            or not isinstance(receipt.get("event_prefix_sha256"), str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", receipt["event_prefix_sha256"])
+            or not isinstance(receipt.get("projection_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt["projection_sha256"])
+            or not isinstance(receipt.get("snapshot_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", receipt["snapshot_sha256"])
+            or not isinstance(
+                receipt.get("event_recovery_receipt_count"), int)
+            or isinstance(receipt.get("event_recovery_receipt_count"), bool)
+            or receipt["event_recovery_receipt_count"] < 0
+            or not isinstance(
+                receipt.get("event_recovery_receipts_sha256"), str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                receipt["event_recovery_receipts_sha256"]
+            )):
+        raise RuntimeError("run metadata projection receipt is invalid")
+    return receipt
+
+
+def _validate_run_metadata_projection_receipt_prefix(
+        events_path, receipt, *, recovery_receipts=None):
+    prefix_events, current_size = _read_run_metadata_event_prefix(
+        events_path, receipt)
+    prefix_projection = _fold_run_metadata_events(prefix_events)
+    if recovery_receipts is None:
+        recovery_receipts = _read_run_metadata_event_recovery_receipts(
+            os.path.dirname(events_path), events_path)
+    recovery_manifest = _run_metadata_event_recovery_manifest(
+        recovery_receipts, event_count=receipt.get("event_count"))
+    if (receipt.get("projection_record_count") != len(prefix_projection)
+            or receipt.get("projection_sha256")
+            != _run_metadata_projection_sha256(prefix_projection)
+            or any(receipt.get(key) != value
+                   for key, value in recovery_manifest.items())):
+        raise RuntimeError("run metadata projection receipt is invalid")
+    return prefix_projection, current_size
+
+
+def _validate_run_metadata_projection_cache(
+        out_dir, metadata_path, events_path, current_projection,
+        *, recovery_receipts=None):
+    receipt_path = _run_metadata_projection_receipt_path(out_dir)
+    snapshot_exists = os.path.isfile(metadata_path)
+    receipt_exists = os.path.isfile(receipt_path)
+    if not snapshot_exists and not receipt_exists:
+        return
+    if snapshot_exists is not receipt_exists:
+        raise RuntimeError(
+            "run metadata compatibility snapshot/receipt is incomplete")
+    receipt = _read_run_metadata_projection_receipt(receipt_path)
+    prefix_projection, current_size = (
+        _validate_run_metadata_projection_receipt_prefix(
+            events_path, receipt, recovery_receipts=recovery_receipts)
+    )
+    snapshot = _read_run_metadata_strict(metadata_path)
+    if (snapshot != prefix_projection
+            or _sha256_file(metadata_path) != receipt.get("snapshot_sha256")):
+        raise RuntimeError("run metadata compatibility snapshot drifted")
+    if (receipt["event_prefix_size_bytes"] == current_size
+            and snapshot != current_projection):
+        raise RuntimeError("current run metadata projection is inconsistent")
+
+
+def _read_run_metadata_snapshot_unlocked(out_dir, metadata_path):
+    events_path = _run_metadata_events_path(out_dir)
+    mode = _run_metadata_storage_mode_unlocked(out_dir, metadata_path)
+    if os.path.isfile(events_path):
+        events = _read_run_metadata_events_strict(events_path)
+        projection = _fold_run_metadata_events(events)
+        recovery_receipts = _read_run_metadata_event_recovery_receipts(
+            out_dir, events_path)
+        _validate_run_metadata_projection_cache(
+            out_dir, metadata_path, events_path, projection,
+            recovery_receipts=recovery_receipts)
+        return projection
+    if mode == "event":
+        return []
+    return _read_run_metadata_strict(metadata_path)
+
+
+def _publish_run_metadata_projection_unlocked(
+        out_dir, metadata_path, projection):
+    if not projection or any(
+            record.get("status") == "running" for record in projection):
+        return False
+    events_path = _run_metadata_events_path(out_dir)
+    if not os.path.isfile(events_path):
+        return False
+    prior_snapshot = (
+        _read_run_metadata_strict(metadata_path)
+        if os.path.isfile(metadata_path) else None
+    )
+    try:
+        _write_jsonl_atomic(metadata_path, projection)
+    except OSError:
+        return False
+    events = _read_run_metadata_events_strict(events_path)
+    recovery_receipts = _read_run_metadata_event_recovery_receipts(
+        out_dir, events_path)
+    recovery_manifest = _run_metadata_event_recovery_manifest(
+        recovery_receipts, event_count=len(events))
+    size_bytes = os.path.getsize(events_path)
+    receipt = {
+        "schema": METADATA_PROJECTION_RECEIPT_SCHEMA,
+        "events_file": METADATA_EVENTS_FILENAME,
+        "event_schema": METADATA_EVENT_SCHEMA,
+        "event_count": len(events),
+        "event_prefix_size_bytes": size_bytes,
+        "event_prefix_sha256": _sha256_file(events_path),
+        "projection_sha256": _run_metadata_projection_sha256(projection),
+        "projection_record_count": len(projection),
+        "snapshot_file": "run_metadata.jsonl",
+        "snapshot_sha256": _sha256_file(metadata_path),
+        **recovery_manifest,
+    }
+    try:
+        write_json_atomic(_run_metadata_projection_receipt_path(out_dir), receipt)
+    except OSError:
+        try:
+            if prior_snapshot is None:
+                os.unlink(metadata_path)
+            else:
+                _write_jsonl_atomic(metadata_path, prior_snapshot)
+        except OSError as rollback_exc:
+            raise RuntimeError(
+                "run metadata projection publish rollback failed") from rollback_exc
+        return False
+    return True
+
+
+def _reconcile_run_metadata_projection_unlocked(
+        out_dir, metadata_path, projection=None):
+    """Idempotently finish a quiescent derived-cache publication.
+
+    The append-only event ledger is authoritative.  This helper only repairs
+    cache states that can be produced by a crash between the atomic snapshot
+    and receipt replacements, or by a reported publication failure that rolled
+    back to the previous valid prefix.  Other drift remains fail-closed.
+    """
+    events_path = _run_metadata_events_path(out_dir)
+    if not os.path.isfile(events_path):
+        raise RuntimeError("run metadata event ledger is missing")
+    if projection is None:
+        events = _read_run_metadata_events_strict(events_path)
+        if not events:
+            raise RuntimeError("run metadata event ledger is empty")
+        projection = _fold_run_metadata_events(events)
+    if not projection or any(
+            record.get("status") == "running" for record in projection):
+        return False
+    recovery_receipts = _read_run_metadata_event_recovery_receipts(
+        out_dir, events_path)
+
+    receipt_path = _run_metadata_projection_receipt_path(out_dir)
+    snapshot_exists = os.path.isfile(metadata_path)
+    receipt_exists = os.path.isfile(receipt_path)
+    if receipt_exists and not snapshot_exists:
+        raise RuntimeError(
+            "run metadata compatibility snapshot/receipt is incomplete")
+    if snapshot_exists and not receipt_exists:
+        if _read_run_metadata_strict(metadata_path) != projection:
+            raise RuntimeError(
+                "unreceipted run metadata compatibility snapshot drifted")
+    elif snapshot_exists and receipt_exists:
+        receipt = _read_run_metadata_projection_receipt(receipt_path)
+        prefix_projection, current_size = (
+            _validate_run_metadata_projection_receipt_prefix(
+                events_path, receipt, recovery_receipts=recovery_receipts)
+        )
+        snapshot = _read_run_metadata_strict(metadata_path)
+        snapshot_sha_matches = (
+            _sha256_file(metadata_path) == receipt.get("snapshot_sha256")
+        )
+        valid_prefix_cache = (
+            snapshot == prefix_projection and snapshot_sha_matches
+        )
+        interrupted_current_snapshot = (
+            snapshot == projection
+            and receipt.get("event_prefix_size_bytes") < current_size
+        )
+        if not valid_prefix_cache and not interrupted_current_snapshot:
+            raise RuntimeError("run metadata compatibility snapshot drifted")
+        if (valid_prefix_cache
+                and receipt.get("event_prefix_size_bytes") == current_size):
+            if snapshot != projection:
+                raise RuntimeError(
+                    "current run metadata projection is inconsistent")
+            return True
+
+    if not _publish_run_metadata_projection_unlocked(
+            out_dir, metadata_path, projection):
+        raise RuntimeError(
+            "run metadata terminal event is durable but projection publication "
+            "is incomplete; retry is safe")
+    return True
+
+
+def reconcile_run_metadata_projection(out_dir):
+    """Explicitly republish a quiescent event projection after an interrupted write."""
+    with _campaign_metadata_lock(out_dir) as metadata_path:
+        _reconcile_run_metadata_event_pending_unlocked(out_dir)
+        if (_run_metadata_storage_mode_unlocked(out_dir, metadata_path)
+                != "event"
+                or not os.path.isfile(_run_metadata_events_path(out_dir))):
+            raise RuntimeError("run metadata event ledger is missing")
+        return _reconcile_run_metadata_projection_unlocked(
+            out_dir, metadata_path)
+
+
+def _read_run_metadata_for_mutation_unlocked(out_dir, metadata_path):
+    """Read one store for mutation, completing any prior terminal publication."""
+    _reconcile_run_metadata_event_pending_unlocked(out_dir)
+    event_mode = (
+        _run_metadata_storage_mode_unlocked(out_dir, metadata_path) == "event"
+    )
+    events_path = _run_metadata_events_path(out_dir)
+    if event_mode and os.path.isfile(events_path):
+        projection = _fold_run_metadata_events(
+            _read_run_metadata_events_strict(events_path))
+        if projection and not any(
+                record.get("status") == "running" for record in projection):
+            _reconcile_run_metadata_projection_unlocked(
+                out_dir, metadata_path, projection)
+            return event_mode, projection
+    records = (
+        _read_run_metadata_snapshot_unlocked(out_dir, metadata_path)
+        if event_mode else _read_run_metadata_strict(metadata_path)
+    )
+    return event_mode, records
+
+
 def register_task_plan(out_dir, sample_id, plan_path, *, num_round_trips):
     """Lock one sample's exact task-plan bytes into the campaign ledger.
 
@@ -7362,7 +8573,9 @@ def register_task_plan(out_dir, sample_id, plan_path, *, num_round_trips):
             f"task-plan hash differs from dispatch manifest for {sample_id}"
         )
     with _campaign_metadata_lock(out_dir) as metadata_path:
-        records = _read_run_metadata_strict(metadata_path)
+        event_mode, records = (
+            _read_run_metadata_for_mutation_unlocked(out_dir, metadata_path)
+        )
         if not records:
             raise RuntimeError("task plan cannot be registered before run metadata")
         prior_manifest = _one_prior_value(records, "task_plans") or {}
@@ -7372,6 +8585,19 @@ def register_task_plan(out_dir, sample_id, plan_path, *, num_round_trips):
                 f"refusing task-plan drift for {sample_id}: "
                 f"registered {previous}, current {entry}"
             )
+        if event_mode:
+            if previous == entry:
+                return dict(entry)
+            _append_run_metadata_event_unlocked(out_dir, {
+                "event": "task_plan_registered",
+                "sample_id": sample_id,
+                "task_plan": entry,
+            })
+            projection = _read_run_metadata_snapshot_unlocked(
+                out_dir, metadata_path)
+            _reconcile_run_metadata_projection_unlocked(
+                out_dir, metadata_path, projection)
+            return dict(entry)
         manifest = dict(prior_manifest)
         manifest[sample_id] = entry
         for record in records:
@@ -7380,15 +8606,68 @@ def register_task_plan(out_dir, sample_id, plan_path, *, num_round_trips):
     return dict(entry)
 
 
-def read_run_metadata_snapshot(out_dir):
-    """Read one strict metadata snapshot under its separate campaign lock.
+def read_run_metadata_snapshot(out_dir, *, _locked_metadata_path=None):
+    """Return the only canonical reduction of legacy or event metadata.
 
-    The writer atomically replaces ``run_metadata.jsonl`` while holding
-    ``.run_metadata.lock``.  Locking the metadata file itself would keep an
-    open Windows handle across ``os.replace`` and can make a live worker fail.
+    Legacy directories without an event ledger retain the exact /3 JSONL
+    behavior. New directories reduce the append-only event ledger; an optional
+    compatibility snapshot is only a receipt-bound cache of an event prefix.
+    """
+    if _locked_metadata_path is not None:
+        _reconcile_run_metadata_event_pending_unlocked(out_dir)
+        return [dict(record) for record in _read_run_metadata_snapshot_unlocked(
+            out_dir, _locked_metadata_path)]
+    with _campaign_metadata_lock(out_dir) as metadata_path:
+        _reconcile_run_metadata_event_pending_unlocked(out_dir)
+        return [dict(record) for record in _read_run_metadata_snapshot_unlocked(
+            out_dir, metadata_path)]
+
+
+def read_quiescent_run_metadata_snapshot(out_dir):
+    """Return metadata only when the final compatibility cache is current.
+
+    Event-ledger campaigns may retain a valid snapshot of an older quiescent
+    prefix while a later invocation is running.  Runtime readers must accept
+    that cache as historical evidence and reduce the full event ledger.  An
+    offline/finalization reader has a stricter boundary: every invocation is
+    terminal and the compatibility snapshot plus receipt must cover the exact
+    current event bytes.  Legacy ``run_metadata/3`` directories keep their
+    historical read contract.
     """
     with _campaign_metadata_lock(out_dir) as metadata_path:
-        return [dict(record) for record in _read_run_metadata_strict(metadata_path)]
+        if os.path.exists(_run_metadata_event_pending_path(out_dir)):
+            raise RuntimeError(
+                "run metadata event campaign has a pending event intent")
+        records = _read_run_metadata_snapshot_unlocked(out_dir, metadata_path)
+        events_path = _run_metadata_events_path(out_dir)
+        if not os.path.isfile(events_path):
+            return [dict(record) for record in records]
+        if not records or any(
+                record.get("status") == "running" for record in records):
+            raise RuntimeError("run metadata event campaign is not quiescent")
+        receipt_path = _run_metadata_projection_receipt_path(out_dir)
+        if (not os.path.isfile(metadata_path)
+                or not os.path.isfile(receipt_path)):
+            raise RuntimeError(
+                "quiescent run metadata compatibility snapshot is unpublished")
+        try:
+            with open(receipt_path, encoding="utf-8") as handle:
+                receipt = json.load(handle)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError(
+                "run metadata projection receipt is invalid") from exc
+        event_size = os.path.getsize(events_path)
+        events = _read_run_metadata_events_strict(events_path)
+        if (not isinstance(receipt, dict)
+                or receipt.get("event_prefix_size_bytes") != event_size
+                or receipt.get("event_prefix_sha256") != _sha256_file(events_path)
+                or receipt.get("event_count") != len(events)
+                or receipt.get("projection_record_count") != len(records)
+                or receipt.get("projection_sha256")
+                != _run_metadata_projection_sha256(records)):
+            raise RuntimeError(
+                "quiescent run metadata compatibility snapshot is stale")
+        return [dict(record) for record in records]
 
 
 def interrupt_running_invocations(out_dir, *, status, worker_launch_ids=None):
@@ -7398,21 +8677,29 @@ def interrupt_running_invocations(out_dir, *, status, worker_launch_ids=None):
     caller must first establish that the corresponding worker processes have
     stopped; this helper only performs the atomic ledger transition.
     """
-    if status == "running" or not isinstance(status, str) or not status:
+    if status not in RUN_METADATA_TERMINAL_STATUSES:
         raise ValueError("interrupt status must be a non-running string")
     selected = None if worker_launch_ids is None else set(worker_launch_ids)
     finished_now = _aware_now()
     changed = []
     with _campaign_metadata_lock(out_dir) as metadata_path:
-        records = _read_run_metadata_strict(metadata_path)
+        event_mode, records = (
+            _read_run_metadata_for_mutation_unlocked(out_dir, metadata_path)
+        )
+        transitions = []
         for record in records:
             if record.get("status") != "running":
                 continue
             worker_launch_id = record.get("worker_launch_id")
             if selected is not None and worker_launch_id not in selected:
                 continue
-            record["status"] = status
-            record["invocation_finished_at"] = _iso_with_timezone(finished_now)
+            transitions.append({
+                "invocation_id": record.get("invocation_id"),
+                "worker_launch_id": worker_launch_id,
+                "worker_pid": record.get("worker_pid"),
+                "samples": list(record.get("samples") or []),
+                "status": status,
+            })
             changed.append({
                 "invocation_id": record.get("invocation_id"),
                 "worker_launch_id": worker_launch_id,
@@ -7420,12 +8707,35 @@ def interrupt_running_invocations(out_dir, *, status, worker_launch_ids=None):
                 "samples": list(record.get("samples") or []),
             })
         if changed:
+            finished_at = _iso_with_timezone(finished_now)
+            if event_mode:
+                _append_run_metadata_event_unlocked(out_dir, {
+                    "event": "invocations_interrupted",
+                    "finished_at": finished_at,
+                    "invocations": transitions,
+                })
+                projection = _read_run_metadata_snapshot_unlocked(
+                    out_dir, metadata_path)
+                _reconcile_run_metadata_projection_unlocked(
+                    out_dir, metadata_path, projection)
+                return changed
+            for record, transition in zip(
+                    [
+                        record for record in records
+                        if record.get("invocation_id") in {
+                            item["invocation_id"] for item in transitions
+                        }
+                    ],
+                    transitions,
+            ):
+                record["status"] = transition["status"]
+                record["invocation_finished_at"] = finished_at
             active = [
                 record for record in records
                 if record.get("status") == "running"
             ]
             campaign_finished_at = (
-                None if active else _iso_with_timezone(finished_now)
+                None if active else finished_at
             )
             for record in records:
                 record["finished_at"] = campaign_finished_at
@@ -7443,9 +8753,7 @@ def interrupt_audited_running_invocations(
     if (status is None) == (statuses is None):
         raise ValueError(
             "provide exactly one uniform status or per-invocation statuses")
-    if status is not None and (
-            status == "running"
-            or not isinstance(status, str) or not status):
+    if status is not None and status not in RUN_METADATA_TERMINAL_STATUSES:
         raise ValueError("interrupt status must be a non-running string")
     if statuses is not None and not isinstance(statuses, dict):
         raise ValueError("per-invocation statuses must be a mapping")
@@ -7474,15 +8782,21 @@ def interrupt_audited_running_invocations(
     )
     if (set(status_by_invocation) != set(expected)
             or any(
-                value == "running"
-                or not isinstance(value, str) or not value
+                value not in RUN_METADATA_TERMINAL_STATUSES
                 for value in status_by_invocation.values()
             )):
         raise RuntimeError(
             "per-invocation terminal statuses are invalid")
+    if not expected:
+        with _campaign_metadata_lock(out_dir) as metadata_path:
+            _read_run_metadata_for_mutation_unlocked(
+                out_dir, metadata_path)
+        return []
     changed = []
     with _campaign_metadata_lock(out_dir) as metadata_path:
-        records = _read_run_metadata_strict(metadata_path)
+        event_mode, records = (
+            _read_run_metadata_for_mutation_unlocked(out_dir, metadata_path)
+        )
         running = [record for record in records
                    if record.get("status") == "running"]
         actual_id_list = [record.get("invocation_id") for record in running]
@@ -7491,6 +8805,31 @@ def interrupt_audited_running_invocations(
                 or len(actual_id_list) != len(set(actual_id_list))):
             raise RuntimeError("running invocation identities are invalid")
         actual_ids = set(actual_id_list)
+        if event_mode and not actual_ids:
+            by_invocation = {
+                record.get("invocation_id"): record for record in records
+            }
+            already_applied = []
+            for invocation_id, identity in expected.items():
+                record = by_invocation.get(invocation_id)
+                worker_id, worker_pid, sample = identity
+                if (not isinstance(record, dict)
+                        or record.get("status")
+                        != status_by_invocation[invocation_id]
+                        or record.get("worker_launch_id") != worker_id
+                        or record.get("worker_pid") != worker_pid
+                        or record.get("samples") != [sample]):
+                    break
+                already_applied.append({
+                    "invocation_id": invocation_id,
+                    "worker_launch_id": worker_id,
+                    "worker_pid": worker_pid,
+                    "samples": [sample],
+                })
+            else:
+                _reconcile_run_metadata_projection_unlocked(
+                    out_dir, metadata_path, records)
+                return already_applied
         if actual_ids != set(expected):
             raise RuntimeError(
                 "running invocation set changed after provenance audit"
@@ -7506,10 +8845,17 @@ def interrupt_audited_running_invocations(
                     "running invocation identity changed after provenance audit"
                 )
         finished_now = _aware_now()
+        finished_at = _iso_with_timezone(finished_now)
+        transitions = []
         for record in running:
-            record["status"] = status_by_invocation[
-                record["invocation_id"]]
-            record["invocation_finished_at"] = _iso_with_timezone(finished_now)
+            transition_status = status_by_invocation[record["invocation_id"]]
+            transitions.append({
+                "invocation_id": record.get("invocation_id"),
+                "worker_launch_id": record.get("worker_launch_id"),
+                "worker_pid": record.get("worker_pid"),
+                "samples": list(record.get("samples") or []),
+                "status": transition_status,
+            })
             changed.append({
                 "invocation_id": record.get("invocation_id"),
                 "worker_launch_id": record.get("worker_launch_id"),
@@ -7517,8 +8863,22 @@ def interrupt_audited_running_invocations(
                 "samples": list(record.get("samples") or []),
             })
         if changed:
+            if event_mode:
+                _append_run_metadata_event_unlocked(out_dir, {
+                    "event": "invocations_interrupted",
+                    "finished_at": finished_at,
+                    "invocations": transitions,
+                })
+                projection = _read_run_metadata_snapshot_unlocked(
+                    out_dir, metadata_path)
+                _reconcile_run_metadata_projection_unlocked(
+                    out_dir, metadata_path, projection)
+                return changed
+            for record, transition in zip(running, transitions):
+                record["status"] = transition["status"]
+                record["invocation_finished_at"] = finished_at
             for record in records:
-                record["finished_at"] = _iso_with_timezone(finished_now)
+                record["finished_at"] = finished_at
             _write_jsonl_atomic(metadata_path, records)
     return changed
 
@@ -7535,9 +8895,10 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
     The first invocation establishes the campaign Git identity and timezone-aware
     ``started_at``. Concurrent or resumed invocations reuse those exact values.
     Any commit, clean/dirty state, fingerprint, or transport mixture is rejected
-    before a record is added. ``finish_run_metadata`` closes the invocation and
-    gives every record one shared campaign ``finished_at`` once no invocation is
-    running.
+    before a record is added. Fresh directories use an append-only event ledger;
+    legacy ``run_metadata/3`` directories are never migrated. Once no invocation
+    is running, ``finish_run_metadata`` publishes the shared ``finished_at`` as a
+    receipt-bound compatibility projection.
     """
     del printing  # V3 turns the old fingerprint warning into a hard refusal.
     method_phase = os.environ.get("ANCHORPATCH_METHOD_PHASE")
@@ -7675,7 +9036,23 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
             raise CampaignStoppedError(
                 "cannot append runner metadata after campaign stop latch"
             )
-        prior = _read_run_metadata_strict(path)
+        _reconcile_run_metadata_event_pending_unlocked(out_dir)
+        events_path = _run_metadata_events_path(out_dir)
+        event_mode = (
+            _run_metadata_storage_mode_unlocked(out_dir, path) == "event"
+        )
+        if os.path.isfile(events_path):
+            event_projection = _fold_run_metadata_events(
+                _read_run_metadata_events_strict(events_path))
+            if event_projection and not any(
+                    record.get("status") == "running"
+                    for record in event_projection):
+                _reconcile_run_metadata_projection_unlocked(
+                    out_dir, path, event_projection)
+        prior = (
+            _read_run_metadata_snapshot_unlocked(out_dir, path)
+            if os.path.isfile(events_path) else _read_run_metadata_strict(path)
+        )
         if prior and any(record.get("schema") != METADATA_SCHEMA for record in prior):
             raise RuntimeError(
                 f"refusing to resume/mix {out_dir!r}: existing run metadata is not "
@@ -7908,18 +9285,42 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
         rec["stop_on_preservation_violation"] = bool(
             stop_on_preservation_violation
         )
-        records = prior + [rec]
-        _write_jsonl_atomic(path, records)
+        if event_mode:
+            event_record = dict(rec)
+            event_record.pop("task_plans", None)
+            _append_run_metadata_event_unlocked(out_dir, {
+                "event": "invocation_registered",
+                "record": event_record,
+            })
+        else:
+            records = prior + [rec]
+            _write_jsonl_atomic(path, records)
         return dict(rec)
 
 
 def finish_run_metadata(out_dir, invocation_id, *, status="finished"):
     """Close one invocation and atomically set the shared campaign finish time."""
-    if status == "running" or not isinstance(status, str) or not status:
+    if status not in RUN_METADATA_TERMINAL_STATUSES:
         raise ValueError("finish status must be a non-running string")
     finished_now = _aware_now()
     with _campaign_metadata_lock(out_dir) as path:
-        records = _read_run_metadata_strict(path)
+        _reconcile_run_metadata_event_pending_unlocked(out_dir)
+        event_mode = (
+            _run_metadata_storage_mode_unlocked(out_dir, path) == "event"
+        )
+        if event_mode and os.path.isfile(_run_metadata_events_path(out_dir)):
+            event_projection = _fold_run_metadata_events(
+                _read_run_metadata_events_strict(
+                    _run_metadata_events_path(out_dir)))
+            if event_projection and not any(
+                    record.get("status") == "running"
+                    for record in event_projection):
+                _reconcile_run_metadata_projection_unlocked(
+                    out_dir, path, event_projection)
+        records = (
+            _read_run_metadata_snapshot_unlocked(out_dir, path)
+            if event_mode else _read_run_metadata_strict(path)
+        )
         matches = [record for record in records
                    if record.get("invocation_id") == invocation_id]
         if len(matches) != 1:
@@ -7928,14 +9329,33 @@ def finish_run_metadata(out_dir, invocation_id, *, status="finished"):
             )
         target = matches[0]
         if target.get("status") != "running":
+            if event_mode and target.get("status") == status:
+                _reconcile_run_metadata_projection_unlocked(
+                    out_dir, path, records)
+                return dict(target)
             raise RuntimeError(
                 f"cannot finish non-running invocation {invocation_id!r}: "
                 f"status={target.get('status')!r}"
             )
+        finished_at = _iso_with_timezone(finished_now)
+        if event_mode:
+            _append_run_metadata_event_unlocked(out_dir, {
+                "event": "invocation_terminal",
+                "invocation_id": invocation_id,
+                "status": status,
+                "finished_at": finished_at,
+            })
+            projection = _read_run_metadata_snapshot_unlocked(out_dir, path)
+            _reconcile_run_metadata_projection_unlocked(
+                out_dir, path, projection)
+            return next(
+                dict(record) for record in projection
+                if record.get("invocation_id") == invocation_id
+            )
         target["status"] = status
-        target["invocation_finished_at"] = _iso_with_timezone(finished_now)
+        target["invocation_finished_at"] = finished_at
         active = [record for record in records if record.get("status") == "running"]
-        campaign_finished_at = None if active else _iso_with_timezone(finished_now)
+        campaign_finished_at = None if active else finished_at
         for record in records:
             record["finished_at"] = campaign_finished_at
         _write_jsonl_atomic(path, records)

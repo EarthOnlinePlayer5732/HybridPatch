@@ -10,9 +10,136 @@ from types import SimpleNamespace
 from unittest import mock
 
 import process_experiment as process
+import versioned_run_metadata as versioned_metadata
 
 
 class ProcessExperimentTests(unittest.TestCase):
+    def test_event_metadata_uses_owner_quiescent_reader(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory)
+            for filename in (
+                versioned_metadata.EVENTS_FILENAME,
+                versioned_metadata.SNAPSHOT_FILENAME,
+                versioned_metadata.RECEIPT_FILENAME,
+            ):
+                (archive / filename).write_text("{}\n", encoding="utf-8")
+            expected = [{"schema": "anchorpatch.run_metadata/3"}]
+            reader = mock.Mock(return_value=expected)
+            owner_module = SimpleNamespace(
+                read_quiescent_run_metadata_snapshot=reader
+            )
+            with mock.patch.object(
+                versioned_metadata,
+                "_load_version_run_meta",
+                return_value=owner_module,
+            ) as load_module:
+                rows = versioned_metadata.read_quiescent_run_metadata(
+                    archive,
+                    repository_root=process.ROOT,
+                    owner="HP_V8",
+                )
+            self.assertEqual(rows, expected)
+            load_module.assert_called_once_with(str(
+                (process.ROOT / "HP_V8" / "src" / "run_meta.py").resolve()
+            ))
+            reader.assert_called_once_with(str(archive))
+            self.assertEqual(
+                {path.name for path in
+                 versioned_metadata.run_metadata_artifact_paths(archive)},
+                {
+                    versioned_metadata.EVENTS_FILENAME,
+                    versioned_metadata.SNAPSHOT_FILENAME,
+                    versioned_metadata.RECEIPT_FILENAME,
+                },
+            )
+
+    def test_legacy_metadata_bypasses_owner_module(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory)
+            expected = {"schema": "anchorpatch.run_metadata/3"}
+            (archive / versioned_metadata.SNAPSHOT_FILENAME).write_text(
+                json.dumps(expected) + "\n", encoding="utf-8"
+            )
+            with mock.patch.object(
+                versioned_metadata, "_load_version_run_meta"
+            ) as load_module:
+                rows = versioned_metadata.read_quiescent_run_metadata(
+                    archive,
+                    repository_root=process.ROOT,
+                    owner="HP_V8",
+                )
+            self.assertEqual(rows, [expected])
+            load_module.assert_not_called()
+
+    def test_declared_event_metadata_cannot_downgrade_to_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory)
+            (archive / versioned_metadata.SNAPSHOT_FILENAME).write_text(
+                json.dumps({"schema": "anchorpatch.run_metadata/3"}) + "\n",
+                encoding="utf-8",
+            )
+            (archive / "dispatch_manifest.json").write_text(
+                json.dumps({
+                    "config": {
+                        "run_metadata_storage": versioned_metadata.EVENT_STORAGE_V1,
+                    },
+                }),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(RuntimeError, "requires a missing"):
+                versioned_metadata.read_quiescent_run_metadata(
+                    archive,
+                    repository_root=process.ROOT,
+                    owner="HP_V8",
+                )
+
+    def test_pending_only_event_metadata_is_not_treated_as_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory)
+            pending_path = archive / versioned_metadata.PENDING_FILENAME
+            pending_path.write_text("{}", encoding="utf-8")
+            reader = mock.Mock(
+                side_effect=RuntimeError("pending event intent")
+            )
+            owner_module = SimpleNamespace(
+                read_quiescent_run_metadata_snapshot=reader
+            )
+            with mock.patch.object(
+                versioned_metadata,
+                "_load_version_run_meta",
+                return_value=owner_module,
+            ) as load_module:
+                with self.assertRaisesRegex(RuntimeError, "pending event intent"):
+                    versioned_metadata.read_quiescent_run_metadata(
+                        archive,
+                        repository_root=process.ROOT,
+                        owner="HP_V8",
+                    )
+            load_module.assert_called_once()
+            reader.assert_called_once_with(str(archive))
+            self.assertEqual(
+                versioned_metadata.run_metadata_artifact_paths(archive),
+                [pending_path],
+            )
+
+    def test_collect_facts_rejects_non_quiescent_event_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory)
+            with mock.patch.object(
+                process, "experiment_plan", return_value={}
+            ), mock.patch.object(
+                process,
+                "read_quiescent_run_metadata",
+                side_effect=RuntimeError("stale event metadata"),
+            ) as reader:
+                with self.assertRaisesRegex(RuntimeError, "stale event metadata"):
+                    process.collect_facts("HP_V8", archive)
+            reader.assert_called_once_with(
+                archive,
+                repository_root=process.ROOT,
+                owner="HP_V8",
+            )
+
     def facts(self) -> dict:
         return {
             "owner": "HP_V8",

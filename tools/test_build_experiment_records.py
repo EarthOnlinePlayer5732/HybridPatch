@@ -9,6 +9,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("build_experiment_records.py")
@@ -19,6 +20,34 @@ SPEC.loader.exec_module(records)
 
 
 class BuildExperimentRecordProvenanceTests(unittest.TestCase):
+    def test_builder_rejects_non_quiescent_event_metadata_before_scan(self) -> None:
+        with tempfile.TemporaryDirectory(
+            dir=records.ROOT, prefix="tmp_event_builder_"
+        ) as directory:
+            archive = Path(directory)
+            entry = {
+                "archive_path": archive.relative_to(records.ROOT).as_posix(),
+            }
+            with mock.patch.object(
+                records,
+                "read_quiescent_run_metadata",
+                side_effect=RuntimeError("stale event metadata"),
+            ) as reader:
+                with self.assertRaisesRegex(RuntimeError, "stale event metadata"):
+                    records.build_experiment(
+                        {"owner": "HP_V8"},
+                        entry,
+                        catalog_digest="a" * 64,
+                        skip_tree_hash=True,
+                        check=True,
+                    )
+            reader.assert_called_once_with(
+                archive,
+                repository_root=records.ROOT,
+                owner="HP_V8",
+                required=False,
+            )
+
     def test_single_identity_keeps_legacy_semantics(self) -> None:
         fingerprint = {
             "hybrid_prompt.py": "prompt-a",

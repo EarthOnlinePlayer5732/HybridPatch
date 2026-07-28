@@ -886,6 +886,68 @@ class DeepSeekOpenCodeCampaignGroup01Mixin:
                 run_meta._run_metadata_recovery_prefix_matches(
                     path, identities))
 
+    def test_event_metadata_recovery_binds_prefix_and_projection(self):
+        kwargs = {
+            "command": "python event-recovery-test",
+            "samples": ["sample"],
+            "methods": ["hybridpatch", "fullrewrite"],
+            "num_round_trips": 1,
+            "seed": 42,
+            "model": "offline-test-model",
+            "distractor": False,
+            "max_tokens": 16,
+            "printing": False,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "recovery"}):
+            plan_path = os.path.join(out_dir, "sample.task_plan.json")
+            run_meta.write_json_atomic(plan_path, {
+                "forward_state_sequence": ["state"]})
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "dispatch_manifest.json"), {
+                    "config": {
+                        "num_round_trips": 1,
+                        "run_metadata_storage": (
+                            run_meta.RUN_METADATA_STORAGE_EVENT_V1),
+                    },
+                    "task_plans": {
+                        "sample": {"sha256": run_meta._sha256_file(plan_path)},
+                    },
+                })
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            metadata_path = os.path.join(out_dir, "run_metadata.jsonl")
+            evidence = run_meta._run_metadata_recovery_identities(
+                metadata_path)
+            self.assertEqual(
+                evidence["schema"], run_meta.METADATA_RECOVERY_EVIDENCE_SCHEMA)
+
+            run_meta.register_task_plan(
+                out_dir, "sample", plan_path, num_round_trips=1)
+            self.assertTrue(run_meta._run_metadata_recovery_prefix_matches(
+                metadata_path, evidence))
+            run_meta.finish_run_metadata(
+                out_dir, invocation["invocation_id"])
+            self.assertTrue(run_meta._run_metadata_recovery_prefix_matches(
+                metadata_path, evidence))
+            self.assertFalse(run_meta._run_metadata_recovery_prefix_matches(
+                metadata_path, [{"row_number": 1}]))
+
+            events_path = os.path.join(
+                out_dir, run_meta.METADATA_EVENTS_FILENAME)
+            original = pathlib.Path(events_path).read_bytes()
+            with open(events_path, "r+b") as handle:
+                handle.write(b"X")
+            self.assertFalse(run_meta._run_metadata_recovery_prefix_matches(
+                metadata_path, evidence))
+            pathlib.Path(events_path).write_bytes(original)
+            pathlib.Path(events_path).write_bytes(
+                original[:evidence["event_prefix_size_bytes"] - 1])
+            self.assertFalse(run_meta._run_metadata_recovery_prefix_matches(
+                metadata_path, evidence))
+
     def test_deepseek_transport_recovery_requires_free_dispatcher_lease(self):
         with tempfile.TemporaryDirectory() as out_dir:
             lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
