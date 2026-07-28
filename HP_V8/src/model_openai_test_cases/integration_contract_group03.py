@@ -597,6 +597,15 @@ class IntegrationContractGroup03Mixin:
                 run_meta._read_jsonl_records_with_retry(path),
                 [{"value": 1}],
             )
+            with mock.patch.object(
+                    run_meta.os, "fsync", wraps=run_meta.os.fsync) as fsync:
+                run_meta.append_jsonl_records_locked(
+                    path, [{"value": 2}, {"value": 3}])
+            self.assertEqual(fsync.call_count, 1)
+            self.assertEqual(
+                run_meta._read_jsonl_records_with_retry(path),
+                [{"value": 1}, {"value": 2}, {"value": 3}],
+            )
 
     def test_run_metadata_atomic_replace_retries_windows_sharing_violation(self):
         with tempfile.TemporaryDirectory() as out_dir:

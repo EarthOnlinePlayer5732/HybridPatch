@@ -49,6 +49,7 @@ from run_meta import (
     _validate_deepseek_linear_records,
     _validated_transport_ledger_state,
     append_jsonl_locked,
+    append_jsonl_records_locked,
     campaign_recovery_incident_evidence,
     code_fingerprint,
     interrupt_audited_running_invocations,
@@ -145,6 +146,10 @@ REMAINING134_SELECTION_SHA256 = (
 WORK_CONSERVING_DISPATCH_POLICY = "per_key_work_conserving_v1"
 PHASED_WORK_CONSERVING_DISPATCH_POLICY = (
     "per_key_work_conserving_hp_then_fr_v1"
+)
+DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON = "opencode_monthly_usage_limit"
+DEEPSEEK_MONTHLY_USAGE_LIMIT_MESSAGE_PREFIX = (
+    "Monthly usage limit reached."
 )
 METHOD_PHASE_COMPLETE_SCHEMA = "anchorpatch.method_phase_complete/1"
 CONFIRMATION_KNOWN_USAGE_LIMIT_USD = 130.0
@@ -2135,6 +2140,40 @@ def _deepseek_failed_retry_row(row):
     )
 
 
+def _deepseek_usage_limit_error_payload(error_body):
+    if not isinstance(error_body, dict):
+        return None
+    if (set(error_body) == {"type", "message"}
+            and error_body.get("type") == "GoUsageLimitError"
+            and isinstance(error_body.get("message"), str)
+            and error_body["message"].startswith(
+                DEEPSEEK_MONTHLY_USAGE_LIMIT_MESSAGE_PREFIX)):
+        return error_body
+    return None
+
+
+def _deepseek_monthly_usage_limit_row(row):
+    """Return true only for the exact OpenCode monthly-quota terminal row."""
+    if (not _deepseek_failed_retry_row(row)
+            or row.get("http_status") != 429
+            or row.get("error_type") != "rate_limit"):
+        return False
+    attempts = row.get("transport_attempts")
+    if not isinstance(attempts, list) or not attempts:
+        return False
+    final_attempt = attempts[-1]
+    if (not isinstance(final_attempt, dict)
+            or final_attempt.get("http_status") != 429
+            or final_attempt.get("error_type") != "rate_limit"
+            or final_attempt.get("status") != "retryable_error"
+            or final_attempt.get("response_started_http_status") is not None
+            or final_attempt.get("generation_delta_seen") is not False
+            or final_attempt.get("stream_complete") is not False):
+        return False
+    return _deepseek_usage_limit_error_payload(
+        final_attempt.get("error_body")) is not None
+
+
 def _deepseek_campaign_runtime_identity(out_dir):
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     if not os.path.isfile(manifest_path):
@@ -2685,6 +2724,49 @@ def _verified_deepseek_infrastructure_incomplete(
         "api_row": api_index,
         "http_attempts_used": len(attempts),
         "checkpoint_progress": actual_progress,
+    }
+
+
+def _deepseek_monthly_quota_quarantine_evidence(out_dir, sample, item):
+    if _deepseek_campaign_runtime_identity(out_dir) is None:
+        return None
+    try:
+        outcome_rows = read_sample_outcomes(out_dir)
+        outcome = _latest_sample_outcomes(
+            out_dir, method_phase=item.get("method_phase"),
+            records=outcome_rows).get(sample) or {}
+        if outcome.get("status") != "infrastructure_incomplete":
+            return None
+        evidence = _verified_deepseek_infrastructure_incomplete(
+            out_dir, sample, item, outcome)
+        api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+        api_index = evidence.get("api_row")
+        if (not _is_exact_int(api_index)
+                or not 1 <= api_index <= len(api_rows)):
+            return None
+        api_row = api_rows[api_index - 1]
+        outcome_index = next(
+            (index for index, row in enumerate(outcome_rows, 1)
+             if row is outcome), None)
+        if not _is_exact_int(outcome_index):
+            return None
+    except RuntimeError:
+        return None
+    if not _deepseek_monthly_usage_limit_row(api_row):
+        return None
+    attempts = api_row.get("transport_attempts") or []
+    return {
+        "sample": sample,
+        "request_id": api_row.get("request_id"),
+        "worker_launch_id": item.get("worker_launch_id"),
+        "api_row": api_index,
+        "api_row_count": len(api_rows),
+        "api_row_sha256": _canonical_record_sha256(api_row),
+        "sample_outcome_row": outcome_index,
+        "sample_outcome_sha256": _canonical_record_sha256(outcome),
+        "http_attempt_count": len(attempts),
+        "sample_outcome_created_at": evidence.get(
+            "sample_outcome_created_at"),
     }
 
 
@@ -3758,7 +3840,8 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                 raise RuntimeError(
                     f"worker metadata handshake mismatch: {sample}"
                 )
-            if (matches[0].get("task_plans") or {}).get(sample) != {
+            metadata_record = matches[0]
+            if (metadata_record.get("task_plans") or {}).get(sample) != {
                     "sha256": expected_plan,
                     "round_trips": len(task_plans[sample][
                         "forward_state_sequence"]),
@@ -3766,8 +3849,24 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                 raise RuntimeError(
                     f"worker task-plan handshake mismatch: {sample}"
                 )
+            if "key_label" in item:
+                launch_key_fields = _worker_key_launch_fields(item)
+                expected_key_metadata = {
+                    "dispatch_key_label": launch_key_fields["key_label"],
+                    "original_key_label": (
+                        launch_key_fields["original_key_label"]),
+                    "prior_key_label": launch_key_fields["prior_key_label"],
+                    "failover_count": launch_key_fields["failover_count"],
+                    "failover_reason": (
+                        launch_key_fields["failover_reason"]),
+                }
+                if any(
+                        metadata_record.get(key) != value
+                        for key, value in expected_key_metadata.items()):
+                    raise RuntimeError(
+                        f"worker key failover handshake mismatch: {sample}")
             expected_resume = item.get("resume_authorization")
-            metadata_resume = matches[0].get(
+            metadata_resume = metadata_record.get(
                 "transport_resume_authorization")
             if expected_resume is not None:
                 _validate_resume_authorization(expected_resume)
@@ -3779,7 +3878,7 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                     f"worker transport-resume handshake mismatch: {sample}")
             expected_interrupted = item.get(
                 "interrupted_resume_evidence")
-            if matches[0].get(
+            if metadata_record.get(
                     "interrupted_resume_authorization") != expected_interrupted:
                 raise RuntimeError(
                     f"worker interrupted-resume handshake mismatch: {sample}")
@@ -3794,6 +3893,7 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
         time.sleep(0.1)
 
     acknowledgements = {}
+    authorization_records = []
     for sample, item in running.items():
         ready = ready_by_sample[sample]
         ack = {
@@ -3804,23 +3904,22 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
             "sample": sample,
             "task_plan_sha256": task_plans[sample]["sha256"],
         }
-        append_jsonl_locked(
-            dispatch_log,
-            {
-                "event": "worker_authorized",
-                "created_at": datetime.now().astimezone().isoformat(
-                    timespec="seconds"),
-                "transport_resume_authorization": item.get(
-                    "resume_authorization"),
-                "interrupted_resume_evidence": item.get(
-                    "interrupted_resume_evidence"),
-                "dispatcher_pid": item.get("dispatcher_pid"),
-                "dispatcher_instance_id": item.get(
-                    "dispatcher_instance_id"),
-                **ack,
-            },
-        )
+        authorization_records.append({
+            "event": "worker_authorized",
+            "created_at": datetime.now().astimezone().isoformat(
+                timespec="seconds"),
+            "transport_resume_authorization": item.get(
+                "resume_authorization"),
+            "interrupted_resume_evidence": item.get(
+                "interrupted_resume_evidence"),
+            "dispatcher_pid": item.get("dispatcher_pid"),
+            "dispatcher_instance_id": item.get(
+                "dispatcher_instance_id"),
+            **ack,
+        })
         acknowledgements[sample] = ack
+
+    append_jsonl_records_locked(dispatch_log, authorization_records)
 
     # Authorization is a cohort barrier: no worker may observe an ACK until
     # every worker's authorization event has been durably appended.  This
@@ -4397,6 +4496,277 @@ def _valid_deepseek_transport_sidecar(out_dir, row):
 
 
 
+def _deepseek_manifest_original_keys(manifest):
+    config = manifest.get("config") or {}
+    manifest_samples = list(config.get("samples") or [])
+    assignments = manifest.get("assignments") or []
+    errors = []
+    original_by_sample = {}
+    assignment_samples = []
+    if not assignments:
+        return manifest_samples, original_by_sample, errors
+    for item in assignments:
+        sample = item.get("sample")
+        key_label = item.get("key_label")
+        if (not isinstance(sample, str) or not sample
+                or not isinstance(key_label, str) or not key_label):
+            errors.append("DeepSeek manifest assignment key provenance invalid")
+            continue
+        assignment_samples.append(sample)
+        if sample in original_by_sample:
+            errors.append(
+                f"duplicate DeepSeek manifest assignment sample: {sample}")
+        original_by_sample[sample] = key_label
+    if assignment_samples != manifest_samples:
+        errors.append("DeepSeek manifest assignment sample/order drift")
+    return manifest_samples, original_by_sample, errors
+
+
+def _inspect_deepseek_key_failover_audit(
+        manifest, dispatch_rows, api_rows, outcome_rows, launches):
+    """Bind key quarantine/failover events to exact quota evidence."""
+    manifest_samples, _manifest_key_by_sample, errors = (
+        _deepseek_manifest_original_keys(manifest)
+    )
+    expected_samples = set(manifest_samples)
+    routing_origin_by_sample = {}
+    current_key_by_sample = {}
+    api_by_request_worker = {}
+    for index, row in enumerate(api_rows, 1):
+        request_id = row.get("request_id")
+        worker_id = row.get("worker_launch_id")
+        if (isinstance(request_id, str) and request_id
+                and isinstance(worker_id, str) and worker_id):
+            api_by_request_worker.setdefault(
+                (request_id, worker_id), []).append((index, row))
+
+    quarantined_at = {}
+    quota_observations = {}
+    used_quota_api_rows = set()
+    failover_counts = {}
+    assigned_failovers = {}
+    quarantine_count = 0
+    has_failover_history = any(
+        row.get("event") in {
+            "key_quarantined", "key_quota_observed",
+            "key_failover_assigned",
+        }
+        for row in dispatch_rows
+    )
+    for event_index, row in enumerate(dispatch_rows, 1):
+        event = row.get("event")
+        if event in {"key_quarantined", "key_quota_observed"}:
+            key_label = row.get("key_label")
+            if not isinstance(key_label, str) or not key_label:
+                errors.append("key quota observation missing key label")
+                continue
+            expected_observation = quota_observations.get(key_label, 0) + 1
+            if row.get("observation_index") != expected_observation:
+                errors.append(
+                    f"key quota observation count is not contiguous: {key_label}")
+            else:
+                quota_observations[key_label] = expected_observation
+            if row.get("reason") != DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON:
+                errors.append(f"key quota observation reason mismatch: {key_label}")
+
+            if event == "key_quarantined":
+                quarantine_count += 1
+                if key_label in quarantined_at:
+                    errors.append(f"duplicate key quarantine: {key_label}")
+                if (row.get("quarantine_index") != quarantine_count
+                        or row.get("quarantined_key_count") != quarantine_count
+                        or row.get("observation_index") != 1):
+                    errors.append(
+                        f"key quarantine count is not contiguous: {key_label}")
+            elif key_label not in quarantined_at:
+                errors.append(
+                    f"key quota observation precedes quarantine: {key_label}")
+
+            trigger_sample = row.get("trigger_sample")
+            trigger_worker = row.get("trigger_worker_launch_id")
+            trigger_request = row.get("trigger_request_id")
+            if (not isinstance(trigger_sample, str) or not trigger_sample
+                    or not isinstance(trigger_worker, str)
+                    or not trigger_worker
+                    or not isinstance(trigger_request, str)
+                    or not trigger_request):
+                errors.append(
+                    f"key quarantine trigger identity invalid: {key_label}")
+            launch = launches.get(trigger_worker)
+            if (not isinstance(launch, dict)
+                    or launch.get("sample") != trigger_sample
+                    or launch.get("key_label") != key_label):
+                errors.append(
+                    f"key quarantine launch provenance invalid: {key_label}")
+            matches = api_by_request_worker.get(
+                (trigger_request, trigger_worker), [])
+            if len(matches) != 1:
+                errors.append(
+                    f"key quarantine API evidence is not unique: {key_label}")
+            else:
+                api_index, api_row = matches[0]
+                if api_index in used_quota_api_rows:
+                    errors.append(
+                        f"key quota API evidence reused: {key_label}")
+                else:
+                    used_quota_api_rows.add(api_index)
+                attempts = api_row.get("transport_attempts") or []
+                observed_api_count = row.get("api_row_count")
+                if (row.get("api_row") != api_index
+                        or not _is_exact_int(observed_api_count)
+                        or not api_index <= observed_api_count <= len(api_rows)
+                        or row.get("api_row_sha256")
+                        != _canonical_record_sha256(api_row)
+                        or row.get("trigger_http_attempt_count")
+                        != len(attempts)):
+                    errors.append(
+                        f"key quarantine API row/count mismatch: {key_label}")
+                if api_row.get("sample") != trigger_sample:
+                    errors.append(
+                        f"key quarantine API sample mismatch: {key_label}")
+                if not _deepseek_monthly_usage_limit_row(api_row):
+                    errors.append(
+                        f"key quarantine API row is not monthly quota: "
+                        f"{key_label}")
+            outcome_matches = [
+                (index, outcome)
+                for index, outcome in enumerate(outcome_rows, 1)
+                if outcome.get("sample") == trigger_sample
+                and outcome.get("worker_launch_id") == trigger_worker
+                and outcome.get("request_id") == trigger_request
+                and outcome.get("status") == "infrastructure_incomplete"
+                and outcome.get("created_at")
+                == row.get("sample_outcome_created_at")
+            ]
+            if len(outcome_matches) != 1:
+                errors.append(
+                    f"key quota sample outcome is not unique: {key_label}")
+            else:
+                outcome_index, outcome = outcome_matches[0]
+                if (row.get("sample_outcome_row") != outcome_index
+                        or row.get("sample_outcome_sha256")
+                        != _canonical_record_sha256(outcome)):
+                    errors.append(
+                        f"key quota sample outcome mismatch: {key_label}")
+            if event == "key_quarantined":
+                quarantined_at[key_label] = event_index
+            continue
+
+        if event == "key_failover_assigned":
+            sample = row.get("sample")
+            from_label = row.get("from_key_label")
+            to_label = row.get("to_key_label")
+            count = row.get("failover_count")
+            if (not isinstance(sample, str) or not sample
+                    or not isinstance(from_label, str) or not from_label
+                    or not isinstance(to_label, str) or not to_label):
+                errors.append("key failover assignment identity invalid")
+                continue
+            if sample not in expected_samples:
+                errors.append(f"key failover sample outside manifest: {sample}")
+                continue
+            if row.get("reason") != DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON:
+                errors.append(f"key failover reason mismatch: {sample}")
+            if from_label == to_label:
+                errors.append(
+                    f"key failover destination matches source: {sample}")
+            if (from_label not in quarantined_at
+                    or quarantined_at[from_label] >= event_index):
+                errors.append(f"key failover before quarantine: {sample}")
+            if (to_label in quarantined_at
+                    and quarantined_at[to_label] < event_index):
+                errors.append(
+                    f"key failover destination quarantined: {sample}")
+            if sample not in current_key_by_sample and count == 1:
+                current_key_by_sample[sample] = from_label
+                routing_origin_by_sample[sample] = from_label
+            expected_original = routing_origin_by_sample.get(sample)
+            if (expected_original is not None
+                    and row.get("original_key_label") != expected_original):
+                errors.append(f"key failover original key mismatch: {sample}")
+            if current_key_by_sample.get(sample) != from_label:
+                errors.append(f"key failover source chain mismatch: {sample}")
+            expected_count = failover_counts.get(sample, 0) + 1
+            if count != expected_count:
+                errors.append(f"key failover count is not contiguous: {sample}")
+            if _is_exact_int(count) and count > 0:
+                failover_counts[sample] = count
+                assigned_failovers[(sample, count)] = row
+                current_key_by_sample[sample] = to_label
+            continue
+
+        if event == "queue_exhausted_no_healthy_key":
+            known_keys = sorted(quarantined_at)
+            pending_samples = row.get("pending_samples")
+            if (row.get("reason") != DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON
+                    or row.get("quarantined_key_labels") != known_keys
+                    or len(known_keys)
+                    != (manifest.get("config") or {}).get("key_count")
+                    or not isinstance(pending_samples, list)
+                    or pending_samples != sorted(set(pending_samples))
+                    or not pending_samples
+                    or any(sample not in expected_samples
+                           for sample in pending_samples)):
+                errors.append("queue exhaustion key/sample evidence invalid")
+            continue
+
+        if event not in {"launch", "launch_intent"}:
+            continue
+        sample = row.get("sample")
+        key_label = row.get("key_label")
+        if "failover_count" not in row:
+            # Frozen pre-failover archives did not record routing provenance on
+            # launch rows.  They remain readable only while the dispatch log
+            # contains no durable quarantine/failover state.  Once failover
+            # history exists, every launch must participate in the explicit
+            # source chain so recovery cannot infer a missing routing epoch.
+            if has_failover_history:
+                errors.append(f"launch key provenance missing: {sample}")
+            continue
+        count = row.get("failover_count", 0)
+        if (isinstance(key_label, str) and key_label in quarantined_at
+                and quarantined_at[key_label] < event_index):
+            errors.append(f"launch after key quarantine: {sample}")
+        if not _is_exact_int(count) or count < 0:
+            errors.append(f"launch failover count invalid: {sample}")
+            continue
+        if count == 0:
+            if sample not in expected_samples:
+                errors.append(f"launch sample outside manifest: {sample}")
+            if not has_failover_history:
+                # Key labels are runtime slots, not immutable campaign
+                # identity.  A resume with no durable failover state may
+                # rotate KEY_01 to KEY_11.  Validate each routing epoch
+                # locally instead of chaining it to an earlier count=0
+                # launch.
+                current_key_by_sample[sample] = key_label
+                routing_origin_by_sample[sample] = key_label
+            elif sample not in current_key_by_sample:
+                current_key_by_sample[sample] = key_label
+                routing_origin_by_sample[sample] = key_label
+            if (current_key_by_sample.get(sample) != key_label
+                    or row.get("original_key_label") != key_label
+                    or row.get("prior_key_label") is not None
+                    or row.get("failover_reason") is not None):
+                errors.append(f"launch key chain mismatch: {sample}")
+            continue
+        if (sample in current_key_by_sample
+                and current_key_by_sample[sample] != key_label):
+            errors.append(f"launch key chain mismatch: {sample}")
+        assigned = assigned_failovers.get((sample, count))
+        expected_original = routing_origin_by_sample.get(sample)
+        if assigned is None:
+            errors.append(f"failover launch lacks assignment: {sample}")
+            continue
+        if (row.get("original_key_label") != expected_original
+                or row.get("prior_key_label") != assigned.get("from_key_label")
+                or row.get("failover_reason")
+                != DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON
+                or key_label != assigned.get("to_key_label")):
+            errors.append(f"failover launch provenance mismatch: {sample}")
+    return errors
+
+
 def _inspect_deepseek_campaign(
         out_dir, manifest, *, require_complete=False,
         require_terminal_provenance=None, active_samples=None,
@@ -4580,6 +4950,21 @@ def _inspect_deepseek_campaign(
             errors.append(
                 f"latest run_metadata invocation failed: "
                 f"{(record_samples or ['unknown'])[0]}")
+        launch = launches.get(worker_id)
+        if isinstance(launch, dict) and "failover_count" in launch:
+            expected_key_metadata = {
+                "dispatch_key_label": launch.get("key_label"),
+                "original_key_label": launch.get("original_key_label"),
+                "prior_key_label": launch.get("prior_key_label"),
+                "failover_count": launch.get("failover_count"),
+                "failover_reason": launch.get("failover_reason"),
+            }
+            if any(
+                    record.get(key) != value
+                    for key, value in expected_key_metadata.items()):
+                errors.append(
+                    "run_metadata key failover provenance mismatch: "
+                    f"{(record_samples or ['unknown'])[0]}")
 
     # Terminal publication order is API -> sample outcome -> run metadata.
     # Read the three append-only ledgers in reverse order so a live inspection
@@ -4590,6 +4975,8 @@ def _inspect_deepseek_campaign(
         out_dir, config.get("samples") or [],
         config.get("method_set") or [],
     )
+    errors.extend(_inspect_deepseek_key_failover_audit(
+        manifest, dispatch_rows, api_rows, outcome_snapshot, launches))
     committed_call_ids = {
         call_id
         for rows in committed_rows.values()
@@ -6384,6 +6771,10 @@ def _append_worker_exit(sample, item, returncode, dispatch_log, *,
     record = {
         "event": "worker_exit", "sample": sample,
         "key_label": item["key_label"],
+        "original_key_label": item.get("original_key_label"),
+        "prior_key_label": item.get("prior_key_label"),
+        "failover_count": item.get("failover_count", 0),
+        "failover_reason": item.get("failover_reason"),
         "worker_launch_id": item["worker_launch_id"],
         "pid": item["process"].pid,
         "returncode": returncode,
@@ -6490,6 +6881,42 @@ def _record_worker_exit(out_dir, running, sample, item, returncode,
     return status
 
 
+def _original_key_label(item):
+    return item.get("original_key_label") or item.get("key_label")
+
+
+def _failover_count(item):
+    value = item.get("failover_count", 0)
+    if not _is_exact_int(value) or value < 0:
+        raise RuntimeError("worker failover count is invalid")
+    return value
+
+
+def _worker_key_launch_fields(item):
+    label = item["key_label"]
+    original = _original_key_label(item)
+    count = _failover_count(item)
+    prior = item.get("prior_key_label")
+    reason = item.get("failover_reason")
+    if (not isinstance(original, str) or not original
+            or (count == 0 and (
+                label != original or prior is not None or reason is not None
+            ))
+            or (count > 0 and (
+                not isinstance(prior, str) or not prior
+                or not isinstance(reason, str) or not reason
+                or label == prior
+            ))):
+        raise RuntimeError("worker key failover provenance is invalid")
+    return {
+        "key_label": label,
+        "original_key_label": original,
+        "prior_key_label": prior,
+        "failover_count": count,
+        "failover_reason": reason,
+    }
+
+
 def _launch_worker_batch(
         args, out_dir, inspection_manifest, task_plans, keys, assignments,
         resume_authorizations, dispatch_log, running):
@@ -6535,6 +6962,7 @@ def _launch_worker_batch(
     for item in assignments:
         sample = item["sample"]
         label = item["key_label"]
+        launch_key_fields = _worker_key_launch_fields(item)
         launch_spec = launch_specs[sample]
         worker_id = launch_spec["worker_launch_id"]
         ready_path = launch_spec["ready_path"]
@@ -6577,7 +7005,22 @@ def _launch_worker_batch(
                 task_plans[sample]["sha256"]),
             "ANCHORPATCH_EXPECTED_TASK_PLAN_PATH": os.path.abspath(
                 os.path.join(out_dir, task_plans[sample]["path"])),
+            "ANCHORPATCH_DISPATCH_KEY_LABEL": label,
+            "ANCHORPATCH_ORIGINAL_KEY_LABEL": (
+                launch_key_fields["original_key_label"]),
+            "ANCHORPATCH_KEY_FAILOVER_COUNT": str(
+                launch_key_fields["failover_count"]),
         })
+        if launch_key_fields["prior_key_label"] is not None:
+            environment["ANCHORPATCH_PRIOR_KEY_LABEL"] = (
+                launch_key_fields["prior_key_label"])
+        else:
+            environment.pop("ANCHORPATCH_PRIOR_KEY_LABEL", None)
+        if launch_key_fields["failover_reason"] is not None:
+            environment["ANCHORPATCH_KEY_FAILOVER_REASON"] = (
+                launch_key_fields["failover_reason"])
+        else:
+            environment.pop("ANCHORPATCH_KEY_FAILOVER_REASON", None)
         if args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
             for name in (
                     "OPENCODE_API_KEY", "OPENCODE_GO_API_KEY",
@@ -6637,7 +7080,7 @@ def _launch_worker_batch(
             dispatch_log,
             {
                 "event": "launch_intent", "sample": sample,
-                "key_label": label, "methods": item["methods"],
+                **launch_key_fields, "methods": item["methods"],
                 "worker_launch_id": worker_id,
                 "console_log": item["console_log"],
                 "method_phase": item_method_phase,
@@ -6652,8 +7095,9 @@ def _launch_worker_batch(
             "sample": sample,
             "process": None,
             "log": log_handle,
-            "key_label": label,
+            **launch_key_fields,
             "methods": list(item["methods"]),
+            "console_log": item["console_log"],
             "target_round_trips": args.num_round_trips,
             "resume_authorization": authorization,
             "worker_launch_id": worker_id,
@@ -6688,7 +7132,7 @@ def _launch_worker_batch(
             dispatch_log,
             {
                 "event": "launch", "sample": sample,
-                "key_label": label, "methods": item["methods"],
+                **launch_key_fields, "methods": item["methods"],
                 "pid": process.pid, "worker_launch_id": worker_id,
                 "console_log": item["console_log"],
                 "method_phase": item_method_phase,
@@ -6705,10 +7149,50 @@ def _launch_worker_batch(
     return list(batch_running)
 
 
-def _take_available_assignments(pending_by_key, running, slots_per_key):
+def _append_key_failover_assignment(
+        dispatch_log, item, destination_label, failover_counts):
+    source_label = item["key_label"]
+    original_label = _original_key_label(item)
+    sample = item["sample"]
+    next_count = failover_counts.get(sample, _failover_count(item)) + 1
+    assigned = dict(item)
+    assigned.update({
+        "key_label": destination_label,
+        "original_key_label": original_label,
+        "prior_key_label": source_label,
+        "failover_count": next_count,
+        "failover_reason": DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+    })
+    failover_counts[sample] = next_count
+    append_jsonl_locked(
+        dispatch_log,
+        {
+            "event": "key_failover_assigned",
+            "sample": sample,
+            "from_key_label": source_label,
+            "to_key_label": destination_label,
+            "reason": DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+            "failover_count": next_count,
+            "original_key_label": original_label,
+            "created_at": datetime.now().astimezone().isoformat(
+                timespec="seconds"),
+        },
+    )
+    return assigned
+
+
+def _take_available_assignments(
+        pending_by_key, running, slots_per_key, *,
+        quarantined_keys=None, handoff_fifo=None, dispatch_log=None,
+        failover_counts=None):
     """Pop stable per-key FIFO work for every currently free key slot."""
     if not _is_exact_int(slots_per_key) or slots_per_key < 1:
         raise RuntimeError("queue slots_per_key must be >= 1")
+    quarantined_keys = set(quarantined_keys or ())
+    handoff_fifo = handoff_fifo if handoff_fifo is not None else []
+    failover_counts = failover_counts if failover_counts is not None else {}
+    if handoff_fifo and dispatch_log is None:
+        raise RuntimeError("handoff failover requires a dispatch log")
     running_counts = {}
     for item in running.values():
         label = item.get("key_label")
@@ -6719,9 +7203,219 @@ def _take_available_assignments(pending_by_key, running, slots_per_key):
         if free < 0:
             raise RuntimeError(
                 f"per-key concurrency exceeded before refill: {label}")
+        if label in quarantined_keys:
+            continue
         for _index in range(min(free, len(pending))):
             batch.append(pending.pop(0))
+            free -= 1
+        while free > 0 and handoff_fifo:
+            batch.append(_append_key_failover_assignment(
+                dispatch_log, handoff_fifo.pop(0), label, failover_counts))
+            free -= 1
     return batch
+
+
+def _append_key_quarantine(
+        dispatch_log, key_label, trigger_sample, trigger_item, evidence,
+        pending_by_key, handoff_fifo, quarantined_keys,
+        quota_observation_counts):
+    observation_index = quota_observation_counts.get(key_label, 0) + 1
+    quota_observation_counts[key_label] = observation_index
+    first_observation = key_label not in quarantined_keys
+    if first_observation:
+        quarantined_keys.add(key_label)
+    quarantine_index = len(quarantined_keys)
+    record = {
+        "event": (
+            "key_quarantined" if first_observation
+            else "key_quota_observed"),
+        "key_label": key_label,
+        "reason": DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+        "observation_index": observation_index,
+        "trigger_sample": trigger_sample,
+        "trigger_worker_launch_id": trigger_item.get(
+            "worker_launch_id"),
+        "trigger_request_id": evidence.get("request_id"),
+        "trigger_http_attempt_count": evidence.get(
+            "http_attempt_count"),
+        "api_row": evidence.get("api_row"),
+        "api_row_count": evidence.get("api_row_count"),
+        "api_row_sha256": evidence.get("api_row_sha256"),
+        "sample_outcome_row": evidence.get("sample_outcome_row"),
+        "sample_outcome_sha256": evidence.get("sample_outcome_sha256"),
+        "sample_outcome_created_at": evidence.get(
+            "sample_outcome_created_at"),
+        "created_at": datetime.now().astimezone().isoformat(
+            timespec="seconds"),
+    }
+    if first_observation:
+        record.update({
+            "quarantine_index": quarantine_index,
+            "quarantined_key_count": quarantine_index,
+        })
+    append_jsonl_locked(
+        dispatch_log,
+        record,
+    )
+    if not first_observation:
+        return False
+    queued = pending_by_key.get(key_label) or []
+    pending_by_key[key_label] = []
+    handoff_fifo.extend(queued)
+    return True
+
+
+def _restore_key_failover_queue_state(
+        manifest, dispatch_rows, assignments, keys):
+    """Rebuild durable quarantine and per-sample routing before any launch."""
+    key_labels = list(keys)
+    if (not key_labels or len(key_labels) != len(set(key_labels))
+            or any(not isinstance(label, str) or not label
+                   for label in key_labels)):
+        raise RuntimeError("runtime key labels are invalid")
+    _manifest_samples, manifest_key_by_sample, manifest_errors = (
+        _deepseek_manifest_original_keys(manifest)
+    )
+    if manifest_errors:
+        raise RuntimeError("; ".join(manifest_errors))
+
+    runtime_assignment_by_sample = {}
+    for item in assignments:
+        sample = item.get("sample")
+        label = item.get("key_label")
+        if (sample not in manifest_key_by_sample
+                or sample in runtime_assignment_by_sample
+                or label not in keys):
+            raise RuntimeError("worker queue assignment identity is invalid")
+        runtime_assignment_by_sample[sample] = label
+
+    quarantined_keys = set()
+    quota_observation_counts = {}
+    failover_counts = {sample: 0 for sample in manifest_key_by_sample}
+    current_key_by_sample = {}
+    routing_origin_by_sample = {}
+    latest_key_fields = {}
+    has_failover_history = any(
+        row.get("event") in {
+            "key_quarantined", "key_quota_observed",
+            "key_failover_assigned",
+        }
+        for row in dispatch_rows
+    )
+    if not has_failover_history:
+        current_key_by_sample.update(runtime_assignment_by_sample)
+        routing_origin_by_sample.update(runtime_assignment_by_sample)
+    for row in dispatch_rows:
+        event = row.get("event")
+        if event in {"key_quarantined", "key_quota_observed"}:
+            label = row.get("key_label")
+            expected_observation = quota_observation_counts.get(label, 0) + 1
+            if (not isinstance(label, str) or not label
+                    or row.get("reason")
+                    != DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON
+                    or row.get("observation_index") != expected_observation
+                    or (event == "key_quarantined"
+                        and label in quarantined_keys)
+                    or (event == "key_quota_observed"
+                        and label not in quarantined_keys)):
+                raise RuntimeError(
+                    "durable key quarantine history is invalid")
+            quota_observation_counts[label] = expected_observation
+            quarantined_keys.add(label)
+            continue
+        if event == "key_failover_assigned":
+            sample = row.get("sample")
+            source = row.get("from_key_label")
+            destination = row.get("to_key_label")
+            count = row.get("failover_count")
+            if sample not in manifest_key_by_sample:
+                raise RuntimeError("durable key failover history is invalid")
+            if sample not in current_key_by_sample and count == 1:
+                current_key_by_sample[sample] = source
+                routing_origin_by_sample[sample] = source
+            if (sample not in current_key_by_sample
+                    or source != current_key_by_sample[sample]
+                    or source not in quarantined_keys
+                    or not isinstance(destination, str) or not destination
+                    or destination in quarantined_keys
+                    or count != failover_counts[sample] + 1
+                    or row.get("original_key_label")
+                    != routing_origin_by_sample.get(sample)
+                    or row.get("reason")
+                    != DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON):
+                raise RuntimeError("durable key failover history is invalid")
+            failover_counts[sample] = count
+            current_key_by_sample[sample] = destination
+            latest_key_fields[sample] = {
+                "key_label": destination,
+                "original_key_label": routing_origin_by_sample[sample],
+                "prior_key_label": source,
+                "failover_count": count,
+                "failover_reason": DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+            }
+            continue
+        if event not in {"launch", "launch_intent"}:
+            continue
+        if not has_failover_history:
+            continue
+        sample = row.get("sample")
+        if sample not in manifest_key_by_sample or "failover_count" not in row:
+            continue
+        fields = _worker_key_launch_fields(row)
+        if fields["failover_count"] == 0 and sample not in current_key_by_sample:
+            current_key_by_sample[sample] = fields["key_label"]
+            routing_origin_by_sample[sample] = fields["key_label"]
+        if (fields["failover_count"] != failover_counts[sample]
+                or fields["key_label"] != current_key_by_sample[sample]
+                or fields["original_key_label"]
+                != routing_origin_by_sample[sample]):
+            raise RuntimeError("durable key launch history is invalid")
+        latest_key_fields[sample] = fields
+
+    pending_by_key = {label: [] for label in key_labels}
+    handoff_fifo = []
+    seen_samples = set()
+    selected_failover_counts = {}
+    for source_item in assignments:
+        sample = source_item.get("sample")
+        if (sample not in manifest_key_by_sample or sample in seen_samples):
+            raise RuntimeError("worker queue assignment identity is invalid")
+        seen_samples.add(sample)
+        count = failover_counts[sample]
+        item = dict(source_item)
+        if sample not in current_key_by_sample:
+            current_key_by_sample[sample] = item["key_label"]
+            routing_origin_by_sample[sample] = item["key_label"]
+        if count:
+            fields = latest_key_fields.get(sample)
+            if (not isinstance(fields, dict)
+                    or fields.get("failover_count") != count):
+                raise RuntimeError(
+                    "durable key failover launch provenance is incomplete")
+            item.update(fields)
+        else:
+            item.update({
+                "key_label": current_key_by_sample[sample],
+                "original_key_label": routing_origin_by_sample[sample],
+                "prior_key_label": None,
+                "failover_count": 0,
+                "failover_reason": None,
+            })
+        selected_failover_counts[sample] = count
+        if item["key_label"] in quarantined_keys:
+            handoff_fifo.append(item)
+        else:
+            if item["key_label"] not in pending_by_key:
+                raise RuntimeError(
+                    "active routing key is missing at runtime")
+            pending_by_key[item["key_label"]].append(item)
+    return {
+        "pending_by_key": pending_by_key,
+        "handoff_fifo": handoff_fifo,
+        "quarantined_keys": quarantined_keys,
+        "quota_observation_counts": quota_observation_counts,
+        "failover_counts": selected_failover_counts,
+    }
 
 
 def _run_worker_queue(
@@ -6732,17 +7426,35 @@ def _run_worker_queue(
     """Drain stable per-key FIFO queues without a cross-key wave barrier."""
     if running:
         raise RuntimeError("cannot start a worker queue while workers are active")
-    pending_by_key = {}
-    seen_samples = set()
-    for item in assignments:
-        sample = item.get("sample")
-        label = item.get("key_label")
-        if (not isinstance(sample, str) or not sample
-                or sample in seen_samples
-                or not isinstance(label, str) or not label):
-            raise RuntimeError("worker queue assignment identity is invalid")
-        seen_samples.add(sample)
-        pending_by_key.setdefault(label, []).append(item)
+    if args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
+        restored = _restore_key_failover_queue_state(
+            inspection_manifest, _read_jsonl(dispatch_log), assignments, keys)
+    else:
+        pending_by_key = {}
+        failover_counts = {}
+        seen_samples = set()
+        for source_item in assignments:
+            sample = source_item.get("sample")
+            label = source_item.get("key_label")
+            if (not isinstance(sample, str) or not sample
+                    or sample in seen_samples
+                    or not isinstance(label, str) or not label):
+                raise RuntimeError("worker queue assignment identity is invalid")
+            seen_samples.add(sample)
+            item = dict(source_item)
+            item.setdefault("original_key_label", label)
+            item.setdefault("failover_count", 0)
+            pending_by_key.setdefault(label, []).append(item)
+            failover_counts[sample] = _failover_count(item)
+        restored = {
+            "pending_by_key": pending_by_key,
+            "handoff_fifo": [],
+            "quarantined_keys": set(),
+            "quota_observation_counts": {},
+            "failover_counts": failover_counts,
+        }
+    pending_by_key = restored["pending_by_key"]
+    failover_counts = restored["failover_counts"]
     phases = {item.get("method_phase") for item in assignments}
     if len(phases) > 1:
         raise RuntimeError("one worker queue cannot mix method phases")
@@ -6763,10 +7475,13 @@ def _run_worker_queue(
         },
     )
     refill_index = 0
+    quarantined_keys = restored["quarantined_keys"]
+    quota_observation_counts = restored["quota_observation_counts"]
+    handoff_fifo = restored["handoff_fifo"]
     last_report = 0.0
     last_inspection = {
         "errors": [], "api_calls": 0, "preservation_violations": 0}
-    while running or any(pending_by_key.values()):
+    while running or any(pending_by_key.values()) or handoff_fifo:
         # Recheck the durable stop latch at the refill boundary.  The check
         # after each process poll protects already-running workers, while this
         # one closes the narrow window between a clean post-exit inspection
@@ -6782,8 +7497,16 @@ def _run_worker_queue(
                 + ", ".join(conditions)
             )
         batch = _take_available_assignments(
-            pending_by_key, running, slots_per_key)
+            pending_by_key, running, slots_per_key,
+            quarantined_keys=quarantined_keys,
+            handoff_fifo=handoff_fifo,
+            dispatch_log=dispatch_log,
+            failover_counts=failover_counts)
         if batch:
+            for item in batch:
+                if _failover_count(item) > 0:
+                    infrastructure_incomplete_samples.discard(
+                        item["sample"])
             refill_index += 1
             if args.campaign_role == "confirmation":
                 evaluate_confirmation_known_usage_gate(
@@ -6812,8 +7535,26 @@ def _run_worker_queue(
                 },
             )
         if not running:
-            if any(pending_by_key.values()):
-                raise RuntimeError("worker queue cannot make progress")
+            if any(pending_by_key.values()) or handoff_fifo:
+                stranded = sorted({
+                    item["sample"]
+                    for items in pending_by_key.values()
+                    for item in items
+                } | {item["sample"] for item in handoff_fifo})
+                infrastructure_incomplete_samples.update(stranded)
+                append_jsonl_locked(
+                    dispatch_log,
+                    {
+                        "event": "queue_exhausted_no_healthy_key",
+                        "reason": DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+                        "method_phase": method_phase,
+                        "quarantined_key_labels": sorted(
+                            quarantined_keys),
+                        "pending_samples": stranded,
+                        "created_at": datetime.now().astimezone().isoformat(
+                            timespec="seconds"),
+                    },
+                )
             break
 
         time.sleep(args.poll_interval)
@@ -6829,10 +7570,20 @@ def _run_worker_queue(
             exited.append({"sample": sample, "disposition": disposition})
             if disposition == "infrastructure_incomplete":
                 infrastructure_incomplete_samples.add(sample)
+                evidence = _deepseek_monthly_quota_quarantine_evidence(
+                    out_dir, sample, item)
+                if evidence is not None:
+                    handoff_fifo.append(dict(item))
+                    _append_key_quarantine(
+                        dispatch_log, item["key_label"], sample, item,
+                        evidence, pending_by_key, handoff_fifo,
+                        quarantined_keys, quota_observation_counts)
                 continue
             if disposition == "evaluator_incomplete":
+                infrastructure_incomplete_samples.discard(sample)
                 evaluator_incomplete_samples.add(sample)
                 continue
+            infrastructure_incomplete_samples.discard(sample)
             completed_samples.add(sample)
             completed_in_poll.add(sample)
         if exited:

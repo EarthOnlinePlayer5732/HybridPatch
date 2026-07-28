@@ -62,6 +62,10 @@ METADATA_EVENT_PENDING_SCHEMA = "anchorpatch.run_metadata_event_pending/1"
 METADATA_EVENT_PENDING_FILENAME = "run_metadata_event_pending.json"
 METADATA_EVENT_RECOVERY_SCHEMA = "anchorpatch.run_metadata_event_recovery/1"
 METADATA_EVENT_RECOVERY_DIRECTORY = "run_metadata_event_recoveries"
+METADATA_EVENT_RECOVERY_REGISTRY_SCHEMA = (
+    "anchorpatch.run_metadata_event_recovery_registry/1"
+)
+METADATA_EVENT_RECOVERY_REGISTRY_FILENAME = "_registry.json"
 RUN_METADATA_STORAGE_EVENT_V1 = "event_v1"
 RUN_METADATA_TERMINAL_STATUSES = frozenset({
     "finished", "failed", "evaluator_incomplete",
@@ -233,6 +237,22 @@ def append_jsonl_locked(path, record):
     that condition is contention rather than a failed model/transport call.
     ``portalocker.Lock`` retains fail-closed behavior after a bounded wait.
     """
+    append_jsonl_records_locked(path, [record])
+
+
+def append_jsonl_records_locked(path, records):
+    """Durably append one ordered cohort behind a single file lock/fsync.
+
+    Callers may use this only when the complete cohort is one durability
+    barrier.  API/attempt/outcome events whose individual publication order is
+    semantically observable continue to use ``append_jsonl_locked``.
+    """
+    lines = [
+        json.dumps(record, ensure_ascii=False) + "\n"
+        for record in records
+    ]
+    if not lines:
+        return
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with portalocker.Lock(
         path,
@@ -242,7 +262,7 @@ def append_jsonl_locked(path, record):
         flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
         encoding="utf-8",
     ) as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        f.write("".join(lines))
         f.flush()
         os.fsync(f.fileno())
 
@@ -7558,6 +7578,10 @@ def _run_metadata_storage_mode_unlocked(out_dir, metadata_path):
     snapshot_exists = os.path.exists(metadata_path)
     receipt_exists = os.path.exists(
         _run_metadata_projection_receipt_path(out_dir))
+    recovery_dir = os.path.join(out_dir, METADATA_EVENT_RECOVERY_DIRECTORY)
+    recovery_dir_exists = os.path.exists(recovery_dir)
+    registry_exists = os.path.isfile(
+        _run_metadata_event_recovery_registry_path(out_dir))
     declared_storage = None
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     if os.path.isfile(manifest_path):
@@ -7574,6 +7598,23 @@ def _run_metadata_storage_mode_unlocked(out_dir, metadata_path):
         if declared_storage not in {None, RUN_METADATA_STORAGE_EVENT_V1}:
             raise RuntimeError("dispatch manifest run metadata storage is invalid")
     if events_exists or pending_exists:
+        return "event"
+    if recovery_dir_exists:
+        if not registry_exists:
+            fresh_empty_directory = (
+                os.path.isdir(recovery_dir)
+                and not os.listdir(recovery_dir)
+                and not snapshot_exists
+                and not receipt_exists
+            )
+            if not fresh_empty_directory:
+                raise RuntimeError(
+                    "run metadata event recovery registry is missing")
+            return "event"
+        registry = _read_run_metadata_event_recovery_registry(out_dir)
+        if registry["receipts"] or snapshot_exists or receipt_exists:
+            raise RuntimeError(
+                "run metadata recovery registry requires a missing event ledger")
         return "event"
     if receipt_exists:
         raise RuntimeError(
@@ -7988,6 +8029,142 @@ def _read_run_metadata_event_pending(out_dir):
     return pending, event_bytes, event_rows[0]
 
 
+def _run_metadata_event_recovery_registry_path(out_dir):
+    return os.path.join(
+        out_dir, METADATA_EVENT_RECOVERY_DIRECTORY,
+        METADATA_EVENT_RECOVERY_REGISTRY_FILENAME)
+
+
+def _read_run_metadata_event_recovery_registry(out_dir, *, required=True):
+    path = _run_metadata_event_recovery_registry_path(out_dir)
+    if not os.path.isfile(path):
+        if required:
+            raise RuntimeError(
+                "run metadata event recovery registry is missing")
+        return None
+    try:
+        with open(path, encoding="utf-8") as handle:
+            registry = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(
+            "run metadata event recovery registry is invalid") from exc
+    receipts = registry.get("receipts") if isinstance(registry, dict) else None
+    required_keys = {
+        "schema", "events_file", "event_schema", "receipt_schema", "receipts",
+    }
+    if (not isinstance(registry, dict) or set(registry) != required_keys
+            or registry.get("schema")
+            != METADATA_EVENT_RECOVERY_REGISTRY_SCHEMA
+            or registry.get("events_file") != METADATA_EVENTS_FILENAME
+            or registry.get("event_schema") != METADATA_EVENT_SCHEMA
+            or registry.get("receipt_schema") != METADATA_EVENT_RECOVERY_SCHEMA
+            or not isinstance(receipts, list)):
+        raise RuntimeError("run metadata event recovery registry is invalid")
+    validated = []
+    prior_index = 0
+    for descriptor in receipts:
+        event_index = (
+            descriptor.get("event_index")
+            if isinstance(descriptor, dict) else None)
+        filename = (
+            descriptor.get("filename")
+            if isinstance(descriptor, dict) else None)
+        sha256 = (
+            descriptor.get("sha256")
+            if isinstance(descriptor, dict) else None)
+        if (not isinstance(descriptor, dict)
+                or set(descriptor) != {"event_index", "filename", "sha256"}
+                or not isinstance(event_index, int)
+                or isinstance(event_index, bool) or event_index <= prior_index
+                or not isinstance(filename, str)
+                or not re.fullmatch(r"[0-9]{8}_[0-9a-f]{16}\.json", filename)
+                or int(filename[:8]) != event_index
+                or not isinstance(sha256, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", sha256)):
+            raise RuntimeError(
+                "run metadata event recovery registry is invalid")
+        validated.append(dict(descriptor))
+        prior_index = event_index
+    return {**registry, "receipts": validated}
+
+
+def _empty_run_metadata_event_recovery_registry():
+    return {
+        "schema": METADATA_EVENT_RECOVERY_REGISTRY_SCHEMA,
+        "events_file": METADATA_EVENTS_FILENAME,
+        "event_schema": METADATA_EVENT_SCHEMA,
+        "receipt_schema": METADATA_EVENT_RECOVERY_SCHEMA,
+        "receipts": [],
+    }
+
+
+def _ensure_run_metadata_event_recovery_registry_unlocked(out_dir):
+    recovery_dir = os.path.join(out_dir, METADATA_EVENT_RECOVERY_DIRECTORY)
+    created = False
+    try:
+        os.mkdir(recovery_dir)
+        created = True
+    except FileExistsError:
+        if not os.path.isdir(recovery_dir):
+            raise RuntimeError(
+                "run metadata event recovery directory is invalid")
+    registry = _read_run_metadata_event_recovery_registry(
+        out_dir, required=False)
+    if registry is not None:
+        return registry
+    fresh_unfinished_store = (
+        not os.path.exists(_run_metadata_events_path(out_dir))
+        and not os.path.exists(_run_metadata_event_pending_path(out_dir))
+        and not os.path.exists(os.path.join(out_dir, "run_metadata.jsonl"))
+        and not os.path.exists(_run_metadata_projection_receipt_path(out_dir))
+        and not os.listdir(recovery_dir)
+    )
+    if not created and not fresh_unfinished_store:
+        raise RuntimeError(
+            "run metadata event recovery registry is missing")
+    receipt_names = sorted(
+        name for name in os.listdir(recovery_dir)
+        if name.endswith(".json")
+        and name != METADATA_EVENT_RECOVERY_REGISTRY_FILENAME
+    )
+    if receipt_names:
+        # A projection receipt only binds the recovery files that happened to
+        # be present when that cache was published.  Older code could publish
+        # count=0 after a completed recovery receipt was lost, so it cannot
+        # prove that an unregistered set is complete.  Only the still-present
+        # pending WAL may initialize an empty registry; any receipt without a
+        # registry requires explicit audited recovery.
+        raise RuntimeError(
+            "run metadata event recovery registry is missing")
+    registry = _empty_run_metadata_event_recovery_registry()
+    write_json_atomic(
+        _run_metadata_event_recovery_registry_path(out_dir), registry)
+    return registry
+
+
+def _register_run_metadata_event_recovery_receipt_unlocked(
+        out_dir, descriptor):
+    registry = _read_run_metadata_event_recovery_registry(out_dir)
+    receipts = list(registry["receipts"])
+    event_index = descriptor.get("event_index")
+    matches = [
+        item for item in receipts if item["event_index"] == event_index
+    ]
+    if matches:
+        if len(matches) == 1 and matches[0] == descriptor:
+            return False
+        raise RuntimeError(
+            "run metadata event recovery registry conflicts")
+    if receipts and event_index <= receipts[-1]["event_index"]:
+        raise RuntimeError(
+            "run metadata event recovery registry order is invalid")
+    updated = dict(registry)
+    updated["receipts"] = receipts + [dict(descriptor)]
+    write_json_atomic(
+        _run_metadata_event_recovery_registry_path(out_dir), updated)
+    return True
+
+
 def _reconcile_run_metadata_event_pending_unlocked(out_dir):
     loaded = _read_run_metadata_event_pending(out_dir)
     if loaded is None:
@@ -8037,8 +8214,8 @@ def _reconcile_run_metadata_event_pending_unlocked(out_dir):
         raise RuntimeError(
             "run metadata event ledger regressed after recovery preparation")
 
+    _ensure_run_metadata_event_recovery_registry_unlocked(out_dir)
     recovery_dir = os.path.join(out_dir, METADATA_EVENT_RECOVERY_DIRECTORY)
-    os.makedirs(recovery_dir, exist_ok=True)
     receipt_path = os.path.join(
         recovery_dir,
         f"{pending['event_index']:08d}_{pending['event_sha256'][:16]}.json",
@@ -8124,6 +8301,11 @@ def _reconcile_run_metadata_event_pending_unlocked(out_dir):
         receipt["state"] = "completed"
         receipt["completed_at"] = receipt["prepared_at"]
         write_json_atomic(receipt_path, receipt)
+    _register_run_metadata_event_recovery_receipt_unlocked(out_dir, {
+        "event_index": pending["event_index"],
+        "filename": os.path.basename(receipt_path),
+        "sha256": _sha256_file(receipt_path),
+    })
     _clear_run_metadata_event_pending(out_dir)
     return True
 
@@ -8137,6 +8319,7 @@ def _read_run_metadata_event_recovery_receipts(out_dir, events_path):
         names = sorted(
             name for name in os.listdir(recovery_dir)
             if name.endswith(".json")
+            and name != METADATA_EVENT_RECOVERY_REGISTRY_FILENAME
         )
         with open(events_path, "rb") as handle:
             ledger = handle.read()
@@ -8275,6 +8458,14 @@ def _read_run_metadata_event_recovery_receipts(out_dir, events_path):
             "filename": name,
             "sha256": _sha256_file(path),
         })
+    registry = _read_run_metadata_event_recovery_registry(
+        out_dir, required=False)
+    if registry is None:
+        raise RuntimeError(
+            "run metadata event recovery registry is missing")
+    if registry["receipts"] != validated:
+        raise RuntimeError(
+            "run metadata event recovery registry does not match receipts")
     return validated
 
 
@@ -8297,6 +8488,11 @@ def _run_metadata_event_recovery_manifest(receipts, *, event_count):
 
 def _append_run_metadata_event_unlocked(out_dir, event):
     _reconcile_run_metadata_event_pending_unlocked(out_dir)
+    # The registry is also the durable event-store marker for standalone
+    # runners that have no dispatch manifest.  Publishing it before the first
+    # event prevents a later events+projection-receipt loss from silently
+    # reclassifying the compatibility snapshot as legacy metadata.
+    _ensure_run_metadata_event_recovery_registry_unlocked(out_dir)
     events_path = _run_metadata_events_path(out_dir)
     events = (
         _read_run_metadata_events_strict(events_path)
@@ -8958,6 +9154,45 @@ def interrupt_audited_running_invocations(
     return changed
 
 
+def _dispatch_key_metadata_from_env():
+    dispatch_key_label = os.environ.get("ANCHORPATCH_DISPATCH_KEY_LABEL")
+    original_key_label = os.environ.get("ANCHORPATCH_ORIGINAL_KEY_LABEL")
+    failover_count_raw = os.environ.get("ANCHORPATCH_KEY_FAILOVER_COUNT")
+    prior_key_label = os.environ.get("ANCHORPATCH_PRIOR_KEY_LABEL")
+    failover_reason = os.environ.get("ANCHORPATCH_KEY_FAILOVER_REASON")
+    values = (
+        dispatch_key_label, original_key_label, failover_count_raw,
+        prior_key_label, failover_reason,
+    )
+    if all(value is None for value in values):
+        return None
+    if (not dispatch_key_label or not original_key_label
+            or failover_count_raw is None):
+        raise RuntimeError("dispatch key metadata is incomplete")
+    try:
+        failover_count = int(failover_count_raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            "dispatch key failover count is invalid") from exc
+    if str(failover_count) != failover_count_raw or failover_count < 0:
+        raise RuntimeError("dispatch key failover count is invalid")
+    if failover_count == 0:
+        if (dispatch_key_label != original_key_label
+                or prior_key_label is not None
+                or failover_reason is not None):
+            raise RuntimeError("dispatch key failover provenance is invalid")
+    elif (not prior_key_label or not failover_reason
+            or dispatch_key_label == prior_key_label):
+        raise RuntimeError("dispatch key failover provenance is invalid")
+    return {
+        "dispatch_key_label": dispatch_key_label,
+        "original_key_label": original_key_label,
+        "prior_key_label": prior_key_label,
+        "failover_count": failover_count,
+        "failover_reason": failover_reason,
+    }
+
+
 def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
                         seed, model, distractor, max_tokens, notes="", printing=True,
                         context_shuffle_seeded=False,
@@ -9060,6 +9295,7 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
     )
     invocation_now = _aware_now()
     invocation_id = uuid.uuid4().hex
+    dispatch_key_metadata = _dispatch_key_metadata_from_env()
     resume_semantic_call_id = os.environ.get(
         "ANCHORPATCH_INFRASTRUCTURE_RESUME_SEMANTIC_CALL_ID")
     resume_index_raw = os.environ.get(
@@ -9359,6 +9595,8 @@ def append_run_metadata(out_dir, *, command, samples, methods, num_round_trips,
         if interrupted_resume_evidence is not None:
             rec["interrupted_resume_authorization"] = (
                 interrupted_resume_evidence)
+        if dispatch_key_metadata is not None:
+            rec.update(dispatch_key_metadata)
         rec.update(provider_runtime)
         rec["context_shuffle_seeded"] = bool(context_shuffle_seeded)
         rec["context_shuffle_seed_version"] = (

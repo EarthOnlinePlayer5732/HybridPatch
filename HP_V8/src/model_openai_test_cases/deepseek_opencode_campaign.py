@@ -6,6 +6,7 @@ from .deepseek_campaign_group02 import DeepSeekOpenCodeCampaignGroup02Mixin
 from .deepseek_campaign_group03 import DeepSeekOpenCodeCampaignGroup03Mixin
 from .deepseek_campaign_group04 import DeepSeekOpenCodeCampaignGroup04Mixin
 from .deepseek_campaign_group05 import DeepSeekOpenCodeCampaignGroup05Mixin
+from .deepseek_campaign_group06 import DeepSeekOpenCodeCampaignGroup06Mixin
 
 
 class DeepSeekOpenCodeCampaignTestsMixin(
@@ -15,5 +16,6 @@ class DeepSeekOpenCodeCampaignTestsMixin(
     DeepSeekOpenCodeCampaignGroup03Mixin,
     DeepSeekOpenCodeCampaignGroup04Mixin,
     DeepSeekOpenCodeCampaignGroup05Mixin,
+    DeepSeekOpenCodeCampaignGroup06Mixin,
 ):
     pass

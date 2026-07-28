@@ -1,7 +1,7 @@
 """Run the HP_V8 infrastructure regressions by failure domain.
 
 This is a selection layer over the existing unittest classes.  It does not
-move, rename, wrap, or duplicate any of the 251 compatibility test methods.
+move, rename, wrap, or duplicate any compatibility test method.
 """
 
 import argparse

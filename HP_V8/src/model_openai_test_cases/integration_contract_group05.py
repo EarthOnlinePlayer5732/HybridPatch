@@ -632,6 +632,21 @@ class IntegrationContractGroup05Mixin:
                 run_meta.read_quiescent_run_metadata_snapshot(out_dir),
                 final,
             )
+            registry_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY,
+                run_meta.METADATA_EVENT_RECOVERY_REGISTRY_FILENAME)
+            self.assertTrue(registry_path.is_file())
+            pathlib.Path(events_path).unlink()
+            pathlib.Path(receipt_path).unlink()
+            with self.assertRaisesRegex(RuntimeError, "missing event ledger"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+            with self.assertRaisesRegex(RuntimeError, "missing event ledger"):
+                run_meta.append_run_metadata(out_dir, **kwargs)
+            registry_path.unlink()
+            with self.assertRaisesRegex(RuntimeError, "registry is missing"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+            with self.assertRaisesRegex(RuntimeError, "registry is missing"):
+                run_meta.append_run_metadata(out_dir, **kwargs)
 
     def test_run_metadata_event_snapshot_failure_keeps_authoritative_terminal(self):
         kwargs = run_metadata_kwargs(
@@ -828,7 +843,7 @@ class IntegrationContractGroup05Mixin:
                 )
                 recovery_paths = list(pathlib.Path(
                     out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY
-                ).glob("*.json"))
+                ).glob("[0-9]*.json"))
                 self.assertEqual(len(recovery_paths), 1)
                 recovery = json.loads(recovery_paths[0].read_text(
                     encoding="utf-8"))
@@ -878,10 +893,31 @@ class IntegrationContractGroup05Mixin:
                         out_dir, invocation["invocation_id"])
             recovery_path = next(pathlib.Path(
                 out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY
-            ).glob("*.json"))
+            ).glob("[0-9]*.json"))
             prepared = json.loads(recovery_path.read_text(encoding="utf-8"))
             self.assertEqual(prepared["state"], "prepared")
             self.assertEqual(prepared["observed_suffix_size_bytes"], 7)
+            recovery_path.unlink()
+
+            def crash_before_registry(_out_dir, _descriptor):
+                raise SystemExit(
+                    "injected death after completed receipt before registry")
+
+            with mock.patch.object(
+                    run_meta,
+                    "_register_run_metadata_event_recovery_receipt_unlocked",
+                    side_effect=crash_before_registry):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+            completed_before_registry = json.loads(
+                recovery_path.read_text(encoding="utf-8"))
+            self.assertEqual(completed_before_registry["state"], "completed")
+            registry = run_meta._read_run_metadata_event_recovery_registry(
+                out_dir)
+            self.assertEqual(registry["receipts"], [])
+            self.assertTrue(pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME).exists())
             recovery_path.unlink()
 
             real_clear = run_meta._clear_run_metadata_event_pending
@@ -920,6 +956,101 @@ class IntegrationContractGroup05Mixin:
                 run_meta.read_quiescent_run_metadata_snapshot(out_dir),
                 [terminal],
             )
+
+    def test_recovery_registry_survives_pending_clear_before_projection(self):
+        kwargs = run_metadata_kwargs(
+            command="python recovery-registry-boundary-test",
+            num_round_trips=1, distractor=False)
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "registry-boundary"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
+            with mock.patch.object(
+                    run_meta, "_append_run_metadata_event_bytes",
+                    side_effect=event_append_crash(
+                        7, "injected partial event")):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+
+            real_clear = run_meta._clear_run_metadata_event_pending
+
+            def clear_then_crash(clear_out_dir):
+                real_clear(clear_out_dir)
+                raise SystemExit(
+                    "injected death after registry and pending clear")
+
+            with mock.patch.object(
+                    run_meta, "_clear_run_metadata_event_pending",
+                    side_effect=clear_then_crash):
+                with self.assertRaises(SystemExit):
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+
+            pending_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME)
+            recovery_path = next(pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY
+            ).glob("[0-9]*.json"))
+            registry_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY,
+                run_meta.METADATA_EVENT_RECOVERY_REGISTRY_FILENAME)
+            projection_path = pathlib.Path(
+                out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)
+            self.assertFalse(pending_path.exists())
+            self.assertTrue(recovery_path.is_file())
+            self.assertTrue(registry_path.is_file())
+            self.assertFalse(projection_path.exists())
+            registry = json.loads(registry_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(registry["receipts"]), 1)
+            original_receipt = recovery_path.read_bytes()
+
+            recovery_path.unlink()
+            with self.assertRaisesRegex(RuntimeError, "registry.*receipts"):
+                run_meta.reconcile_run_metadata_projection(out_dir)
+            self.assertFalse(projection_path.exists())
+
+            recovery_path.write_bytes(original_receipt)
+            self.assertTrue(run_meta.reconcile_run_metadata_projection(out_dir))
+            projection = json.loads(
+                projection_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                projection["event_recovery_receipt_count"], 1)
+
+            # A legacy /2 cache that was published after losing its only
+            # recovery receipt can be internally self-consistent at count=0.
+            # It must not bootstrap the new authoritative registry.
+            recovery_path.unlink()
+            registry_path.unlink()
+            projection["event_recovery_receipt_count"] = 0
+            projection["event_recovery_receipts_sha256"] = hashlib.sha256(
+                b"[]").hexdigest()
+            run_meta.write_json_atomic(projection_path, projection)
+            with self.assertRaisesRegex(RuntimeError, "registry is missing"):
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+            self.assertFalse(registry_path.exists())
+
+            # Simulate old code reopening that already-washed state and dying
+            # while appending a later event.  The new pending WAL must not be
+            # allowed to initialize an empty registry and thereby erase the
+            # missing earlier recovery from history.
+            with mock.patch.object(
+                    run_meta, "_read_run_metadata_event_recovery_receipts",
+                    return_value=[]), mock.patch.object(
+                        run_meta,
+                        "_ensure_run_metadata_event_recovery_registry_unlocked",
+                        return_value={}), mock.patch.object(
+                            run_meta, "_append_run_metadata_event_bytes",
+                            side_effect=event_append_crash(
+                                7, "injected later legacy pending")):
+                with self.assertRaises(SystemExit):
+                    run_meta.append_run_metadata(out_dir, **kwargs)
+            self.assertTrue(pending_path.is_file())
+            with self.assertRaisesRegex(RuntimeError, "registry is missing"):
+                run_meta.read_run_metadata_snapshot(out_dir)
+            self.assertFalse(registry_path.exists())
 
     def test_public_projection_reconcile_completes_pending_event_cuts(self):
         kwargs = run_metadata_kwargs(
@@ -973,7 +1104,7 @@ class IntegrationContractGroup05Mixin:
             self.assertEqual(terminal["status"], "finished")
             recovery_path = next(pathlib.Path(
                 out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY
-            ).glob("*.json"))
+            ).glob("[0-9]*.json"))
             projection_receipt_path = pathlib.Path(
                 out_dir, run_meta.METADATA_PROJECTION_RECEIPT_FILENAME)
             projection_receipt = json.loads(
@@ -981,6 +1112,28 @@ class IntegrationContractGroup05Mixin:
             self.assertEqual(
                 projection_receipt["event_recovery_receipt_count"], 1)
             original = recovery_path.read_bytes()
+            registry_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY,
+                run_meta.METADATA_EVENT_RECOVERY_REGISTRY_FILENAME)
+            original_registry = registry_path.read_bytes()
+
+            registry = json.loads(original_registry.decode("utf-8"))
+            registry["receipts"][0]["sha256"] = "0" * 64
+            run_meta.write_json_atomic(registry_path, registry)
+            with self.assertRaisesRegex(RuntimeError, "registry.*receipts"):
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+            registry_path.write_bytes(original_registry)
+
+            registry = json.loads(original_registry.decode("utf-8"))
+            registry["receipts"].append({
+                "event_index": 99,
+                "filename": "00000099_deadbeefdeadbeef.json",
+                "sha256": "f" * 64,
+            })
+            run_meta.write_json_atomic(registry_path, registry)
+            with self.assertRaisesRegex(RuntimeError, "registry.*receipts"):
+                run_meta.read_quiescent_run_metadata_snapshot(out_dir)
+            registry_path.write_bytes(original_registry)
 
             recovery_path.write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(
@@ -1051,7 +1204,7 @@ class IntegrationContractGroup05Mixin:
             )
 
             recovery_path.unlink()
-            with self.assertRaisesRegex(RuntimeError, "receipt is invalid"):
+            with self.assertRaisesRegex(RuntimeError, "receipt|registry"):
                 run_meta.read_quiescent_run_metadata_snapshot(out_dir)
             recovery_path.write_bytes(original)
 

@@ -22,7 +22,7 @@ class RegressionTierTests(unittest.TestCase):
         self.assertFalse(component & recovery)
         self.assertEqual(fast | component | recovery, set(all_ids))
         self.assertEqual(len(all_ids), len(set(all_ids)))
-        self.assertEqual(len(all_ids), 251)
+        self.assertEqual(len(all_ids), 261)
         self.assertTrue(all(
             test_id.startswith("test_model_openai.") for test_id in all_ids))
 

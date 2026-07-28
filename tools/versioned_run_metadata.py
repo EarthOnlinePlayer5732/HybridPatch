@@ -95,6 +95,7 @@ def read_quiescent_run_metadata(
     snapshot_path = archive / SNAPSHOT_FILENAME
     receipt_path = archive / RECEIPT_FILENAME
     pending_path = archive / PENDING_FILENAME
+    recovery_dir = archive / RECOVERY_DIRECTORY
     declared_storage = None
     manifest_path = archive / "dispatch_manifest.json"
     if manifest_path.is_file():
@@ -110,9 +111,9 @@ def read_quiescent_run_metadata(
         if declared_storage not in {None, EVENT_STORAGE_V1}:
             raise RuntimeError("dispatch manifest run metadata storage is invalid")
     if not events_path.is_file() and not pending_path.is_file():
-        if declared_storage == EVENT_STORAGE_V1:
+        if declared_storage == EVENT_STORAGE_V1 or recovery_dir.exists():
             raise RuntimeError(
-                "dispatch manifest requires a missing run metadata event ledger"
+                "event metadata marker requires a missing run metadata event ledger"
             )
         if receipt_path.exists():
             raise RuntimeError(

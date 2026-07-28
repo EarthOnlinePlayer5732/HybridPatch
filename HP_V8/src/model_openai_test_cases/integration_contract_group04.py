@@ -339,7 +339,7 @@ class IntegrationContractGroup04Mixin:
             os.remove(ack_path)
             with open(lease_path, "a+", encoding="utf-8") as lease, \
                     mock.patch.object(
-                        paired_dispatch, "append_jsonl_locked",
+                        paired_dispatch, "append_jsonl_records_locked",
                         side_effect=OSError("fsync failed")):
                 portalocker.lock(
                     lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
@@ -416,18 +416,38 @@ class IntegrationContractGroup04Mixin:
                     portalocker.lock(
                         lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
                     leases.append(lease)
+                dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+                paired_dispatch._authorize_workers(
+                    out_dir, running, task_plans, dispatch_log, 1.0)
+                authorization_rows = run_meta._read_jsonl_records_with_retry(
+                    dispatch_log)
+                self.assertEqual(
+                    [row["sample"] for row in authorization_rows],
+                    ["sample-a", "sample-b"],
+                )
+                self.assertTrue(all(
+                    os.path.isfile(path) for path in ack_paths))
+                for path in ack_paths:
+                    os.remove(path)
+                os.remove(dispatch_log)
+
                 with mock.patch.object(
-                        paired_dispatch, "append_jsonl_locked",
-                        side_effect=[None, OSError("second fsync failed")]
+                        paired_dispatch, "append_jsonl_records_locked",
+                        side_effect=OSError("cohort fsync failed")
                 ) as append:
                     with self.assertRaisesRegex(
-                            OSError, "second fsync failed"):
+                            OSError, "cohort fsync failed"):
                         paired_dispatch._authorize_workers(
                             out_dir, running, task_plans,
-                            os.path.join(out_dir, "dispatch_log.jsonl"),
+                            dispatch_log,
                             1.0,
                         )
-                    self.assertEqual(append.call_count, 2)
+                    self.assertEqual(append.call_count, 1)
+                    batched_rows = append.call_args.args[1]
+                    self.assertEqual(
+                        [row["sample"] for row in batched_rows],
+                        ["sample-a", "sample-b"],
+                    )
             finally:
                 for lease in leases:
                     portalocker.unlock(lease)

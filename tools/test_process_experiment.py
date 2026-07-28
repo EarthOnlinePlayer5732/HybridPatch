@@ -93,6 +93,39 @@ class ProcessExperimentTests(unittest.TestCase):
                     owner="HP_V8",
                 )
 
+        with tempfile.TemporaryDirectory() as directory:
+            archive = Path(directory)
+            snapshot = archive / versioned_metadata.SNAPSHOT_FILENAME
+            snapshot.write_text(
+                json.dumps({"schema": "anchorpatch.run_metadata/3"}) + "\n",
+                encoding="utf-8",
+            )
+            recovery_dir = archive / versioned_metadata.RECOVERY_DIRECTORY
+            recovery_dir.mkdir()
+            registry = recovery_dir / "_registry.json"
+            registry.write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "requires a missing"):
+                versioned_metadata.read_quiescent_run_metadata(
+                    archive,
+                    repository_root=process.ROOT,
+                    owner="HP_V8",
+                )
+            self.assertEqual(
+                versioned_metadata.run_metadata_artifact_paths(archive),
+                [snapshot, registry],
+            )
+            registry.unlink()
+            with self.assertRaisesRegex(RuntimeError, "requires a missing"):
+                versioned_metadata.read_quiescent_run_metadata(
+                    archive,
+                    repository_root=process.ROOT,
+                    owner="HP_V8",
+                )
+            self.assertEqual(
+                versioned_metadata.run_metadata_artifact_paths(archive),
+                [snapshot],
+            )
+
     def test_pending_only_event_metadata_is_not_treated_as_legacy(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory)

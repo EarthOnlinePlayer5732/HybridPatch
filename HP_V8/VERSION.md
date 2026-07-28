@@ -1062,3 +1062,65 @@ operator/provider/server/disconnect/classifier 等历史 migration。现有私�
 抽取函数以冻结前提交 `26fefbb04f28ec2d134251dccabfedd5c8527cff` 的 source/AST digest
 逐一校验，并覆盖 facade identity、字节写入和 incident 顺序。零 API 验证为独立抽取测试
 `4/4`、parent-loss 定向 `16/16`、完整基础设施回归 `251/251`；未修改历史实验目录。
+
+## 2026-07-29 DeepSeek Key 隔离与可审计补位
+
+DeepSeek OpenCode campaign 现在只对精确的月额度终态执行 Key quarantine：terminal API
+row 必须是 HTTP 429、`rate_limit`、未开始 response/generation、完整耗尽普通 retry budget，
+且最后 attempt 的直接错误对象只能包含 `type=GoUsageLimitError` 与以
+`Monthly usage limit reached.` 开头的 `message`。普通 429、502/503、timeout、nested error
+wrapper、额外错误字段或 partial stream 均不会触发 Key 级迁移。
+
+命中后 dispatcher 记录与唯一 API row、sample outcome、worker/request identity 和当时 ledger
+长度/SHA 绑定的 `key_quarantined`；同 Key 已在运行的其他 worker 后续命中时只追加连续的
+`key_quota_observed`。失败 sample 与该 Key 尚未启动的 FIFO 进入全局 handoff，健康 Key 先
+清自己的 FIFO，再按空闲 slot 持续接管 handoff，不再按 wave 等整批结束。健康但原本没有
+own-pending 的 Key 同样参与补位。所有 Key 均被隔离时只产生
+`queue_exhausted_no_healthy_key` 与 sample-local `infrastructure_incomplete` supporting
+evidence，不升级成无关样本的 campaign fatal。
+
+quarantine、observation 和每次 `key_failover_assigned` 都从 append-only dispatch log 在任何
+新 launch 前重放；恢复时保留 original/current/prior Key label、连续 failover count 与 reason，
+已写 assignment 但尚未 launch 的 crash window 不会重复分配。worker 环境、launch log、
+authorization handshake 和 run metadata 使用相同 provenance，只记录 label，不记录 Key 值。
+inspector 拒绝 quarantine 后继续 launch、重复使用 quota API row、错误 source chain、当时已
+隔离的 destination、outcome/API SHA 漂移及不连续 observation/failover count。
+
+Key label 仍是可轮换的 runtime slot：没有任何 durable failover 历史时，旧 archive 中缺少
+新 provenance 字段的 launch 保持可读，合法的 count-0 Key rotation 也按新的 routing epoch
+解释；一旦已有 quarantine/failover 历史，后续 launch 必须完整参加显式 source chain，不能
+靠旧 schema 或隐式 label 映射跨越恢复边界。
+
+## 2026-07-29 metadata recovery receipt registry
+
+WAL recovery receipt 不再只靠“当前目录扫描结果”证明完整。每份 completed receipt 在清除
+pending 前，必须先把 `{event_index, filename, sha256}` 单调登记到
+`run_metadata_event_recoveries/_registry.json`。reader 要求 registry 与逐字节验证后的 receipt
+集合完全相等；receipt 丢失、额外 descriptor、descriptor SHA 漂移、顺序倒退或 registry
+缺失全部 fail closed。这样即使 pending 已 unlink、首份 projection 尚未发布，删除 receipt
+也不能再被误解释成零 recovery。
+
+旧 projection `/2` 只证明发布时“看见的当前集合”，无法证明此前没有 receipt 丢失，因此
+不得自动 bootstrap registry。特别是旧实现可能在 receipt 已丢失后发布合法的
+`count=0/hash([])`，甚至随后再留下新的 pending；这些状态现在都明确拒绝，必须走独立审计
+授权，而不是由 reader 自动迁移。新 event store 从第一条 event 前就持久创建空 registry，
+它同时为没有 dispatch manifest 的 standalone runner 标记 event mode；runtime 与离线
+version-local reader 在 snapshot 尚在而 event ledger/receipt 被删除时都不再降级为 legacy。
+恢复固定按 prepared receipt → ledger completion → completed receipt → registry → pending
+clear 的顺序幂等执行。
+
+新增/扩展回归覆盖 exact quota 分类、work-conserving handoff、重复 quota observation、全 Key
+耗尽、durable queue replay、Key rotation/legacy launch、API/outcome/provenance 篡改，以及
+completed receipt→registry、registry→pending clear、pending clear→projection 三个进程死亡
+边界、registry missing/extra/hash tamper 和旧 `/2` 洗白反例。基础设施兼容集合现为
+`52 fast + 126 component + 83 recovery = 261`。本轮未调用 provider API，也未修改历史实验
+目录或冻结结果。
+
+共享 `api_calls.jsonl`、dispatch/sample outcome 等台账仍使用既有逐行锁与 durability
+边界；JSON 序列化已移到 EX lock 之前以缩短临界区。唯一合批的是同一启动 cohort 的
+`worker_authorized`：这些行本来就必须全部 durable 后才允许发布任何 ACK，现在保持原顺序、
+单 EX lock、一次 `flush+fsync`，失败时仍为零 ACK。其余每行 `flush+fsync` 不变。本轮没有把
+它们伪装成通用 batch 优化：真正消除多 worker 锁竞争需要 per-worker
+分片、单 writer 或 SQLite WAL，并同步升级唯一键、合并顺序、recovery reader、inspector、
+postprocess 与旧 archive 兼容，属于单独的 evidence-format migration，不能与当前 failover/
+registry 修复混在一个未经端到端验证的补丁中。
