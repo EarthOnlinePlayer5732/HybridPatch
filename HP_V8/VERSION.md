@@ -822,3 +822,59 @@ choice、partial EOF/exception 仍分类为 `incomplete_stream` 并丢弃 partia
 DeepSeek 定向 mock 回归各 18/18 PASS。新正式 full234 必须使用 `/5`、RT10 和新
 out_dir；Dispatcher 保留 `/4` 只读历史审计，但不允许把 `/4` campaign 混入或
 升级为 `/5`。
+
+## 2026-07-28 DeepSeek `/5` quota pause 与全量未完成项恢复边界
+
+正式 `/5` campaign 运行期间，`KEY_1` 出现 HTTP 429 `GoUsageLimitError`，表明该
+Key 的 monthly usage quota 已耗尽。用户随后明确要求停止；dispatcher parent 退出时
+active set 中有 19 个 worker，其中 17 个 running worker 由 parent-loss watchdog
+以 `dispatcher_process_lost` 路径退出，另 2 个已 finished、尚未被 dispatcher 回收。
+该状态是可恢复的 operator/infrastructure pause，不构成完整 full234 结果，也不改变
+preservation 或方法结论。
+
+首次恢复校验暴露了 FR-first 样本的 method-order 缺陷：恢复路径不能假定所有样本均为
+HP-first，必须以 manifest 固定的 `methods` 顺序解释既有 checkpoint。该次尝试未改写
+任何已提交 result、checkpoint 或 raw/API evidence；相关 stop 与 recovery 记录只增保留。
+
+下一次恢复前只修正 dispatcher/recovery 的方法顺序校验与相应恢复授权验证，不改变
+HybridPatch、FullRewrite、transport `/5`、evaluator 或 scoring。恢复 scope 必须覆盖
+campaign 的全部未完成项，并按各自原始方法顺序从首个未提交 RT 继续；已提交 RT 不重新
+POST，不把 scope 缩成 17 个 watchdog worker，也不另建目录拼接。
+
+方法顺序修复后的正式 parent-loss 授权已完成 19-worker reconcile，但旧的
+`dispatcher-parent-loss-<timestamp>-<suffix>` history 名称与超长 emergency stop
+文件名组合触发 Windows 260 字符路径限制。异常发生在第一个 emergency stop 移动前：
+pending journal、active-set 清空与 metadata closure 已存在，canonical stop 和全部
+emergency stop 源文件仍在原位，未调用 API。恢复器现在为新事务生成
+`dpl-<12hex>` ID，并把 parent-loss history 根缩为 `r/`；仅缩短 ID 仍会让本次最深
+emergency 路径达到 264–265 字符，而 `r/dpl-…` 将其降到约 249 字符。对这个已经部分
+应用的旧 pending，只允许在旧/新 recovery commit 均为同一已授权修复 commit 的直接
+子提交、改动路径和 fingerprint delta 精确匹配、旧 journal/history/source digest
+全部一致时，将旧 pending byte-exact 归档并把三个 history 文件重绑定到确定性的短
+目录。随后仍由原幂等 commit 流程归档 stop 并完成授权，不重放 result、checkpoint、
+API 或 worker。
+
+parent-loss record 还必须终止 superseded recovery 的阶段身份：不得继承
+`deepseek_transport_disconnect_inspector_followup_recovery` 或
+`deepseek_resume_classifier_followup_recovery`。这两个布尔标志只描述上一条
+authorization；若带入新的 `dispatcher_process_lost` record，通用 reader 会错误进入
+inspector/resume-classifier validator 并拒绝合法的 `dpl-*` ID。若该错误在 stop 已
+归档后出现，pending 事务只允许在旧/新 commit 同父、改动路径与 fingerprint delta
+精确一致、authorization/history/archived stop digest 全部匹配时归档旧 pending，
+移除阶段标志并继续原幂等 commit。
+
+parent-loss 最终 reader 还必须按 `api_call/4` 的实际 schema 验证未提交成功
+stream：成功分类字段是 `response_classification="normal"`，不是不存在的
+`model_empty=false`。对已经完成短路径和阶段标志再准备的 pending，只允许在旧/新
+commit 同父、仍为同一五文件修复集合、且 fingerprint delta 精确为
+`run_meta.py` 时，将旧 pending 另存为 `pending.api-validator-before.json` 并重绑定
+当前 recovery identity；不得扩大恢复 scope 或重放任何 provider call。
+
+完成该事务后的 reader 曾复用 transport sidecar 循环变量 `path`，从而把最后一个
+sidecar SHA 错报成 authorization SHA。当前 reader 使用独立的
+`authorization_path`/`sidecar_path`；已完成的 `dpl-*` authorization 只允许在尚无
+worker metadata 绑定、同父且同一五文件变更集合下做一次 SHA 修订。旧 authorization
+按原 SHA 归档，修订事件与新 SHA 精确绑定；崩溃后可幂等补齐事件，但错误 SHA、证据
+漂移或已经进入 worker metadata 的 authorization 均 fail-closed。后续再次发生
+parent loss 时，新 authorization 不继承这组只属于上一层的 reader witness；reader
+改为按 recovery chain 中每层 authorization 的实际归档路径与 SHA 验证历史 witness。

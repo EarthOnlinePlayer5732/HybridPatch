@@ -50,6 +50,7 @@ from run_meta import (
     _git_identity_details,
     _sha256_file,
     _run_metadata_recovery_identities,
+    _validate_dispatcher_parent_loss_pending_reprepare_witnesses,
     append_jsonl_locked,
     campaign_recovery_incident_evidence,
     code_fingerprint,
@@ -68,6 +69,7 @@ _DISPATCHER_PARENT_LOSS_PENDING_FILENAME = (
 _DISPATCHER_PARENT_LOSS_PENDING_SCHEMA = (
     "anchorpatch.dispatcher_parent_loss_recovery/1"
 )
+_DISPATCHER_PARENT_LOSS_HISTORY_ROOT = "r"
 _DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_SCHEMA = (
     "anchorpatch.deepseek_transport_inspector_recovery/1"
 )
@@ -87,6 +89,22 @@ _DEEPSEEK_RESUME_CLASSIFIER_STOP_PREFIX = (
 _DEEPSEEK_RESUME_CLASSIFIER_AUTHORIZATION_BASIS = (
     "explicit_user_resume_after_deepseek_resume_classifier_fix"
 )
+_DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS = {
+    "HP_V8/VERSION.md",
+    "HP_V8/src/authorize_ledger_lock_recovery.py",
+    "HP_V8/src/run_meta.py",
+    "HP_V8/src/test_model_openai.py",
+    "docs/active_log.md",
+}
+_DISPATCHER_PARENT_LOSS_CODE_TRANSITION_FINGERPRINT_KEYS = [
+    "run_meta.py",
+]
+_DISPATCHER_PARENT_LOSS_PENDING_REPREPARE_CHANGED_PATHS = {
+    "HP_V8/VERSION.md",
+    "HP_V8/src/authorize_ledger_lock_recovery.py",
+    "HP_V8/src/test_model_openai.py",
+    "docs/active_log.md",
+}
 
 
 def _read_json(path):
@@ -156,6 +174,34 @@ def _ensure_bound_file_copy(source, destination, expected_sha256):
     finally:
         _unlink_with_sharing_retry(temp_path)
         _unlink_with_sharing_retry(legacy_temp_path)
+
+
+def _assert_dispatcher_parent_loss_path_budget(
+        history_dir, emergency_names, *, extra_paths=()):
+    """Fail before mutation when a Windows legacy archive path is too long."""
+    if os.name != "nt":
+        return
+    candidates = [
+        os.path.join(history_dir, name)
+        for name in (
+            "active_worker_set.before.json",
+            "run_metadata.before.jsonl",
+            "superseded_campaign_recovery_authorization.json",
+            "campaign_stop.json",
+            ".recovery-copy.pending",
+        )
+    ]
+    candidates.extend(
+        os.path.join(
+            history_dir, EMERGENCY_STOP_DIRECTORY, name)
+        for name in emergency_names
+    )
+    candidates.extend(extra_paths)
+    longest = max((len(path) for path in candidates), default=0)
+    if longest > 259:
+        raise RuntimeError(
+            "dispatcher parent-loss archive exceeds Windows legacy path "
+            f"budget: {longest}")
 
 
 def _recoverable_jsonl_tail(handle, prefix_evidence, record):
@@ -359,6 +405,859 @@ def _git_changed_paths(prior_commit, recovery_commit):
         item.replace("\\", "/")
         for item in result.stdout.splitlines() if item
     )
+
+
+def _validated_dispatcher_parent_loss_code_transition(
+        manifest, manifest_digest, auth_path, prior_authorization,
+        validated_prior_authorization_sha256, current_commit, current_tree,
+        current_fingerprint):
+    """Bind one parent-loss recovery-tool fix to the exact prior authority."""
+    prior_commit = manifest.get("run_git_commit")
+    prior_fingerprint = manifest.get("code_fingerprint")
+    prior_recovery_commit = prior_authorization.get(
+        "recovery_git_commit")
+    prior_recovery_fingerprint = prior_authorization.get(
+        "recovery_code_fingerprint")
+    actual_authorization_sha256 = _sha256_file(auth_path)
+    if (not isinstance(validated_prior_authorization_sha256, str)
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                validated_prior_authorization_sha256,
+            ) is None
+            or actual_authorization_sha256
+            != validated_prior_authorization_sha256
+            or prior_authorization.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or not isinstance(
+                prior_authorization.get("authorization_id"), str)
+            or not prior_authorization.get("authorization_id")
+            or prior_authorization.get("recovery_kind") not in {
+                LEDGER_LOCK_RECOVERY_KIND,
+                DISPATCHER_PROCESS_LOST_RECOVERY_KIND,
+            }
+            or prior_authorization.get("dispatch_manifest_sha256")
+            != manifest_digest
+            or prior_authorization.get("prior_git_commit") != prior_commit
+            or prior_authorization.get("prior_git_tree_state") != "clean"
+            or prior_authorization.get("prior_code_fingerprint")
+            != prior_fingerprint
+            or re.fullmatch(
+                r"[0-9a-f]{40}",
+                str(prior_recovery_commit or ""),
+            ) is None
+            or prior_authorization.get("recovery_git_tree_state")
+            != "clean"
+            or not isinstance(prior_recovery_fingerprint, dict)
+            or re.fullmatch(
+                r"[0-9a-f]{40}", str(current_commit or "")) is None
+            or current_tree != "clean"
+            or not isinstance(current_fingerprint, dict)):
+        raise RuntimeError(
+            "dispatcher parent-loss prior authorization transition is "
+            "invalid")
+
+    parent_line = subprocess.run(
+        ["git", "rev-list", "--parents", "-n", "1", current_commit],
+        check=True, capture_output=True, text=True, encoding="utf-8",
+    ).stdout.split()
+    changed_paths = _git_changed_paths(
+        prior_recovery_commit, current_commit)
+    fingerprint_changes = sorted(
+        key for key in set(prior_recovery_fingerprint) | set(
+            current_fingerprint)
+        if prior_recovery_fingerprint.get(key)
+        != current_fingerprint.get(key)
+    )
+    if (parent_line != [current_commit, prior_recovery_commit]
+            or set(changed_paths)
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS
+            or fingerprint_changes
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_FINGERPRINT_KEYS):
+        raise RuntimeError(
+            "dispatcher parent-loss recovery-tool transition is invalid")
+    return {
+        "prior_authorization_id": prior_authorization["authorization_id"],
+        "prior_authorization_sha256": actual_authorization_sha256,
+        "prior_recovery_git_commit": prior_recovery_commit,
+        "prior_recovery_code_fingerprint": prior_recovery_fingerprint,
+        "delta_changed_paths": changed_paths,
+        "delta_changed_code_fingerprint_keys": fingerprint_changes,
+    }
+
+
+def _validate_dispatcher_parent_loss_pending_witness(
+        out_dir, pending, record, history_relative, witness_kind):
+    """Validate one exact pending-journal amendment witness."""
+    if witness_kind == "validator":
+        prefix = "dispatcher_parent_loss_pending_validator_reprepared_"
+        filename = "pending.validator-before.json"
+        timestamp_field = "validator_reprepared_at"
+    elif witness_kind == "api_validator":
+        prefix = (
+            "dispatcher_parent_loss_pending_api_validator_reprepared_")
+        filename = "pending.api-validator-before.json"
+        timestamp_field = "api_validator_reprepared_at"
+    else:
+        raise RuntimeError(
+            "dispatcher parent-loss pending witness kind is invalid")
+    provenance_fields = {
+        prefix + suffix
+        for suffix in ("from_commit", "from_sha256", "from_path", "at")
+    }
+    witness_relative = history_relative + "/" + filename
+    witness_commit = record.get(prefix + "from_commit")
+    witness_sha256 = record.get(prefix + "from_sha256")
+    witness_timestamp = record.get(prefix + "at")
+    if ({
+            key for key in record if key.startswith(prefix)
+        } != provenance_fields
+            or re.fullmatch(
+                r"[0-9a-f]{40}", str(witness_commit or "")) is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(witness_sha256 or "")) is None
+            or record.get(prefix + "from_path") != witness_relative
+            or not isinstance(witness_timestamp, str)
+            or not witness_timestamp
+            or pending.get(timestamp_field) != witness_timestamp):
+        raise RuntimeError(
+            "dispatcher parent-loss pending witness provenance is invalid")
+    witness_path = os.path.realpath(os.path.join(
+        out_dir, witness_relative))
+    try:
+        witness_inside = (
+            os.path.commonpath([out_dir, witness_path]) == out_dir)
+    except ValueError:
+        witness_inside = False
+    if (not witness_inside
+            or not os.path.isfile(witness_path)
+            or _sha256_file(witness_path) != witness_sha256):
+        raise RuntimeError(
+            "dispatcher parent-loss pending witness digest mismatch")
+    witness = _read_json(witness_path)
+    witness_record = witness.get("authorization_record")
+    if (witness.get("schema") != pending.get("schema")
+            or witness.get("history_dir") != history_relative
+            or witness.get("created_at") != pending.get("created_at")
+            or witness.get("recovery_plan") != pending.get("recovery_plan")
+            or not isinstance(witness_record, dict)
+            or witness_record.get("authorization_id")
+            != record.get("authorization_id")
+            or witness_record.get("recovery_git_commit")
+            != witness_commit):
+        raise RuntimeError(
+            "dispatcher parent-loss pending witness identity mismatch")
+
+    expected = json.loads(json.dumps(witness))
+    expected_record = expected["authorization_record"]
+    for field in (
+            "recovery_git_commit",
+            "recovery_code_fingerprint",
+            "changed_tracked_paths",
+            "changed_code_fingerprint_keys",
+            "dispatcher_parent_loss_code_transition"):
+        expected_record[field] = json.loads(json.dumps(record.get(field)))
+    if witness_kind == "validator":
+        phase_flags = (
+            "deepseek_transport_disconnect_"
+            "inspector_followup_recovery",
+            "deepseek_resume_classifier_followup_recovery",
+        )
+        if any(witness_record.get(name) is not True for name in phase_flags):
+            raise RuntimeError(
+                "dispatcher parent-loss pending validator witness phase "
+                "flags are invalid")
+        for name in phase_flags:
+            expected_record.pop(name, None)
+    for field in provenance_fields:
+        expected_record[field] = record[field]
+    expected[timestamp_field] = witness_timestamp
+    if expected != pending:
+        raise RuntimeError(
+            "dispatcher parent-loss pending witness transition is invalid")
+    if witness_kind == "api_validator":
+        _validate_dispatcher_parent_loss_pending_witness(
+            out_dir,
+            witness,
+            witness_record,
+            history_relative,
+            "validator",
+        )
+    return witness
+
+
+def _reprepare_dispatcher_parent_loss_pending_short_path(
+        out_dir, manifest, pending_path, pending, auth_path, stop_path):
+    """Rebind the one legacy long-path pending transaction without replay."""
+    record = (
+        pending.get("authorization_record")
+        if isinstance(pending, dict) else None
+    )
+    recovery_plan = (
+        pending.get("recovery_plan")
+        if isinstance(pending, dict) else None
+    )
+    if (not isinstance(record, dict)
+            or not isinstance(recovery_plan, dict)
+            or pending.get("schema")
+            != _DISPATCHER_PARENT_LOSS_PENDING_SCHEMA
+            or record.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or record.get("recovery_kind")
+            != DISPATCHER_PROCESS_LOST_RECOVERY_KIND
+            or record.get("dispatcher_process_lost_recovery") is not True
+            or record.get("recovery_git_tree_state") != "clean"
+            or record.get("prior_git_commit")
+            != manifest.get("run_git_commit")
+            or record.get("prior_code_fingerprint")
+            != manifest.get("code_fingerprint")
+            or record.get("dispatcher_pid")
+            != recovery_plan.get("dispatcher_pid")
+            or record.get("dispatcher_instance_id")
+            != recovery_plan.get("dispatcher_instance_id")
+            or record.get("dispatcher_parent_loss_workers")
+            != recovery_plan.get("workers")):
+        raise RuntimeError(
+            "dispatcher parent-loss pending recovery is invalid")
+
+    authorization_id = record.get("authorization_id")
+    history_relative = pending.get("history_dir")
+    if (not isinstance(authorization_id, str)
+            or not authorization_id
+            or authorization_id in {".", ".."}
+            or "/" in authorization_id
+            or "\\" in authorization_id):
+        raise RuntimeError(
+            "dispatcher parent-loss pending history path is invalid")
+    active_path = os.path.join(out_dir, "active_worker_set.json")
+    active = (
+        _read_json(active_path) if os.path.isfile(active_path) else None
+    )
+    if (not isinstance(active, dict)
+            or active.get("schema")
+            != "anchorpatch.active_worker_set/1"
+            or active.get("run_git_commit")
+            != manifest.get("run_git_commit")
+            or active.get("dispatcher_pid") is not None
+            or active.get("dispatcher_instance_id") is not None
+            or active.get("workers") != {}):
+        raise RuntimeError(
+            "dispatcher parent-loss pending active set is invalid")
+    short_pending = (
+        re.fullmatch(r"dpl-[0-9a-f]{12}", authorization_id)
+        is not None
+    )
+    if short_pending:
+        if history_relative != (
+                _DISPATCHER_PARENT_LOSS_HISTORY_ROOT
+                + "/" + authorization_id):
+            raise RuntimeError(
+                "dispatcher parent-loss pending history path is invalid")
+    elif (not authorization_id.startswith("dispatcher-parent-loss-")
+          or history_relative
+          != "recovery_history/" + authorization_id):
+        raise RuntimeError(
+            "dispatcher parent-loss pending authorization ID is invalid")
+
+    current_commit, current_tree = _git_identity()
+    current_fingerprint = code_fingerprint()
+    prepared_commit = record.get("recovery_git_commit")
+    prepared_fingerprint = record.get("recovery_code_fingerprint")
+    inherited_inspector_flags = {
+        name: record.get(name)
+        for name in (
+            "deepseek_transport_disconnect_inspector_followup_recovery",
+            "deepseek_resume_classifier_followup_recovery",
+        )
+    }
+    if (short_pending
+            and current_commit == prepared_commit
+            and current_fingerprint == prepared_fingerprint
+            and all(
+                name not in record
+                for name in inherited_inspector_flags
+            )):
+        api_prefix = (
+            "dispatcher_parent_loss_pending_api_validator_reprepared_")
+        validator_prefix = (
+            "dispatcher_parent_loss_pending_validator_reprepared_")
+        if ("api_validator_reprepared_at" in pending
+                or any(key.startswith(api_prefix) for key in record)):
+            _validate_dispatcher_parent_loss_pending_witness(
+                out_dir,
+                pending,
+                record,
+                history_relative,
+                "api_validator",
+            )
+        elif ("validator_reprepared_at" in pending
+              or any(key.startswith(validator_prefix) for key in record)):
+            _validate_dispatcher_parent_loss_pending_witness(
+                out_dir,
+                pending,
+                record,
+                history_relative,
+                "validator",
+            )
+        return pending
+    prior_fingerprint = record.get("prior_code_fingerprint")
+    transition = record.get("dispatcher_parent_loss_code_transition")
+    transition_keys = {
+        "prior_authorization_id",
+        "prior_authorization_sha256",
+        "prior_recovery_git_commit",
+        "prior_recovery_code_fingerprint",
+        "delta_changed_paths",
+        "delta_changed_code_fingerprint_keys",
+    }
+    prior_recovery_commit = (
+        transition.get("prior_recovery_git_commit")
+        if isinstance(transition, dict) else None
+    )
+    prior_recovery_fingerprint = (
+        transition.get("prior_recovery_code_fingerprint")
+        if isinstance(transition, dict) else None
+    )
+    if (current_tree != "clean"
+            or re.fullmatch(
+                r"[0-9a-f]{40}", str(current_commit or "")) is None
+            or re.fullmatch(
+                r"[0-9a-f]{40}", str(prepared_commit or "")) is None
+            or current_commit == prepared_commit
+            or not isinstance(prepared_fingerprint, dict)
+            or not isinstance(current_fingerprint, dict)
+            or not isinstance(prior_fingerprint, dict)
+            or not isinstance(transition, dict)
+            or set(transition) != transition_keys
+            or re.fullmatch(
+                r"[0-9a-f]{40}",
+                str(prior_recovery_commit or ""),
+            ) is None
+            or not isinstance(prior_recovery_fingerprint, dict)
+            or transition.get("delta_changed_paths")
+            != sorted(
+                _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS)
+            or transition.get("delta_changed_code_fingerprint_keys")
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_FINGERPRINT_KEYS):
+        raise RuntimeError(
+            "dispatcher parent-loss pending code transition is invalid")
+
+    def _parent_line(commit):
+        return subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", commit],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        ).stdout.split()
+
+    prepared_delta_paths = _git_changed_paths(
+        prior_recovery_commit, prepared_commit)
+    current_delta_paths = _git_changed_paths(
+        prior_recovery_commit, current_commit)
+    amendment_paths = _git_changed_paths(
+        prepared_commit, current_commit)
+    cumulative_prepared_paths = _git_changed_paths(
+        record.get("prior_git_commit"), prepared_commit)
+    cumulative_current_paths = _git_changed_paths(
+        record.get("prior_git_commit"), current_commit)
+    prepared_to_current_fingerprint_changes = sorted(
+        key for key in set(prepared_fingerprint) | set(
+            current_fingerprint)
+        if prepared_fingerprint.get(key)
+        != current_fingerprint.get(key)
+    )
+    prior_to_current_fingerprint_changes = sorted(
+        key for key in set(prior_recovery_fingerprint) | set(
+            current_fingerprint)
+        if prior_recovery_fingerprint.get(key)
+        != current_fingerprint.get(key)
+    )
+    cumulative_fingerprint_changes = sorted(
+        key for key in set(prior_fingerprint) | set(
+            current_fingerprint)
+        if prior_fingerprint.get(key)
+        != current_fingerprint.get(key)
+    )
+    phase_flag_amendment = (
+        set(amendment_paths)
+        == _DISPATCHER_PARENT_LOSS_PENDING_REPREPARE_CHANGED_PATHS
+        and not prepared_to_current_fingerprint_changes
+    )
+    api_validator_amendment = (
+        set(amendment_paths)
+        == _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS
+        and prepared_to_current_fingerprint_changes
+        == _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_FINGERPRINT_KEYS
+    )
+    if (_parent_line(prepared_commit)
+            != [prepared_commit, prior_recovery_commit]
+            or _parent_line(current_commit)
+            != [current_commit, prior_recovery_commit]
+            or set(prepared_delta_paths)
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS
+            or set(current_delta_paths)
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS
+            or not (phase_flag_amendment or api_validator_amendment)
+            or prior_to_current_fingerprint_changes
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_FINGERPRINT_KEYS
+            or cumulative_prepared_paths
+            != record.get("changed_tracked_paths")
+            or cumulative_current_paths != cumulative_prepared_paths
+            or cumulative_fingerprint_changes
+            != record.get("changed_code_fingerprint_keys")):
+        raise RuntimeError(
+            "dispatcher parent-loss pending tooling amendment is invalid")
+
+    manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+    if short_pending:
+        phase_flag_repair = (
+            phase_flag_amendment
+            and inherited_inspector_flags == {
+                "deepseek_transport_disconnect_"
+                "inspector_followup_recovery": True,
+                "deepseek_resume_classifier_followup_recovery": True,
+            }
+        )
+        api_validator_repair = (
+            api_validator_amendment
+            and all(
+                name not in record
+                for name in inherited_inspector_flags
+            )
+            and "api_validator_reprepared_at" not in pending
+            and not any(
+                key.startswith(
+                    "dispatcher_parent_loss_pending_api_validator_"
+                    "reprepared_")
+                for key in record
+            )
+        )
+        if not (phase_flag_repair or api_validator_repair):
+            raise RuntimeError(
+                "dispatcher parent-loss pending tooling amendment profile "
+                "is invalid")
+        history_dir = os.path.realpath(os.path.join(
+            out_dir, history_relative))
+        try:
+            history_inside = (
+                os.path.commonpath([out_dir, history_dir]) == out_dir)
+        except ValueError:
+            history_inside = False
+        archived_stop_relative = (
+            history_relative + "/campaign_stop.json")
+        archived_active_relative = (
+            history_relative + "/active_worker_set.before.json")
+        archived_metadata_relative = (
+            history_relative + "/run_metadata.before.jsonl")
+        superseded_relative = (
+            history_relative
+            + "/superseded_campaign_recovery_authorization.json")
+        bound_files = {
+            archived_stop_relative: record.get("archived_stop_sha256"),
+            archived_active_relative: record.get(
+                "archived_active_worker_set_sha256"),
+            archived_metadata_relative: record.get(
+                "archived_run_metadata_sha256"),
+            superseded_relative: record.get(
+                "superseded_authorization_sha256"),
+        }
+        if (not history_inside
+                or not os.path.isdir(history_dir)
+                or _sha256_file(manifest_path)
+                != record.get("dispatch_manifest_sha256")
+                or _read_json(auth_path) != record
+                or record.get("archived_stop_path")
+                != archived_stop_relative
+                or record.get("archived_active_worker_set_path")
+                != archived_active_relative
+                or record.get("archived_run_metadata_path")
+                != archived_metadata_relative
+                or record.get("superseded_authorization_path")
+                != superseded_relative
+                or os.path.isfile(stop_path)):
+            raise RuntimeError(
+                "dispatcher parent-loss archived pending state is invalid")
+        for relative, expected_sha256 in bound_files.items():
+            path = os.path.join(out_dir, relative)
+            if (not isinstance(expected_sha256, str)
+                    or len(expected_sha256) != 64
+                    or not os.path.isfile(path)
+                    or _sha256_file(path) != expected_sha256):
+                raise RuntimeError(
+                    "dispatcher parent-loss archived pending digest "
+                    "mismatch")
+        superseded = _read_json(os.path.join(
+            out_dir, superseded_relative))
+        if (record.get("superseded_authorization_sha256")
+                != transition.get("prior_authorization_sha256")
+                or superseded.get("authorization_id")
+                != transition.get("prior_authorization_id")
+                or superseded.get("recovery_git_commit")
+                != prior_recovery_commit
+                or superseded.get("recovery_code_fingerprint")
+                != prior_recovery_fingerprint):
+            raise RuntimeError(
+                "dispatcher parent-loss pending prior authorization "
+                "mismatch")
+        if api_validator_repair:
+            _validate_dispatcher_parent_loss_pending_witness(
+                out_dir,
+                pending,
+                record,
+                history_relative,
+                "validator",
+            )
+
+        emergency_source_dir = os.path.join(
+            out_dir, EMERGENCY_STOP_DIRECTORY)
+        source_names = (
+            sorted(
+                name for name in os.listdir(emergency_source_dir)
+                if name.endswith(".json")
+            )
+            if os.path.isdir(emergency_source_dir) else []
+        )
+        archived_emergency_dir = os.path.join(
+            history_dir, EMERGENCY_STOP_DIRECTORY)
+        actual_archived_names = (
+            sorted(
+                name for name in os.listdir(archived_emergency_dir)
+                if name.endswith(".json")
+            )
+            if os.path.isdir(archived_emergency_dir) else []
+        )
+        expected_archived_names = []
+        emergency_entries = record.get(
+            "archived_emergency_stop_records")
+        if source_names or not isinstance(emergency_entries, list):
+            raise RuntimeError(
+                "dispatcher parent-loss archived emergency stop scope is "
+                "invalid")
+        for entry in emergency_entries:
+            relative = (
+                entry.get("path") if isinstance(entry, dict) else None
+            )
+            expected_sha256 = (
+                entry.get("sha256") if isinstance(entry, dict) else None
+            )
+            if (not isinstance(relative, str)
+                    or not relative.startswith(
+                        history_relative + "/"
+                        + EMERGENCY_STOP_DIRECTORY + "/")
+                    or "/" in relative.rsplit("/", 1)[-1]
+                    or "\\" in relative
+                    or not isinstance(expected_sha256, str)
+                    or len(expected_sha256) != 64):
+                raise RuntimeError(
+                    "dispatcher parent-loss archived emergency stop scope "
+                    "is invalid")
+            name = relative.rsplit("/", 1)[-1]
+            path = os.path.join(out_dir, relative)
+            if (not os.path.isfile(path)
+                    or _sha256_file(path) != expected_sha256):
+                raise RuntimeError(
+                    "dispatcher parent-loss archived emergency stop digest "
+                    "mismatch")
+            expected_archived_names.append(name)
+        if (len(expected_archived_names)
+                != len(set(expected_archived_names))
+                or sorted(expected_archived_names)
+                != actual_archived_names):
+            raise RuntimeError(
+                "dispatcher parent-loss archived emergency stop scope is "
+                "invalid")
+
+        old_pending_sha256 = _sha256_file(pending_path)
+        old_pending_archive_name = (
+            "pending.validator-before.json"
+            if phase_flag_repair
+            else "pending.api-validator-before.json"
+        )
+        old_pending_archive_relative = (
+            history_relative + "/" + old_pending_archive_name)
+        _ensure_bound_file_copy(
+            pending_path,
+            os.path.join(out_dir, old_pending_archive_relative),
+            old_pending_sha256,
+        )
+        updated = json.loads(json.dumps(pending))
+        updated_record = updated["authorization_record"]
+        updated_record["recovery_git_commit"] = current_commit
+        updated_record["recovery_code_fingerprint"] = current_fingerprint
+        updated_record["changed_tracked_paths"] = cumulative_current_paths
+        updated_record["changed_code_fingerprint_keys"] = (
+            cumulative_fingerprint_changes)
+        if phase_flag_repair:
+            for name in inherited_inspector_flags:
+                updated_record.pop(name, None)
+        updated_transition = updated_record[
+            "dispatcher_parent_loss_code_transition"]
+        updated_transition["delta_changed_paths"] = current_delta_paths
+        updated_transition[
+            "delta_changed_code_fingerprint_keys"
+        ] = prior_to_current_fingerprint_changes
+        reprepared_at = datetime.now().astimezone().isoformat(
+            timespec="seconds")
+        prefix = (
+            "dispatcher_parent_loss_pending_validator_reprepared_"
+            if phase_flag_repair
+            else "dispatcher_parent_loss_pending_api_validator_reprepared_"
+        )
+        updated_record[prefix + "from_commit"] = prepared_commit
+        updated_record[prefix + "from_sha256"] = old_pending_sha256
+        updated_record[prefix + "from_path"] = (
+            old_pending_archive_relative)
+        updated_record[prefix + "at"] = reprepared_at
+        updated[
+            "validator_reprepared_at"
+            if phase_flag_repair
+            else "api_validator_reprepared_at"
+        ] = reprepared_at
+        write_json_atomic(pending_path, updated)
+        return _read_json(pending_path)
+
+    if not phase_flag_amendment:
+        raise RuntimeError(
+            "dispatcher parent-loss legacy pending tooling amendment is "
+            "invalid")
+
+    old_history_dir = os.path.realpath(os.path.join(
+        out_dir, history_relative))
+    try:
+        old_history_inside = (
+            os.path.commonpath([out_dir, old_history_dir]) == out_dir)
+    except ValueError:
+        old_history_inside = False
+    archived_active_relative = (
+        history_relative + "/active_worker_set.before.json")
+    archived_metadata_relative = (
+        history_relative + "/run_metadata.before.jsonl")
+    superseded_relative = (
+        history_relative
+        + "/superseded_campaign_recovery_authorization.json")
+    archived_stop_relative = history_relative + "/campaign_stop.json"
+    old_emergency_relative = (
+        history_relative + "/" + EMERGENCY_STOP_DIRECTORY)
+    old_emergency_dir = os.path.join(
+        old_history_dir, EMERGENCY_STOP_DIRECTORY)
+    required_history_files = {
+        "active_worker_set.before.json",
+        "run_metadata.before.jsonl",
+        "superseded_campaign_recovery_authorization.json",
+    }
+    allowed_history_entries = required_history_files | {
+        EMERGENCY_STOP_DIRECTORY,
+        "pending.json",
+        ".recovery-copy.pending",
+    }
+    history_entries = (
+        set(os.listdir(old_history_dir))
+        if os.path.isdir(old_history_dir) else set()
+    )
+    auth_record = (
+        _read_json(auth_path) if os.path.isfile(auth_path) else None
+    )
+    if (not old_history_inside
+            or not os.path.isdir(old_history_dir)
+            or not required_history_files <= history_entries
+            or history_entries - allowed_history_entries
+            or (os.path.isdir(old_emergency_dir)
+                and os.listdir(old_emergency_dir))
+            or (os.path.exists(old_emergency_dir)
+                and not os.path.isdir(old_emergency_dir))
+            or auth_record != record
+            or _sha256_file(manifest_path)
+            != record.get("dispatch_manifest_sha256")
+            or record.get("archived_active_worker_set_path")
+            != archived_active_relative
+            or record.get("archived_run_metadata_path")
+            != archived_metadata_relative
+            or record.get("superseded_authorization_path")
+            != superseded_relative
+            or record.get("archived_stop_path")
+            != archived_stop_relative):
+        raise RuntimeError(
+            "dispatcher parent-loss pending partial transaction is invalid")
+
+    bound_history_files = {
+        archived_active_relative: record.get(
+            "archived_active_worker_set_sha256"),
+        archived_metadata_relative: record.get(
+            "archived_run_metadata_sha256"),
+        superseded_relative: record.get(
+            "superseded_authorization_sha256"),
+    }
+    for relative, expected_sha256 in bound_history_files.items():
+        path = os.path.join(out_dir, relative)
+        if (not isinstance(expected_sha256, str)
+                or len(expected_sha256) != 64
+                or not os.path.isfile(path)
+                or _sha256_file(path) != expected_sha256):
+            raise RuntimeError(
+                "dispatcher parent-loss pending history digest mismatch")
+    superseded = _read_json(os.path.join(
+        out_dir, superseded_relative))
+    if (record.get("superseded_authorization_sha256")
+            != transition.get("prior_authorization_sha256")
+            or superseded.get("authorization_id")
+            != transition.get("prior_authorization_id")
+            or superseded.get("recovery_git_commit")
+            != prior_recovery_commit
+            or superseded.get("recovery_code_fingerprint")
+            != prior_recovery_fingerprint):
+        raise RuntimeError(
+            "dispatcher parent-loss pending prior authorization mismatch")
+    if (not os.path.isfile(stop_path)
+            or _sha256_file(stop_path)
+            != record.get("archived_stop_sha256")):
+        raise RuntimeError(
+            "dispatcher parent-loss pending canonical stop mismatch")
+
+    emergency_entries = record.get("archived_emergency_stop_records")
+    emergency_source_dir = os.path.join(
+        out_dir, EMERGENCY_STOP_DIRECTORY)
+    emergency_names = (
+        sorted(
+            name for name in os.listdir(emergency_source_dir)
+            if name.endswith(".json")
+        )
+        if os.path.isdir(emergency_source_dir) else []
+    )
+    expected_emergency_names = []
+    if not isinstance(emergency_entries, list):
+        raise RuntimeError(
+            "dispatcher parent-loss pending emergency stop scope is invalid")
+    for entry in emergency_entries:
+        relative = (
+            entry.get("path") if isinstance(entry, dict) else None
+        )
+        expected_sha256 = (
+            entry.get("sha256") if isinstance(entry, dict) else None
+        )
+        if (not isinstance(relative, str)
+                or not relative.startswith(old_emergency_relative + "/")
+                or "/" in relative[len(old_emergency_relative) + 1:]
+                or "\\" in relative
+                or not isinstance(expected_sha256, str)
+                or len(expected_sha256) != 64):
+            raise RuntimeError(
+                "dispatcher parent-loss pending emergency stop scope is "
+                "invalid")
+        name = relative.rsplit("/", 1)[-1]
+        source = os.path.join(emergency_source_dir, name)
+        if (not name.endswith(".json")
+                or not os.path.isfile(source)
+                or _sha256_file(source) != expected_sha256):
+            raise RuntimeError(
+                "dispatcher parent-loss pending emergency stop digest "
+                "mismatch")
+        expected_emergency_names.append(name)
+    if (len(expected_emergency_names)
+            != len(set(expected_emergency_names))
+            or sorted(expected_emergency_names) != emergency_names):
+        raise RuntimeError(
+            "dispatcher parent-loss pending emergency stop scope is invalid")
+
+    old_pending_sha256 = _sha256_file(pending_path)
+    old_pending_archive_relative = history_relative + "/pending.json"
+    old_pending_archive_path = os.path.join(
+        out_dir, old_pending_archive_relative)
+    replacement_authorization_id = (
+        "dpl-" + hashlib.sha256(
+            (old_pending_sha256 + current_commit).encode("ascii")
+        ).hexdigest()[:12]
+    )
+    replacement_history_relative = (
+        _DISPATCHER_PARENT_LOSS_HISTORY_ROOT
+        + "/" + replacement_authorization_id)
+    replacement_history_dir = os.path.realpath(os.path.join(
+        out_dir, replacement_history_relative))
+    try:
+        replacement_history_inside = (
+            os.path.commonpath(
+                [out_dir, replacement_history_dir]) == out_dir)
+    except ValueError:
+        replacement_history_inside = False
+    if not replacement_history_inside:
+        raise RuntimeError(
+            "dispatcher parent-loss replacement history path is invalid")
+    _assert_dispatcher_parent_loss_path_budget(
+        replacement_history_dir,
+        emergency_names,
+        extra_paths=(old_pending_archive_path,),
+    )
+    _ensure_bound_file_copy(
+        pending_path, old_pending_archive_path, old_pending_sha256)
+    os.makedirs(replacement_history_dir, exist_ok=True)
+    replacement_entries = set(os.listdir(replacement_history_dir))
+    if replacement_entries - (
+            required_history_files | {".recovery-copy.pending"}):
+        raise RuntimeError(
+            "dispatcher parent-loss replacement history is not pristine")
+
+    replacement_paths = {
+        "archived_active_worker_set_path": (
+            replacement_history_relative
+            + "/active_worker_set.before.json"),
+        "archived_run_metadata_path": (
+            replacement_history_relative
+            + "/run_metadata.before.jsonl"),
+        "superseded_authorization_path": (
+            replacement_history_relative
+            + "/superseded_campaign_recovery_authorization.json"),
+    }
+    for field, replacement_relative in replacement_paths.items():
+        source_relative = record[field]
+        expected_sha256 = bound_history_files[source_relative]
+        _ensure_bound_file_copy(
+            os.path.join(out_dir, source_relative),
+            os.path.join(out_dir, replacement_relative),
+            expected_sha256,
+        )
+
+    updated = json.loads(json.dumps(pending))
+    updated_record = updated["authorization_record"]
+    updated_record["authorization_id"] = replacement_authorization_id
+    updated_record["recovery_git_commit"] = current_commit
+    updated_record["recovery_code_fingerprint"] = current_fingerprint
+    updated_record["changed_tracked_paths"] = cumulative_current_paths
+    updated_record["changed_code_fingerprint_keys"] = (
+        cumulative_fingerprint_changes)
+    for name in inherited_inspector_flags:
+        updated_record.pop(name, None)
+    updated_record.update(replacement_paths)
+    updated_record["archived_stop_path"] = (
+        replacement_history_relative + "/campaign_stop.json")
+    updated_record["archived_emergency_stop_records"] = [
+        {
+            **entry,
+            "path": (
+                replacement_history_relative + "/"
+                + EMERGENCY_STOP_DIRECTORY + "/"
+                + entry["path"].rsplit("/", 1)[-1]
+            ),
+        }
+        for entry in emergency_entries
+    ]
+    updated_transition = updated_record[
+        "dispatcher_parent_loss_code_transition"]
+    updated_transition["delta_changed_paths"] = current_delta_paths
+    updated_transition["delta_changed_code_fingerprint_keys"] = (
+        prior_to_current_fingerprint_changes)
+    reprepared_at = datetime.now().astimezone().isoformat(
+        timespec="seconds")
+    provenance_prefix = "dispatcher_parent_loss_pending_reprepared_"
+    updated_record[provenance_prefix + "from_commit"] = prepared_commit
+    updated_record[provenance_prefix + "from_sha256"] = (
+        old_pending_sha256)
+    updated_record[provenance_prefix + "from_path"] = (
+        old_pending_archive_relative)
+    updated_record[provenance_prefix + "from_authorization_id"] = (
+        authorization_id)
+    updated_record[provenance_prefix + "from_history_dir"] = (
+        history_relative)
+    updated_record[provenance_prefix + "at"] = reprepared_at
+    updated["history_dir"] = replacement_history_relative
+    updated["reprepared_at"] = reprepared_at
+    write_json_atomic(pending_path, updated)
+    return _read_json(pending_path)
 
 
 def _reprepare_pristine_deepseek_inspector_pending(
@@ -756,6 +1655,29 @@ def _reconcile_deepseek_parent_loss_workers(
             != (DEEPSEEK_TRANSPORT, DEEPSEEK_TRANSPORT_REVISION)):
         raise RuntimeError(
             "dispatcher parent-loss recovery requires current DeepSeek full234")
+    assignments = manifest.get("assignments")
+    methods_by_sample = {}
+    if not isinstance(assignments, list):
+        raise RuntimeError(
+            "dispatcher parent-loss manifest assignments are invalid")
+    for assignment in assignments:
+        sample = (
+            assignment.get("sample")
+            if isinstance(assignment, dict) else None
+        )
+        methods = (
+            assignment.get("methods")
+            if isinstance(assignment, dict) else None
+        )
+        if (not isinstance(sample, str) or not sample
+                or sample in methods_by_sample
+                or methods not in (
+                    ["hybridpatch", "fullrewrite"],
+                    ["fullrewrite", "hybridpatch"],
+                )):
+            raise RuntimeError(
+                "dispatcher parent-loss manifest assignments are invalid")
+        methods_by_sample[sample] = methods
 
     active_path = os.path.join(out_dir, "active_worker_set.json")
     active = _read_json(active_path)
@@ -812,6 +1734,9 @@ def _reconcile_deepseek_parent_loss_workers(
                 "dispatcher parent-loss stop cohort identity mismatch")
 
     samples = sorted(samples_by_worker.values())
+    if any(sample not in methods_by_sample for sample in samples):
+        raise RuntimeError(
+            "dispatcher parent-loss active sample assignment is missing")
     _assert_worker_leases_free(out_dir, samples)
     dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
     dispatch_rows = _read_jsonl(dispatch_path)
@@ -879,12 +1804,14 @@ def _reconcile_deepseek_parent_loss_workers(
         intent = intents.get(worker_id)
         launch = launches.get(worker_id)
         metadata = metadata_by_worker.get(worker_id)
+        assigned_methods = methods_by_sample[sample]
         worker_stops = [
             record for record in stop_records
             if record.get("worker_launch_id") == worker_id
         ]
         if intent is not None and (
                 intent.get("sample") != sample
+                or intent.get("methods") != assigned_methods
                 or intent.get("dispatcher_pid") != dispatcher_pid
                 or intent.get("dispatcher_instance_id")
                 != dispatcher_instance_id):
@@ -951,6 +1878,7 @@ def _reconcile_deepseek_parent_loss_workers(
             continue
         if (intent is None
                 or launch.get("sample") != sample
+                or launch.get("methods") != assigned_methods
                 or launch.get("dispatcher_pid") != dispatcher_pid
                 or launch.get("dispatcher_instance_id")
                 != dispatcher_instance_id
@@ -1021,8 +1949,7 @@ def _reconcile_deepseek_parent_loss_workers(
                 or metadata.get("dispatcher_pid") != dispatcher_pid
                 or metadata.get("dispatcher_instance_id")
                 != dispatcher_instance_id
-                or metadata.get("methods")
-                != ["hybridpatch", "fullrewrite"]):
+                or metadata.get("methods") != assigned_methods):
             raise RuntimeError(
                 f"dispatcher parent-loss worker provenance is invalid: "
                 f"{sample}")
@@ -1430,6 +2357,7 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
             raise RuntimeError(
                 "dispatcher parent-loss uncommitted API evidence is invalid")
         if (row.get("classification") is not None
+                or row.get("response_classification") != "normal"
                 or row.get("http_status") != 200
                 or row.get("stream_complete") is not True
                 or not _valid_deepseek_transport_sidecar(out_dir, row)):
@@ -4101,12 +5029,16 @@ def _commit_dispatcher_parent_loss_recovery(
 
 
 def _authorize_dispatcher_process_lost(
-        out_dir, manifest, stop_path, auth_path, prior_authorization):
+        out_dir, manifest, stop_path, auth_path, prior_authorization,
+        validated_prior_authorization_sha256=None):
     """Authorize an exact DeepSeek checkpoint resume after parent loss."""
     pending_path = os.path.join(
         out_dir, _DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
     if os.path.isfile(pending_path):
         pending = _read_json(pending_path)
+        pending = _reprepare_dispatcher_parent_loss_pending_short_path(
+            out_dir, manifest, pending_path, pending, auth_path,
+            stop_path)
         return _commit_dispatcher_parent_loss_recovery(
             out_dir, manifest, stop_path, auth_path, pending_path,
             pending)
@@ -4121,6 +5053,7 @@ def _authorize_dispatcher_process_lost(
             or not isinstance(prior_fingerprint, dict)):
         raise RuntimeError(
             "dispatcher parent-loss recovery requires a clean identity")
+    code_transition = None
     if prior_authorization is None:
         if (current_commit != prior_commit
                 or current_fingerprint != prior_fingerprint):
@@ -4138,22 +5071,38 @@ def _authorize_dispatcher_process_lost(
                 or prior_authorization.get("prior_git_commit")
                 != prior_commit
                 or prior_authorization.get("prior_code_fingerprint")
-                != prior_fingerprint
-                or prior_authorization.get("recovery_git_commit")
-                != current_commit
-                or prior_authorization.get("recovery_code_fingerprint")
-                != current_fingerprint):
+                != prior_fingerprint):
             raise RuntimeError(
                 "dispatcher parent-loss prior authorization identity drift")
-        verified_prior = read_campaign_recovery_authorization(
-            out_dir, allow_active_dispatcher_stop=True)
-        if (not isinstance(verified_prior, dict)
-                or verified_prior.get("authorization_id")
-                != prior_authorization.get("authorization_id")
-                or verified_prior.get("authorization_sha256")
-                != _sha256_file(auth_path)):
-            raise RuntimeError(
-                "dispatcher parent-loss prior authorization is invalid")
+        prior_identity_matches = (
+            prior_authorization.get("recovery_git_commit")
+            == current_commit
+            and prior_authorization.get("recovery_code_fingerprint")
+            == current_fingerprint
+        )
+        if prior_identity_matches:
+            verified_prior = read_campaign_recovery_authorization(
+                out_dir, allow_active_dispatcher_stop=True)
+            if (not isinstance(verified_prior, dict)
+                    or verified_prior.get("authorization_id")
+                    != prior_authorization.get("authorization_id")
+                    or verified_prior.get("authorization_sha256")
+                    != _sha256_file(auth_path)):
+                raise RuntimeError(
+                    "dispatcher parent-loss prior authorization is invalid")
+        else:
+            code_transition = (
+                _validated_dispatcher_parent_loss_code_transition(
+                    manifest,
+                    manifest_digest,
+                    auth_path,
+                    prior_authorization,
+                    validated_prior_authorization_sha256,
+                    current_commit,
+                    current_tree,
+                    current_fingerprint,
+                )
+            )
 
     stop_records = read_campaign_stop_conditions(out_dir)
     if not stop_records:
@@ -4167,13 +5116,20 @@ def _authorize_dispatcher_process_lost(
         raise RuntimeError(
             "campaign is not stopped by one lost dispatcher parent")
 
-    authorization_id = (
-        "dispatcher-parent-loss-"
-        + datetime.now().astimezone().strftime("%Y%m%dT%H%M%S%z")
-        + "-" + uuid.uuid4().hex[:8]
-    )
+    authorization_id = "dpl-" + uuid.uuid4().hex[:12]
     history_dir = os.path.join(
-        out_dir, "recovery_history", authorization_id)
+        out_dir, _DISPATCHER_PARENT_LOSS_HISTORY_ROOT,
+        authorization_id)
+    emergency_dir = os.path.join(
+        out_dir, EMERGENCY_STOP_DIRECTORY)
+    emergency_names = (
+        sorted(
+            name for name in os.listdir(emergency_dir)
+            if name.endswith(".json"))
+        if os.path.isdir(emergency_dir) else []
+    )
+    _assert_dispatcher_parent_loss_path_budget(
+        history_dir, emergency_names)
     os.makedirs(history_dir, exist_ok=False)
     active_path = os.path.join(out_dir, "active_worker_set.json")
     metadata_path = os.path.join(out_dir, "run_metadata.jsonl")
@@ -4297,13 +5253,6 @@ def _authorize_dispatcher_process_lost(
             "superseded_campaign_recovery_authorization.json")
         _copy_file_durable(auth_path, archived_authorization)
     archived_stop = os.path.join(history_dir, "campaign_stop.json")
-    emergency_dir = os.path.join(out_dir, EMERGENCY_STOP_DIRECTORY)
-    emergency_names = (
-        sorted(
-            name for name in os.listdir(emergency_dir)
-            if name.endswith(".json"))
-        if os.path.isdir(emergency_dir) else []
-    )
     emergency_sources = [
         os.path.join(emergency_dir, name) for name in emergency_names
     ]
@@ -4333,6 +5282,16 @@ def _authorize_dispatcher_process_lost(
     record = json.loads(json.dumps(prior_authorization or {}))
     record.pop("deepseek_server_retry_recovery", None)
     record.pop("deepseek_transport_disconnect_retry_recovery", None)
+    record.pop(
+        "deepseek_transport_disconnect_inspector_followup_recovery",
+        None,
+    )
+    record.pop("deepseek_resume_classifier_followup_recovery", None)
+    reader_prefix = (
+        "dispatcher_parent_loss_authorization_reader_sha_reprepared_")
+    for key in list(record):
+        if key.startswith(reader_prefix):
+            record.pop(key)
     record.update({
         "schema": CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2,
         "authorization_id": authorization_id,
@@ -4392,6 +5351,14 @@ def _authorize_dispatcher_process_lost(
         "checkpoint_rows_modified": False,
         "provider_post_replay_scope": "uncommitted_steps_only",
     })
+    if code_transition is None:
+        record.pop("dispatcher_parent_loss_code_transition", None)
+    else:
+        record["authorization_basis"] = (
+            "explicit_user_resume_after_dispatcher_process_loss_and_"
+            "recovery_tool_fix"
+        )
+        record["dispatcher_parent_loss_code_transition"] = code_transition
     if archived_authorization is None:
         record.pop("superseded_authorization_path", None)
         record.pop("superseded_authorization_sha256", None)
@@ -4415,25 +5382,295 @@ def _authorize_dispatcher_process_lost(
         out_dir, manifest, stop_path, auth_path, pending_path, pending)
 
 
+def _authorize_dispatcher_parent_loss_reader_sha_fix(
+        out_dir, manifest, auth_path,
+        validated_current_authorization_sha256):
+    """Rebind one completed parent-loss authorization to the SHA reader fix."""
+    if (not os.path.isfile(auth_path)
+            or read_campaign_stop_conditions(out_dir)
+            or any(os.path.isfile(os.path.join(out_dir, name)) for name in (
+                DISPATCHER_PARENT_LOSS_PENDING_FILENAME,
+                DEEPSEEK_TRANSPORT_INSPECTOR_PENDING_FILENAME,
+            ))):
+        raise RuntimeError(
+            "dispatcher parent-loss reader-SHA fix requires one completed "
+            "recovery with no active stop or pending transaction")
+    record = _read_json(auth_path)
+    current_authorization_sha256 = _sha256_file(auth_path)
+    current_commit, current_tree = _git_identity()
+    current_fingerprint = code_fingerprint()
+    prefix = (
+        "dispatcher_parent_loss_authorization_reader_sha_reprepared_")
+    provenance_fields = {
+        prefix + suffix
+        for suffix in ("from_commit", "from_sha256", "from_path", "at")
+    }
+    if (record.get("schema")
+            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2
+            or record.get("recovery_kind")
+            != DISPATCHER_PROCESS_LOST_RECOVERY_KIND
+            or record.get("dispatcher_process_lost_recovery") is not True
+            or re.fullmatch(
+                r"dpl-[0-9a-f]{12}",
+                str(record.get("authorization_id") or ""),
+            ) is None
+            or current_tree != "clean"
+            or not isinstance(current_fingerprint, dict)
+            or _sha256_file(os.path.join(
+                out_dir, "dispatch_manifest.json"))
+            != record.get("dispatch_manifest_sha256")
+            or manifest.get("run_git_commit")
+            != record.get("prior_git_commit")
+            or manifest.get("code_fingerprint")
+            != record.get("prior_code_fingerprint")):
+        raise RuntimeError(
+            "dispatcher parent-loss reader-SHA authorization is invalid")
+
+    active = _read_json(os.path.join(
+        out_dir, "active_worker_set.json"))
+    if (active.get("schema") != "anchorpatch.active_worker_set/1"
+            or active.get("run_git_commit")
+            != manifest.get("run_git_commit")
+            or active.get("dispatcher_pid") is not None
+            or active.get("dispatcher_instance_id") is not None
+            or active.get("workers") != {}):
+        raise RuntimeError(
+            "dispatcher parent-loss reader-SHA active set is invalid")
+    _assert_worker_leases_free(
+        out_dir,
+        [
+            item.get("sample")
+            for item in record.get(
+                "dispatcher_parent_loss_workers") or []
+            if isinstance(item, dict)
+        ],
+    )
+
+    def _finalize_result(already_authorized):
+        authorization_sha256 = _sha256_file(auth_path)
+        event = {
+            "event": (
+                "user_authorized_dispatcher_parent_loss_reader_sha_fix"),
+            "created_at": record.get(prefix + "at"),
+            "campaign_recovery_authorization_id": record[
+                "authorization_id"],
+            "campaign_recovery_authorization_sha256": authorization_sha256,
+            "superseded_authorization_sha256": record[
+                prefix + "from_sha256"],
+            "prior_recovery_git_commit": record[
+                prefix + "from_commit"],
+            "recovery_git_commit": record["recovery_git_commit"],
+        }
+        dispatch_path = os.path.join(out_dir, "dispatch_log.jsonl")
+        matches = [
+            row for row in _read_jsonl(dispatch_path)
+            if row.get("event") == event["event"]
+            and row.get("campaign_recovery_authorization_id")
+            == record["authorization_id"]
+        ]
+        if not matches:
+            append_jsonl_locked(dispatch_path, event)
+        elif len(matches) != 1 or matches[0] != event:
+            raise RuntimeError(
+                "dispatcher parent-loss reader-SHA witness has drifted")
+        campaign_recovery_incident_evidence.cache_clear()
+        verified = read_campaign_recovery_authorization(out_dir)
+        if verified["authorization_sha256"] != authorization_sha256:
+            raise RuntimeError(
+                "dispatcher parent-loss reader-SHA result digest mismatch")
+        return {
+            "authorization_id": record["authorization_id"],
+            "authorization_sha256": authorization_sha256,
+            "superseded_authorization_sha256": record[
+                prefix + "from_sha256"],
+            "reader_sha_fixed": True,
+            "already_authorized": already_authorized,
+        }
+
+    if (current_commit == record.get("recovery_git_commit")
+            and current_fingerprint
+            == record.get("recovery_code_fingerprint")):
+        if {
+                key for key in record if key.startswith(prefix)
+        } != provenance_fields or (
+                validated_current_authorization_sha256
+                != record.get(prefix + "from_sha256")):
+            raise RuntimeError(
+                "dispatcher parent-loss reader-SHA provenance is missing")
+        return _finalize_result(True)
+
+    prior_recovery_commit = (
+        record.get("dispatcher_parent_loss_code_transition") or {}
+    ).get("prior_recovery_git_commit")
+    prepared_commit = record.get("recovery_git_commit")
+    prepared_fingerprint = record.get("recovery_code_fingerprint")
+    prior_recovery_fingerprint = (
+        record.get("dispatcher_parent_loss_code_transition") or {}
+    ).get("prior_recovery_code_fingerprint")
+    if (current_authorization_sha256
+            != validated_current_authorization_sha256
+            or re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(validated_current_authorization_sha256 or ""),
+            ) is None
+            or re.fullmatch(
+                r"[0-9a-f]{40}", str(prepared_commit or "")) is None
+            or re.fullmatch(
+                r"[0-9a-f]{40}",
+                str(prior_recovery_commit or ""),
+            ) is None
+            or not isinstance(prepared_fingerprint, dict)
+            or not isinstance(prior_recovery_fingerprint, dict)
+            or any(key.startswith(prefix) for key in record)):
+        raise RuntimeError(
+            "dispatcher parent-loss reader-SHA prior authority is invalid")
+    metadata_path = os.path.join(out_dir, "run_metadata.jsonl")
+    if any(
+            isinstance(row.get("campaign_recovery_authorization"), dict)
+            and row["campaign_recovery_authorization"].get(
+                "authorization_id") == record["authorization_id"]
+            for row in _read_jsonl(metadata_path)):
+        raise RuntimeError(
+            "dispatcher parent-loss reader-SHA fix cannot amend an "
+            "authorization already bound into run metadata")
+
+    def _parent_line(commit):
+        return subprocess.run(
+            ["git", "rev-list", "--parents", "-n", "1", commit],
+            check=True, capture_output=True, text=True, encoding="utf-8",
+        ).stdout.split()
+
+    prepared_delta_paths = _git_changed_paths(
+        prior_recovery_commit, prepared_commit)
+    current_delta_paths = _git_changed_paths(
+        prior_recovery_commit, current_commit)
+    amendment_paths = _git_changed_paths(
+        prepared_commit, current_commit)
+    cumulative_paths = _git_changed_paths(
+        record.get("prior_git_commit"), current_commit)
+    prepared_to_current_fingerprint_changes = sorted(
+        key for key in set(prepared_fingerprint) | set(
+            current_fingerprint)
+        if prepared_fingerprint.get(key)
+        != current_fingerprint.get(key)
+    )
+    prior_to_current_fingerprint_changes = sorted(
+        key for key in set(prior_recovery_fingerprint) | set(
+            current_fingerprint)
+        if prior_recovery_fingerprint.get(key)
+        != current_fingerprint.get(key)
+    )
+    cumulative_fingerprint_changes = sorted(
+        key for key in set(record.get("prior_code_fingerprint") or {}) | set(
+            current_fingerprint)
+        if (record.get("prior_code_fingerprint") or {}).get(key)
+        != current_fingerprint.get(key)
+    )
+    if (_parent_line(prepared_commit)
+            != [prepared_commit, prior_recovery_commit]
+            or _parent_line(current_commit)
+            != [current_commit, prior_recovery_commit]
+            or set(prepared_delta_paths)
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS
+            or set(current_delta_paths)
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS
+            or set(amendment_paths)
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_CHANGED_PATHS
+            or prepared_to_current_fingerprint_changes
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_FINGERPRINT_KEYS
+            or prior_to_current_fingerprint_changes
+            != _DISPATCHER_PARENT_LOSS_CODE_TRANSITION_FINGERPRINT_KEYS
+            or cumulative_paths != record.get("changed_tracked_paths")
+            or cumulative_fingerprint_changes
+            != record.get("changed_code_fingerprint_keys")):
+        raise RuntimeError(
+            "dispatcher parent-loss reader-SHA tooling amendment is invalid")
+
+    _validate_dispatcher_parent_loss_pending_reprepare_witnesses(
+        out_dir, record)
+    history_relative = record["archived_stop_path"].rsplit("/", 1)[0]
+    archived_relative = (
+        history_relative + "/authorization.reader-sha-before.json")
+    archived_path = os.path.join(out_dir, archived_relative)
+    _ensure_bound_file_copy(
+        auth_path, archived_path, current_authorization_sha256)
+    updated = json.loads(json.dumps(record))
+    updated["recovery_git_commit"] = current_commit
+    updated["recovery_code_fingerprint"] = current_fingerprint
+    updated["dispatcher_parent_loss_code_transition"][
+        "delta_changed_paths"] = current_delta_paths
+    updated["dispatcher_parent_loss_code_transition"][
+        "delta_changed_code_fingerprint_keys"
+    ] = prior_to_current_fingerprint_changes
+    reprepared_at = datetime.now().astimezone().isoformat(
+        timespec="seconds")
+    updated[prefix + "from_commit"] = prepared_commit
+    updated[prefix + "from_sha256"] = current_authorization_sha256
+    updated[prefix + "from_path"] = archived_relative
+    updated[prefix + "at"] = reprepared_at
+    write_json_atomic(auth_path, updated)
+    record = updated
+    return _finalize_result(False)
+
+
 def authorize(
         out_dir, *, operator_pause=False, operator_pause_reason=None,
         operator_interrupted_samples=None, provider_access_retry=False,
         deepseek_server_retry=False,
         deepseek_transport_disconnect_retry=False,
         deepseek_resume_classifier_retry=False,
-        dispatcher_process_lost=False):
+        dispatcher_process_lost=False,
+        validated_prior_authorization_sha256=None,
+        dispatcher_parent_loss_reader_sha_fix=False,
+        validated_current_authorization_sha256=None):
     out_dir = os.path.abspath(out_dir)
     selected_modes = sum(bool(value) for value in (
         operator_pause, provider_access_retry, deepseek_server_retry,
         deepseek_transport_disconnect_retry,
         deepseek_resume_classifier_retry, dispatcher_process_lost,
+        dispatcher_parent_loss_reader_sha_fix,
     ))
     if selected_modes > 1:
         raise RuntimeError("campaign recovery modes are mutually exclusive")
+    if (validated_prior_authorization_sha256 is not None
+            and not dispatcher_process_lost):
+        raise RuntimeError(
+            "validated prior authorization digest is only valid for "
+            "dispatcher parent-loss recovery")
+    if (validated_current_authorization_sha256 is not None
+            and not dispatcher_parent_loss_reader_sha_fix):
+        raise RuntimeError(
+            "validated current authorization digest is only valid for "
+            "dispatcher parent-loss reader-SHA fix")
     manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
     stop_path = os.path.join(out_dir, "campaign_stop.json")
     auth_path = os.path.join(
         out_dir, CAMPAIGN_RECOVERY_AUTHORIZATION_FILENAME)
+    if dispatcher_parent_loss_reader_sha_fix:
+        if not validated_current_authorization_sha256:
+            raise RuntimeError(
+                "dispatcher parent-loss reader-SHA fix requires the exact "
+                "current authorization digest")
+        lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
+        with open(lease_path, "a+", encoding="utf-8") as lease:
+            try:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            except portalocker.exceptions.LockException as exc:
+                raise RuntimeError(
+                    "dispatcher parent-loss reader-SHA fix requires the "
+                    "dispatcher lease to be free") from exc
+            try:
+                manifest = _read_json(manifest_path)
+                with _campaign_stop_publication_lock(out_dir):
+                    return _authorize_dispatcher_parent_loss_reader_sha_fix(
+                        out_dir,
+                        manifest,
+                        auth_path,
+                        validated_current_authorization_sha256,
+                    )
+            finally:
+                portalocker.unlock(lease)
     if dispatcher_process_lost:
         lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
         with open(lease_path, "a+", encoding="utf-8") as lease:
@@ -4462,7 +5699,8 @@ def authorize(
                 with _campaign_stop_publication_lock(out_dir):
                     return _authorize_dispatcher_process_lost(
                         out_dir, manifest, stop_path, auth_path,
-                        prior_authorization)
+                        prior_authorization,
+                        validated_prior_authorization_sha256)
             finally:
                 portalocker.unlock(lease)
     if deepseek_transport_disconnect_retry:
@@ -5058,6 +6296,10 @@ def main():
     parser.add_argument(
         "--deepseek_resume_classifier_retry", action="store_true")
     parser.add_argument("--dispatcher_process_lost", action="store_true")
+    parser.add_argument("--validated_prior_authorization_sha256")
+    parser.add_argument(
+        "--dispatcher_parent_loss_reader_sha_fix", action="store_true")
+    parser.add_argument("--validated_current_authorization_sha256")
     args = parser.parse_args()
     if not args.confirm_workers_stopped:
         parser.error("--confirm_workers_stopped is required")
@@ -5080,6 +6322,12 @@ def main():
         deepseek_resume_classifier_retry=(
             args.deepseek_resume_classifier_retry),
         dispatcher_process_lost=args.dispatcher_process_lost,
+        validated_prior_authorization_sha256=(
+            args.validated_prior_authorization_sha256),
+        dispatcher_parent_loss_reader_sha_fix=(
+            args.dispatcher_parent_loss_reader_sha_fix),
+        validated_current_authorization_sha256=(
+            args.validated_current_authorization_sha256),
     ), sort_keys=True))
 
 

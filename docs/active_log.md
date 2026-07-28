@@ -1,6 +1,45 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-28 - Experiment Update: DeepSeek `/5` quota pause and resume blocker
+
+- experiment：`exp_20260728_dsv4f_hpfr_full234_rt10_stream_c10_v5`；campaign
+  仍为 incomplete，尚未进入 After/finalize。
+- pause：`KEY_1` 返回 HTTP 429 `GoUsageLimitError`（monthly usage limit
+  reached）。用户明确要求停止；dispatcher parent 退出时 active set 中有 19 个
+  worker（17 running、2 finished 尚未被 dispatcher 回收），17 个在途 worker 由
+  `dispatcher_process_lost` watchdog 安全退出。这是 operator/infrastructure pause，
+  不是方法、evaluator 或 preservation failure。
+- first resume：首次恢复校验暴露 FR-first
+  （`fullrewrite -> hybridpatch`）样本的 method-order 处理错误；恢复尝试未改写任何
+  已提交 result、checkpoint、API/raw evidence，stop/recovery provenance 保持
+  append-only。
+- recovery transaction：修复后的正式授权已完成 19-worker reconcile，但在归档
+  16 个 emergency stop 的第一个文件前触发 Windows 260 字符路径限制；active set
+  与 metadata closure 已按 pending journal 落盘，canonical/emergency stop 源文件
+  尚未移动，未调用 API。恢复授权 ID 现改为 `dpl-<12hex>`，history 根缩为
+  `r/`；现有 pending 必须先把原 journal 与三个 byte-exact history 文件重绑定到
+  `r/dpl-…`，再继续同一事务。
+- final validator：parent-loss authorization 不得继承 superseded DeepSeek
+  inspector/resume-classifier 的阶段布尔标志；否则通用 reader 会误把 `dpl-*`
+  当作 inspector authorization ID。若 stop 已归档后才暴露该问题，只允许在同父、
+  精确 tooling delta 下归档旧 pending、移除这两个阶段标志并幂等完成原事务。
+- API schema validator：未提交成功 stream 按 `api_call/4` 的实际字段
+  `response_classification="normal"` 验证；该 schema 不写 `model_empty=false`。
+  已短路径再准备且已移除阶段标志的 pending，只允许在同父、同一五文件修复集合、
+  fingerprint delta 仅为 `run_meta.py` 时另存
+  `pending.api-validator-before.json` 并更新 recovery identity，不重放 provider call。
+- authorization SHA reader：完成 parent-loss 事务后发现 reader 的局部 `path`
+  被 transport sidecar 遍历覆盖，CLI 曾返回最后一个 sidecar SHA 而非 authorization
+  文件 SHA。修复后两类路径变量隔离；当前已完成 authorization 只在零 worker
+  metadata 绑定、精确同父五文件修复范围内归档旧记录并重签，且新旧 SHA 与唯一
+  dispatch witness 严格绑定、支持崩溃后的幂等补齐。后续 parent-loss 授权不继承
+  上一层的 current-only reader witness；历史 witness 按 authorization chain 各自
+  的归档路径和 SHA 逐层验证。
+- next resume：修复并重新授权后，继续使用同一 `/5` out_dir 和 manifest
+  原始方法顺序，对全部未完成 sample/method 从首个未提交 RT 断点续跑；不得只恢复
+  这 17 个 worker，也不得重发已提交 RT、补 0 或拼接新目录。
+
 ## 2026-07-28 - After Experiment: DeepSeek `/4` terminal-shape incompatibility
 
 - experiment：`exp_20260727_dsv4f_hpfr_full234_rt10_stream_c10`；固定身份为
