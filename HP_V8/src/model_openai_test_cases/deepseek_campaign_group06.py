@@ -123,13 +123,17 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
 
         args = self._queue_args()
         manifest = self._queue_manifest(assignments)
+        launch_assignments = [
+            paired_dispatch._mark_proven_never_started_assignment(item)
+            for item in assignments
+        ]
         task_plans = {
             item["sample"]: {
                 "path": f"{item['sample']}.task_plan.json",
                 "sha256": "a" * 64,
                 "forward_state_sequence": ["state"],
             }
-            for item in assignments
+            for item in launch_assignments
         }
         launch_batches = []
         lifecycle = []
@@ -245,7 +249,8 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
                             "preservation_violations": 0,
                         }):
                 paired_dispatch._run_worker_queue(
-                    args, out_dir, manifest, task_plans, keys, assignments,
+                    args, out_dir, manifest, task_plans, keys,
+                    launch_assignments,
                     {}, dispatch_log, {}, infrastructure, evaluator,
                     completed, len(assignments), slots_per_key,
                     not_started)
@@ -523,9 +528,15 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
             ["quota-a", "quota-b", "quota-x"],
         )
         self.assertEqual(
+            exhausted[0]["infrastructure_incomplete_samples"],
+            ["quota-a", "quota-x"],
+        )
+        self.assertEqual(
             exhausted[0]["not_started_pending_samples"],
             ["quota-b"],
         )
+        self.assertEqual(
+            exhausted[0]["resume_pending_no_healthy_key_samples"], [])
         self.assertEqual(
             result["infrastructure"],
             {"quota-a", "quota-x"},
@@ -566,6 +577,458 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
             with self.assertRaisesRegex(RuntimeError, "cannot prove pending"):
                 paired_dispatch._verified_deepseek_resume_missing_samples(
                     out_dir, [assignment])
+
+    def test_legacy_queue_exhausted_rejects_execution_evidence(self):
+        assignment = self._assignment("quota-b", "KEY_1")
+
+        def write_result(out_dir):
+            path = os.path.join(out_dir, "hybridpatch", "quota-b.jsonl")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("{}\n")
+
+        def write_checkpoint(out_dir):
+            path = os.path.join(out_dir, "hybridpatch", "quota-b.ckpt.json")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump({"sample": "quota-b"}, handle)
+
+        def write_api(out_dir):
+            paired_dispatch.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"),
+                {"sample": "quota-b", "method": "hybridpatch"},
+            )
+
+        def write_metadata(out_dir):
+            paired_dispatch.append_jsonl_locked(
+                os.path.join(out_dir, "run_metadata.jsonl"),
+                {"samples": ["quota-b"], "methods": ["hybridpatch"]},
+            )
+
+        cases = {
+            "result": write_result,
+            "checkpoint": write_checkpoint,
+            "api": write_api,
+            "metadata": write_metadata,
+        }
+        for label, writer in cases.items():
+            with self.subTest(label=label):
+                with tempfile.TemporaryDirectory() as out_dir:
+                    dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+                    paired_dispatch.append_jsonl_locked(dispatch_log, {
+                        "event": "queue_exhausted_no_healthy_key",
+                        "reason": (
+                            paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON),
+                        "quarantined_key_labels": ["KEY_1", "KEY_2"],
+                        "pending_samples": ["quota-b"],
+                    })
+                    for event in ("queue_complete", "campaign_incomplete"):
+                        paired_dispatch.append_jsonl_locked(dispatch_log, {
+                            "event": event,
+                            "completed_samples": [],
+                            "infrastructure_incomplete_samples": ["quota-b"],
+                            "evaluator_incomplete_samples": [],
+                        })
+                    writer(out_dir)
+                    with self.assertRaisesRegex(
+                            RuntimeError, "cannot prove pending"):
+                        paired_dispatch._verified_deepseek_resume_missing_samples(
+                            out_dir, [assignment])
+
+    def test_resume_pending_without_original_evidence_is_rejected(self):
+        assignment = self._assignment("sample-a", "KEY_1")
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "queue_exhausted_no_healthy_key",
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+                "quarantined_key_labels": ["KEY_1"],
+                "pending_samples": ["sample-a"],
+                "infrastructure_incomplete_samples": [],
+                "not_started_pending_samples": [],
+                "resume_pending_no_healthy_key_samples": ["sample-a"],
+            })
+            for event in ("queue_complete", "campaign_incomplete"):
+                paired_dispatch.append_jsonl_locked(dispatch_log, {
+                    "event": event,
+                    "completed_samples": [],
+                    "infrastructure_incomplete_samples": [],
+                    "not_started_no_healthy_key_samples": [],
+                    "resume_pending_no_healthy_key_samples": ["sample-a"],
+                    "evaluator_incomplete_samples": [],
+                })
+            with self.assertRaisesRegex(RuntimeError, "cannot prove pending"):
+                paired_dispatch._verified_deepseek_resume_missing_samples(
+                    out_dir, [assignment])
+
+    def test_interrupted_resume_prefix_is_not_not_started(self):
+        assignment = self._assignment("sample-a", "KEY_1")
+        assignment["interrupted_resume_evidence"] = {"worker_launch_id": "w1"}
+        assignment = paired_dispatch._mark_pending_provenance_assignment(
+            assignment, paired_dispatch.PENDING_INTERRUPTED)
+        args = self._queue_args()
+        manifest = self._queue_manifest([assignment])
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "key_quarantined",
+                "key_label": "KEY_1",
+                "observation_index": 1,
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+            })
+            not_started = set()
+            resume_pending = set()
+            paired_dispatch._run_worker_queue(
+                args, out_dir, manifest, {}, {"KEY_1": "secret"},
+                [assignment], {}, dispatch_log, {}, set(), set(), set(), 1, 1,
+                not_started, resume_pending)
+            exhausted = [
+                row for row in paired_dispatch._read_jsonl(dispatch_log)
+                if row.get("event") == "queue_exhausted_no_healthy_key"
+            ]
+            complete = [
+                row for row in paired_dispatch._read_jsonl(dispatch_log)
+                if row.get("event") == "queue_complete"
+            ]
+        self.assertEqual(not_started, set())
+        self.assertEqual(resume_pending, {"sample-a"})
+        self.assertEqual(exhausted[-1]["pending_samples"], ["sample-a"])
+        self.assertEqual(exhausted[-1]["not_started_pending_samples"], [])
+        self.assertEqual(
+            exhausted[-1]["resume_pending_no_healthy_key_samples"],
+            ["sample-a"],
+        )
+        self.assertEqual(
+            complete[-1]["resume_pending_no_healthy_key_samples"],
+            ["sample-a"],
+        )
+
+    def test_actual_launch_clears_resume_pending_no_healthy_key(self):
+        assignment = paired_dispatch._mark_pending_provenance_assignment(
+            self._assignment("sample-a", "KEY_1"),
+            paired_dispatch.PENDING_INTERRUPTED)
+        args = self._queue_args()
+        manifest = self._queue_manifest([assignment])
+        not_started = {"sample-a"}
+        resume_pending = {"sample-a"}
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            with mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    return_value=["sample-a"]), mock.patch.object(
+                        paired_dispatch, "_write_active_worker_set"):
+                paired_dispatch._run_worker_queue(
+                    args, out_dir, manifest, {}, {"KEY_1": "secret"},
+                    [assignment], {}, dispatch_log, {}, set(), set(), set(),
+                    1, 1, not_started, resume_pending)
+        self.assertEqual(not_started, set())
+        self.assertEqual(resume_pending, set())
+
+    def test_launch_failure_preserves_pending_no_healthy_key_sets(self):
+        assignment = paired_dispatch._mark_pending_provenance_assignment(
+            self._assignment("sample-a", "KEY_1"),
+            paired_dispatch.PENDING_INTERRUPTED)
+        args = self._queue_args()
+        manifest = self._queue_manifest([assignment])
+        not_started = {"sample-a"}
+        resume_pending = {"sample-a"}
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            with mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    side_effect=RuntimeError("launch failed")), \
+                    mock.patch.object(
+                        paired_dispatch, "_write_active_worker_set"):
+                with self.assertRaisesRegex(RuntimeError, "launch failed"):
+                    paired_dispatch._run_worker_queue(
+                        args, out_dir, manifest, {}, {"KEY_1": "secret"},
+                        [assignment], {}, dispatch_log, {}, set(), set(),
+                        set(), 1, 1, not_started, resume_pending)
+        self.assertEqual(not_started, {"sample-a"})
+        self.assertEqual(resume_pending, {"sample-a"})
+
+    def test_resume_selection_classifies_interrupted_authorization(self):
+        assignment = self._assignment("sample-a", "KEY_1")
+        recovery = {
+            "provider_access_retry_authorizations": {},
+            "provider_access_resume_samples": frozenset(),
+            "worker_launch_ids": frozenset(),
+        }
+        evidence = {
+            "schema": "anchorpatch.interrupted_phase_resume/1",
+            "prior_worker_launch_id": "worker-a",
+        }
+        with mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=recovery), mock.patch.object(
+                    paired_dispatch, "_latest_sample_outcomes",
+                    return_value={}), mock.patch.object(
+                        paired_dispatch, "_verified_interrupted_phase_resume",
+                        return_value=evidence):
+            selected, authorizations = (
+                paired_dispatch._select_invocation_assignments(
+                    "unused", [assignment], resume=True,
+                    target_round_trips=10, allow_audited_interrupted=True,
+                    task_plans={"sample-a": {"sha256": "a" * 64}},
+                    allow_deepseek_resume=True)
+            )
+
+        self.assertEqual(authorizations, {})
+        self.assertEqual(
+            paired_dispatch._pending_provenance(selected[0]),
+            paired_dispatch.PENDING_INTERRUPTED,
+        )
+        self.assertEqual(
+            selected[0]["interrupted_resume_evidence"], evidence)
+
+    def test_resume_missing_provenance_classifies_parent_loss_preauth(self):
+        assignment = self._assignment("sample-a", "KEY_1")
+        recovery = {
+            "worker_launch_ids": frozenset({"worker-a"}),
+            "deepseek_recovered_workers": {},
+            "api_incident_kinds": {},
+            "dispatcher_parent_loss_workers": {
+                "sample-a": {
+                    "sample": "sample-a",
+                    "status": "preauthorization",
+                    "worker_launch_id": "worker-a",
+                },
+            },
+        }
+        dispatch_rows = [
+            {
+                "event": "launch",
+                "sample": "sample-a",
+                "pid": 12345,
+                "worker_launch_id": "worker-a",
+            },
+            {
+                "event": "worker_exit",
+                "sample": "sample-a",
+                "pid": 12345,
+                "returncode": 97,
+                "worker_launch_id": "worker-a",
+                "disposition": "campaign_fatal",
+            },
+        ]
+
+        def read_jsonl(path):
+            if path.endswith("dispatch_log.jsonl"):
+                return dispatch_rows
+            if path.endswith("api_calls.jsonl"):
+                return []
+            return []
+
+        provenance = {}
+        with mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=recovery), mock.patch.object(
+                    paired_dispatch, "read_run_metadata_snapshot",
+                    return_value=[]), mock.patch.object(
+                        paired_dispatch, "_read_jsonl",
+                        side_effect=read_jsonl), mock.patch.object(
+                            paired_dispatch, "_queued_pending_evidence",
+                            return_value=["dispatch_log.jsonl:1"]), \
+                mock.patch.object(
+                    paired_dispatch, "_worker_lease_is_held",
+                    return_value=False):
+            allowed = (
+                paired_dispatch
+                ._verified_deepseek_resume_missing_samples_with_provenance(
+                    "unused", [assignment], provenance_out=provenance)
+            )
+
+        self.assertEqual(allowed, {"sample-a"})
+        self.assertEqual(
+            provenance,
+            {"sample-a": paired_dispatch.PENDING_INTERRUPTED},
+        )
+
+    def test_resume_missing_provenance_classifies_recovered_failed_worker(self):
+        assignment = self._assignment("sample-a", "KEY_1")
+        worker = {
+            "sample": "sample-a",
+            "status": "failed",
+            "worker_launch_id": "worker-a",
+            "worker_pid": 12345,
+            "invocation_id": "invocation-a",
+        }
+        recovery = {
+            "worker_launch_ids": frozenset({"worker-a"}),
+            "deepseek_recovered_workers": {"sample-a": dict(worker)},
+            "api_incident_kinds": {},
+            "provider_access_retry_authorizations": {},
+            "provider_access_resume_samples": frozenset(),
+        }
+        metadata = [{
+            **worker,
+            "samples": ["sample-a"],
+            "methods": ["hybridpatch", "fullrewrite"],
+        }]
+        dispatch_rows = [
+            {
+                "event": "launch",
+                "sample": "sample-a",
+                "pid": 12345,
+                "worker_launch_id": "worker-a",
+            },
+            {
+                "event": "worker_exit",
+                "sample": "sample-a",
+                "pid": 12345,
+                "returncode": 1,
+                "worker_launch_id": "worker-a",
+                "disposition": "campaign_fatal",
+            },
+        ]
+
+        def read_jsonl(path):
+            if path.endswith("dispatch_log.jsonl"):
+                return dispatch_rows
+            if path.endswith("api_calls.jsonl"):
+                return []
+            return []
+
+        provenance = {}
+        with mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=recovery), mock.patch.object(
+                    paired_dispatch, "read_run_metadata_snapshot",
+                    return_value=metadata), mock.patch.object(
+                        paired_dispatch, "_read_jsonl",
+                        side_effect=read_jsonl), mock.patch.object(
+                            paired_dispatch, "_queued_pending_evidence",
+                            return_value=["run_metadata.jsonl:1"]), \
+                mock.patch.object(
+                    paired_dispatch, "_worker_lease_is_held",
+                    return_value=False):
+            allowed = (
+                paired_dispatch
+                ._verified_deepseek_resume_missing_samples_with_provenance(
+                    "unused", [assignment], provenance_out=provenance)
+            )
+
+        self.assertEqual(allowed, {"sample-a"})
+        self.assertEqual(
+            provenance,
+            {
+                "sample-a": (
+                    paired_dispatch.PENDING_INFRASTRUCTURE_INCOMPLETE)
+            },
+        )
+
+    def test_recovered_failed_missing_outcome_exhaustion_is_infrastructure(self):
+        assignment = self._assignment("sample-a", "KEY_1")
+        worker = {
+            "sample": "sample-a",
+            "status": "failed",
+            "worker_launch_id": "worker-a",
+            "worker_pid": 12345,
+            "invocation_id": "invocation-a",
+        }
+        recovery = {
+            "worker_launch_ids": frozenset({"worker-a"}),
+            "deepseek_recovered_workers": {"sample-a": dict(worker)},
+            "api_incident_kinds": {},
+            "provider_access_retry_authorizations": {},
+            "provider_access_resume_samples": frozenset(),
+        }
+        metadata = [{
+            **worker,
+            "samples": ["sample-a"],
+            "methods": ["hybridpatch", "fullrewrite"],
+        }]
+
+        args = self._queue_args()
+        manifest = self._queue_manifest([assignment])
+        infrastructure = set()
+        not_started = set()
+        resume_pending = set()
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            for row in (
+                    {
+                        "event": "launch",
+                        "sample": "sample-a",
+                        "pid": 12345,
+                        "worker_launch_id": "worker-a",
+                    },
+                    {
+                        "event": "worker_exit",
+                        "sample": "sample-a",
+                        "pid": 12345,
+                        "returncode": 1,
+                        "worker_launch_id": "worker-a",
+                        "disposition": "campaign_fatal",
+                    },
+                    {
+                        "event": "key_quarantined",
+                        "key_label": "KEY_1",
+                        "observation_index": 1,
+                        "reason": (
+                            paired_dispatch
+                            .DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON),
+                    },
+            ):
+                paired_dispatch.append_jsonl_locked(dispatch_log, row)
+            with mock.patch.object(
+                    paired_dispatch, "campaign_recovery_incident_evidence",
+                    return_value=recovery), mock.patch.object(
+                        paired_dispatch, "read_run_metadata_snapshot",
+                        return_value=metadata), mock.patch.object(
+                            paired_dispatch, "_queued_pending_evidence",
+                            return_value=["run_metadata.jsonl:1"]), \
+                    mock.patch.object(
+                        paired_dispatch, "_worker_lease_is_held",
+                        return_value=False), mock.patch.object(
+                            paired_dispatch, "_write_active_worker_set"):
+                selected, authorizations = (
+                    paired_dispatch._select_invocation_assignments(
+                        out_dir, [assignment], resume=True,
+                        target_round_trips=10, allow_deepseek_resume=True)
+                )
+                self.assertEqual(authorizations, {})
+                self.assertEqual(
+                    paired_dispatch._pending_provenance(selected[0]),
+                    paired_dispatch.PENDING_INFRASTRUCTURE_INCOMPLETE,
+                )
+                paired_dispatch._run_worker_queue(
+                    args, out_dir, manifest, {}, {"KEY_1": "secret"},
+                    selected, {}, dispatch_log, {}, infrastructure, set(),
+                    set(), 1, 1, not_started, resume_pending)
+            exhausted = [
+                row for row in paired_dispatch._read_jsonl(dispatch_log)
+                if row.get("event") == "queue_exhausted_no_healthy_key"
+            ]
+        self.assertEqual(infrastructure, {"sample-a"})
+        self.assertEqual(not_started, set())
+        self.assertEqual(resume_pending, set())
+        self.assertEqual(
+            exhausted[-1]["infrastructure_incomplete_samples"],
+            ["sample-a"],
+        )
+
+    def test_resume_selection_requires_pending_provenance(self):
+        assignment = self._assignment("sample-a", "KEY_1")
+        recovery = {
+            "provider_access_retry_authorizations": {},
+            "provider_access_resume_samples": frozenset(),
+            "worker_launch_ids": frozenset(),
+        }
+        with mock.patch.object(
+                paired_dispatch, "campaign_recovery_incident_evidence",
+                return_value=recovery), mock.patch.object(
+                    paired_dispatch, "_latest_sample_outcomes",
+                    return_value={}), mock.patch.object(
+                        paired_dispatch,
+                        "_verified_deepseek_resume_missing_samples_with_provenance",
+                        return_value={"sample-a"}):
+            with self.assertRaisesRegex(
+                    RuntimeError, "missing pending provenance"):
+                paired_dispatch._select_invocation_assignments(
+                    "unused", [assignment], resume=True,
+                    target_round_trips=10, allow_pristine_pending=True,
+                    allow_deepseek_resume=True)
 
     def test_key_failover_inspector_rejects_tamper(self):
         manifest, dispatch_rows, api_rows, outcome_rows, launches = (
@@ -859,6 +1322,150 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
             ["sample-a", "sample-b"],
         )
 
+    def test_reactivated_key_can_return_as_destination_for_pending_work(self):
+        assignment = self._assignment("sample-a", "KEY_1")
+        manifest = self._queue_manifest([assignment])
+        args = self._queue_args()
+        args.reactivate_key_label = ["KEY_1"]
+        args.key_reactivation_reason = "operator replaced key material"
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "key_quarantined",
+                "key_label": "KEY_1",
+                "observation_index": 1,
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+            })
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "key_failover_assigned",
+                "sample": "sample-a",
+                "from_key_label": "KEY_1",
+                "to_key_label": "KEY_2",
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+                "failover_count": 1,
+                "original_key_label": "KEY_1",
+            })
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "key_quarantined",
+                "key_label": "KEY_2",
+                "observation_index": 1,
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+            })
+            with mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    return_value=["sample-a"]), mock.patch.object(
+                        paired_dispatch, "_write_active_worker_set"):
+                paired_dispatch._run_worker_queue(
+                    args, out_dir, manifest, {},
+                    {"KEY_1": "replacement", "KEY_2": "healthy"},
+                    [assignment], {}, dispatch_log, {}, set(), set(), set(),
+                    1, 1, set(), set())
+            rows = paired_dispatch._read_jsonl(dispatch_log)
+        self.assertEqual(
+            [row.get("event") for row in rows
+             if row.get("event") == paired_dispatch.KEY_REACTIVATION_EVENT],
+            [paired_dispatch.KEY_REACTIVATION_EVENT],
+        )
+        assigned = [
+            row for row in rows
+            if row.get("event") == "key_failover_assigned"
+        ]
+        self.assertEqual(assigned[-1]["from_key_label"], "KEY_2")
+        self.assertEqual(assigned[-1]["to_key_label"], "KEY_1")
+        self.assertEqual(assigned[-1]["failover_count"], 2)
+
+    def test_reactivation_requires_pending_work_without_key_event(self):
+        args = self._queue_args()
+        args.reactivate_key_label = ["KEY_1"]
+        args.key_reactivation_reason = "operator replaced key material"
+        assignments = []
+        manifest = self._queue_manifest(assignments)
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "key_quarantined",
+                "key_label": "KEY_1",
+                "observation_index": 1,
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+            })
+            with self.assertRaisesRegex(RuntimeError, "no pending work"):
+                paired_dispatch._run_worker_queue(
+                    args, out_dir, manifest, {}, {"KEY_1": "secret"},
+                    assignments, {}, dispatch_log, {}, set(), set(), set(),
+                    0, 1, set())
+            rows = paired_dispatch._read_jsonl(dispatch_log)
+        self.assertEqual(
+            [row for row in rows
+             if row.get("event") == paired_dispatch.KEY_REACTIVATION_EVENT],
+            [],
+        )
+
+    def test_corrupt_reactivation_history_writes_no_key_event(self):
+        args = self._queue_args()
+        args.reactivate_key_label = ["KEY_1"]
+        args.key_reactivation_reason = "operator replaced key material"
+        assignment = self._assignment("sample-a", "KEY_1")
+        manifest = self._queue_manifest([assignment])
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "key_quota_observed",
+                "key_label": "KEY_1",
+                "observation_index": 1,
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+            })
+            with self.assertRaisesRegex(
+                    RuntimeError, "durable key quarantine history is invalid"):
+                paired_dispatch._run_worker_queue(
+                    args, out_dir, manifest, {}, {"KEY_1": "secret"},
+                    [assignment], {}, dispatch_log, {}, set(), set(), set(),
+                    1, 1, set())
+            rows = paired_dispatch._read_jsonl(dispatch_log)
+        self.assertEqual(
+            [row for row in rows
+             if row.get("event") == paired_dispatch.KEY_REACTIVATION_EVENT],
+            [],
+        )
+
+    def test_second_quarantine_reactivation_index_is_contiguous(self):
+        keys = {"KEY_1": "secret"}
+        rows = [
+            {
+                "event": "key_quarantined",
+                "key_label": "KEY_1",
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+                "observation_index": 1,
+                "quarantine_index": 1,
+                "quarantined_key_count": 1,
+            },
+        ]
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            rows = paired_dispatch._append_key_reactivation_events(
+                dispatch_log, rows, keys, ["KEY_1"],
+                "operator replaced key material", pending_work_exists=True)
+            rows.append({
+                "event": "key_quarantined",
+                "key_label": "KEY_1",
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+                "observation_index": 2,
+                "quarantine_index": 1,
+                "quarantined_key_count": 1,
+            })
+            rows = paired_dispatch._append_key_reactivation_events(
+                dispatch_log, rows, keys, ["KEY_1"],
+                "operator replaced key material", pending_work_exists=True)
+
+        reactivations = [
+            row for row in rows
+            if row.get("event") == paired_dispatch.KEY_REACTIVATION_EVENT
+        ]
+        self.assertEqual(
+            [(row["reactivation_index"], row["observed_quota_count"])
+             for row in reactivations],
+            [(1, 1), (2, 2)],
+        )
+
     def test_key_reactivation_inspector_binds_epoch(self):
         manifest, dispatch_rows, api_rows, outcome_rows, _launches = (
             self._audit_fixture())
@@ -896,6 +1503,82 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
         tampered[2]["reactivation_index"] = 2
         self.assertIn(
             "key reactivation evidence invalid",
+            "; ".join(paired_dispatch._inspect_deepseek_key_failover_audit(
+                manifest, tampered, api_rows, outcome_rows, launches)),
+        )
+
+    def test_queue_exhaustion_inspector_binds_pending_provenance(self):
+        manifest = {
+            "config": {
+                "samples": ["quota-a", "never-a", "resume-a"],
+                "method_set": ["hybridpatch", "fullrewrite"],
+                "key_count": 1,
+            },
+            "assignments": [
+                {"sample": sample, "key_label": "KEY_1"}
+                for sample in ("quota-a", "never-a", "resume-a")
+            ],
+        }
+        api_rows = [
+            _quota_row(sample="quota-a", worker_id="worker-a",
+                       request_id="request-a"),
+        ]
+        outcome_rows = [
+            _quota_outcome(sample="quota-a", worker_id="worker-a",
+                           request_id="request-a"),
+        ]
+        launch = {
+            "event": "launch", "sample": "quota-a",
+            "key_label": "KEY_1", "original_key_label": "KEY_1",
+            "prior_key_label": None, "failover_count": 0,
+            "failover_reason": None, "worker_launch_id": "worker-a",
+        }
+        queue_exhausted = {
+            "event": "queue_exhausted_no_healthy_key",
+            "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+            "quarantined_key_labels": ["KEY_1"],
+            "pending_samples": ["never-a", "resume-a"],
+            "infrastructure_incomplete_samples": [],
+            "not_started_pending_samples": ["never-a"],
+            "resume_pending_no_healthy_key_samples": ["resume-a"],
+            "pending_sample_provenance": {
+                "never-a": paired_dispatch.PENDING_NEVER_STARTED,
+                "resume-a": paired_dispatch.PENDING_INTERRUPTED,
+            },
+        }
+        dispatch_rows = [
+            launch,
+            {
+                "event": "key_quarantined", "key_label": "KEY_1",
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+                "quarantine_index": 1, "quarantined_key_count": 1,
+                "observation_index": 1, "trigger_sample": "quota-a",
+                "trigger_worker_launch_id": "worker-a",
+                "trigger_request_id": "request-a",
+                "trigger_http_attempt_count": 3, "api_row": 1,
+                "api_row_count": 1,
+                "api_row_sha256": paired_dispatch._canonical_record_sha256(
+                    api_rows[0]),
+                "sample_outcome_row": 1,
+                "sample_outcome_sha256": (
+                    paired_dispatch._canonical_record_sha256(
+                        outcome_rows[0])),
+                "sample_outcome_created_at": outcome_rows[0]["created_at"],
+            },
+            queue_exhausted,
+        ]
+        launches = {"worker-a": launch}
+        self.assertEqual(
+            paired_dispatch._inspect_deepseek_key_failover_audit(
+                manifest, dispatch_rows, api_rows, outcome_rows, launches),
+            [],
+        )
+
+        tampered = copy.deepcopy(dispatch_rows)
+        tampered[-1]["not_started_pending_samples"] = ["resume-a"]
+        tampered[-1]["resume_pending_no_healthy_key_samples"] = ["never-a"]
+        self.assertIn(
+            "queue exhaustion pending provenance invalid",
             "; ".join(paired_dispatch._inspect_deepseek_key_failover_audit(
                 manifest, tampered, api_rows, outcome_rows, launches)),
         )

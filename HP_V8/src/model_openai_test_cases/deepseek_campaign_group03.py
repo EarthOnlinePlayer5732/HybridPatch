@@ -567,7 +567,11 @@ class DeepSeekOpenCodeCampaignGroup03Mixin:
                     allow_deepseek_resume=True,
                 )
             )
-        self.assertEqual(selected, [assignment])
+        self.assertEqual(
+            selected,
+            [paired_dispatch._mark_pending_provenance_assignment(
+                assignment, paired_dispatch.PENDING_NEVER_STARTED)],
+        )
         self.assertEqual(authorizations, {})
         pristine.assert_not_called()
 

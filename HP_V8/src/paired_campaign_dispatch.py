@@ -152,7 +152,10 @@ DEEPSEEK_MONTHLY_USAGE_LIMIT_MESSAGE_PREFIX = (
     "Monthly usage limit reached."
 )
 KEY_REACTIVATION_EVENT = "key_reactivated"
-NOT_STARTED_PENDING_FIELD = "_not_started_pending"
+PENDING_PROVENANCE_FIELD = "_pending_provenance"
+PENDING_NEVER_STARTED = "never_started"
+PENDING_INFRASTRUCTURE_INCOMPLETE = "infrastructure_incomplete"
+PENDING_INTERRUPTED = "interrupted"
 METHOD_PHASE_COMPLETE_SCHEMA = "anchorpatch.method_phase_complete/1"
 CONFIRMATION_KNOWN_USAGE_LIMIT_USD = 130.0
 CONFIRMATION_EXPERIMENT_ID = (
@@ -1955,6 +1958,8 @@ def _queued_pending_evidence(
                 for field in (
                     "completed_samples",
                     "infrastructure_incomplete_samples",
+                    "not_started_no_healthy_key_samples",
+                    "resume_pending_no_healthy_key_samples",
                     "evaluator_incomplete_samples",
                 )
             )
@@ -1963,6 +1968,8 @@ def _queued_pending_evidence(
                 sample in (record.get(field) or [])
                 for field in (
                     "infrastructure_incomplete_samples",
+                    "not_started_no_healthy_key_samples",
+                    "resume_pending_no_healthy_key_samples",
                     "evaluator_incomplete_samples",
                     "completed_samples",
                 )
@@ -2266,6 +2273,24 @@ def _deepseek_campaign_runtime_identity(out_dir):
 
 def _verified_deepseek_resume_missing_samples(out_dir, assignments):
     """Allow DeepSeek queued, interrupted, or server-retry-exhausted samples."""
+    return _verified_deepseek_resume_missing_samples_with_provenance(
+        out_dir, assignments)
+
+
+def _record_pending_provenance(provenance_out, sample, provenance):
+    if provenance_out is None:
+        return
+    prior = provenance_out.get(sample)
+    if prior is not None and prior != provenance:
+        raise RuntimeError(
+            "queued resume pending provenance is inconsistent: "
+            f"{sample} {prior!r}!={provenance!r}")
+    provenance_out[sample] = provenance
+
+
+def _verified_deepseek_resume_missing_samples_with_provenance(
+        out_dir, assignments, *, provenance_out=None):
+    """Allow DeepSeek resume and classify pending samples when requested."""
     samples = [item["sample"] for item in assignments]
     sample_set = set(samples)
     recovery_incidents = campaign_recovery_incident_evidence(out_dir)
@@ -2274,9 +2299,8 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
         "deepseek_recovered_workers", {})
     api_incident_kinds = recovery_incidents.get(
         "api_incident_kinds", {})
-    parent_loss_workers = recovery_incidents[
-        "dispatcher_parent_loss_workers"
-    ]
+    parent_loss_workers = recovery_incidents.get(
+        "dispatcher_parent_loss_workers", {})
     latest_metadata = {}
     metadata_rows = read_run_metadata_snapshot(out_dir)
     for record in metadata_rows:
@@ -2304,10 +2328,14 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
             out_dir, sample, item.get("methods") or [])
         if not evidence:
             allowed.add(sample)
+            _record_pending_provenance(
+                provenance_out, sample, PENDING_NEVER_STARTED)
             continue
         if _legacy_queue_exhausted_pending_evidence(
                 out_dir, sample, evidence):
             allowed.add(sample)
+            _record_pending_provenance(
+                provenance_out, sample, PENDING_NEVER_STARTED)
             continue
         parent_worker = parent_loss_workers.get(sample)
         if isinstance(parent_worker, dict) and parent_worker.get(
@@ -2344,6 +2372,8 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
                     "queued resume parent-loss preauthorization evidence "
                     f"is invalid: {sample}")
             allowed.add(sample)
+            _record_pending_provenance(
+                provenance_out, sample, PENDING_INTERRUPTED)
             continue
         metadata = latest_metadata.get(sample)
         worker_id = (
@@ -2378,11 +2408,21 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
                     "queued resume recovered worker identity is invalid: "
                     f"{sample}"
                 )
-            if status in {"failed", "interrupted_by_dispatcher"}:
+            if status == "interrupted_by_dispatcher":
                 allowed.add(sample)
+                _record_pending_provenance(
+                    provenance_out, sample, PENDING_INTERRUPTED)
+                continue
+            if status == "failed":
+                allowed.add(sample)
+                _record_pending_provenance(
+                    provenance_out, sample,
+                    PENDING_INFRASTRUCTURE_INCOMPLETE)
                 continue
         if status == "interrupted_by_dispatcher":
             allowed.add(sample)
+            _record_pending_provenance(
+                provenance_out, sample, PENDING_INTERRUPTED)
             continue
         if status == "failed":
             failed_rows = [
@@ -2414,6 +2454,9 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
             if (len(failed_rows) == 1
                     or len(authorized_disconnect_rows) == 1):
                 allowed.add(sample)
+                _record_pending_provenance(
+                    provenance_out, sample,
+                    PENDING_INFRASTRUCTURE_INCOMPLETE)
                 continue
         raise RuntimeError(
             "queued resume cannot prove pending sample was never "
@@ -3486,7 +3529,10 @@ def _select_invocation_assignments(
         if read_sample_outcomes(out_dir):
             raise RuntimeError(
                 "new campaign directory already contains sample outcomes")
-        return list(assignments), {}
+        return [
+            _mark_proven_never_started_assignment(item)
+            for item in assignments
+        ], {}
     recovery_incidents = campaign_recovery_incident_evidence(out_dir)
     provider_access_retries = recovery_incidents[
         "provider_access_retry_authorizations"
@@ -3523,13 +3569,17 @@ def _select_invocation_assignments(
         ]
         missing = [item["sample"] for item in missing_assignments]
     if missing and allow_deepseek_resume:
-        allowed = _verified_deepseek_resume_missing_samples(
-            out_dir, missing_assignments)
+        pending_provenance = {}
+        allowed = _verified_deepseek_resume_missing_samples_with_provenance(
+            out_dir, missing_assignments,
+            provenance_out=pending_provenance)
         missing_assignments = [
             item for item in missing_assignments
             if item["sample"] not in allowed
         ]
         missing = [item["sample"] for item in missing_assignments]
+    else:
+        pending_provenance = {}
     if missing:
         if not allow_pristine_pending:
             raise RuntimeError(
@@ -3540,6 +3590,8 @@ def _select_invocation_assignments(
         else:
             _verify_pristine_method_phase(
                 out_dir, missing_assignments, method_phase)
+        for sample in missing:
+            pending_provenance[sample] = PENDING_NEVER_STARTED
     selected = []
     authorizations = {}
     for item in assignments:
@@ -3549,6 +3601,17 @@ def _select_invocation_assignments(
             if sample in interrupted_evidence:
                 selected_item["interrupted_resume_evidence"] = (
                     interrupted_evidence[sample])
+                pending_provenance[sample] = PENDING_INTERRUPTED
+            if sample in provider_access_retries:
+                pending_provenance[sample] = (
+                    PENDING_INFRASTRUCTURE_INCOMPLETE)
+            provenance = pending_provenance.get(sample)
+            if provenance is None:
+                raise RuntimeError(
+                    "queued resume missing pending provenance: "
+                    f"{sample}")
+            selected_item = _mark_pending_provenance_assignment(
+                selected_item, provenance)
             selected.append(selected_item)
             if sample in provider_access_retries:
                 authorizations[sample] = dict(
@@ -3592,7 +3655,8 @@ def _select_invocation_assignments(
             })
         if (allow_deepseek_resume
                 and "generation_index" not in evidence):
-            selected.append(dict(item))
+            selected.append(_mark_pending_provenance_assignment(
+                item, PENDING_INFRASTRUCTURE_INCOMPLETE))
             continue
         prior_generation = evidence.get("generation_index")
         if not _is_exact_int(prior_generation) or prior_generation < 0:
@@ -4784,7 +4848,11 @@ def _inspect_deepseek_key_failover_audit(
         if event == "queue_exhausted_no_healthy_key":
             known_keys = sorted(quarantined_at)
             pending_samples = row.get("pending_samples")
+            infrastructure_samples = row.get("infrastructure_incomplete_samples")
             not_started_samples = row.get("not_started_pending_samples")
+            resume_pending_samples = row.get(
+                "resume_pending_no_healthy_key_samples")
+            pending_provenance = row.get("pending_sample_provenance")
             if (row.get("reason") != DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON
                     or row.get("quarantined_key_labels") != known_keys
                     or len(known_keys)
@@ -4795,6 +4863,14 @@ def _inspect_deepseek_key_failover_audit(
                     or any(sample not in expected_samples
                            for sample in pending_samples)):
                 errors.append("queue exhaustion key/sample evidence invalid")
+            if (infrastructure_samples is not None
+                    and (not isinstance(infrastructure_samples, list)
+                         or infrastructure_samples
+                         != sorted(set(infrastructure_samples))
+                         or not set(infrastructure_samples).issubset(
+                             set(pending_samples or [])))):
+                errors.append(
+                    "queue exhaustion infrastructure evidence invalid")
             if (not_started_samples is not None
                     and (not isinstance(not_started_samples, list)
                          or not_started_samples
@@ -4803,6 +4879,37 @@ def _inspect_deepseek_key_failover_audit(
                              set(pending_samples or [])))):
                 errors.append(
                     "queue exhaustion not-started evidence invalid")
+            if (resume_pending_samples is not None
+                    and (not isinstance(resume_pending_samples, list)
+                         or resume_pending_samples
+                         != sorted(set(resume_pending_samples))
+                         or not set(resume_pending_samples).issubset(
+                             set(pending_samples or [])))):
+                errors.append(
+                    "queue exhaustion resume-pending evidence invalid")
+            partition_fields = (
+                infrastructure_samples, not_started_samples,
+                resume_pending_samples)
+            if all(item is not None for item in partition_fields):
+                partition_sets = [set(item) for item in partition_fields]
+                union = set().union(*partition_sets)
+                overlap = sum(len(item) for item in partition_sets) != len(union)
+                if overlap or union != set(pending_samples or []):
+                    errors.append(
+                        "queue exhaustion pending partition is invalid")
+                if pending_provenance is not None:
+                    expected_provenance = {}
+                    for sample in infrastructure_samples:
+                        expected_provenance[sample] = (
+                            PENDING_INFRASTRUCTURE_INCOMPLETE)
+                    for sample in not_started_samples:
+                        expected_provenance[sample] = PENDING_NEVER_STARTED
+                    for sample in resume_pending_samples:
+                        expected_provenance[sample] = PENDING_INTERRUPTED
+                    if (not isinstance(pending_provenance, dict)
+                            or pending_provenance != expected_provenance):
+                        errors.append(
+                            "queue exhaustion pending provenance invalid")
             continue
 
         if event not in {"launch", "launch_intent"}:
@@ -6980,19 +7087,37 @@ def _original_key_label(item):
     return item.get("original_key_label") or item.get("key_label")
 
 
-def _mark_not_started_pending_assignment(item):
+def _mark_pending_provenance_assignment(item, provenance):
+    if provenance not in {
+            PENDING_NEVER_STARTED,
+            PENDING_INFRASTRUCTURE_INCOMPLETE,
+            PENDING_INTERRUPTED,
+    }:
+        raise RuntimeError(f"invalid pending provenance: {provenance!r}")
     marked = dict(item)
-    marked[NOT_STARTED_PENDING_FIELD] = True
+    marked[PENDING_PROVENANCE_FIELD] = provenance
     return marked
 
 
-def _is_not_started_pending_assignment(item):
-    return item.get(NOT_STARTED_PENDING_FIELD) is True
+def _mark_proven_never_started_assignment(item):
+    return _mark_pending_provenance_assignment(item, PENDING_NEVER_STARTED)
 
 
-def _clear_not_started_pending_assignment(item):
+def _pending_provenance(item):
+    return item.get(PENDING_PROVENANCE_FIELD)
+
+
+def _is_proven_never_started_assignment(item):
+    return _pending_provenance(item) == PENDING_NEVER_STARTED
+
+
+def _preserve_pending_provenance_assignment(item):
+    return dict(item)
+
+
+def _clear_pending_provenance_assignment(item):
     cleared = dict(item)
-    cleared.pop(NOT_STARTED_PENDING_FIELD, None)
+    cleared.pop(PENDING_PROVENANCE_FIELD, None)
     return cleared
 
 
@@ -7266,7 +7391,7 @@ def _append_key_failover_assignment(
     original_label = _original_key_label(item)
     sample = item["sample"]
     next_count = failover_counts.get(sample, _failover_count(item)) + 1
-    assigned = _clear_not_started_pending_assignment(item)
+    assigned = _clear_pending_provenance_assignment(item)
     assigned.update({
         "key_label": destination_label,
         "original_key_label": original_label,
@@ -7317,7 +7442,7 @@ def _take_available_assignments(
         if label in quarantined_keys:
             continue
         for _index in range(min(free, len(pending))):
-            batch.append(_clear_not_started_pending_assignment(
+            batch.append(_clear_pending_provenance_assignment(
                 pending.pop(0)))
             free -= 1
         while free > 0 and handoff_fifo:
@@ -7374,12 +7499,13 @@ def _append_key_quarantine(
     queued = pending_by_key.get(key_label) or []
     pending_by_key[key_label] = []
     handoff_fifo.extend(
-        _mark_not_started_pending_assignment(item) for item in queued)
+        _preserve_pending_provenance_assignment(item) for item in queued)
     return True
 
 
 def _append_key_reactivation_events(
-        dispatch_log, dispatch_rows, keys, requested_labels, reason):
+        dispatch_log, dispatch_rows, keys, requested_labels, reason,
+        pending_work_exists=None):
     """Record operator-attested replacement key material for quarantined labels."""
     labels = list(requested_labels or [])
     if not labels:
@@ -7414,13 +7540,21 @@ def _append_key_reactivation_events(
                     reactivation_counts.get(label, 0), index)
             quarantined_keys.discard(label)
 
-    appended = []
     for label in labels:
         if label not in quarantined_keys:
             if reactivation_counts.get(label, 0) > 0:
                 continue
             raise RuntimeError(
                 f"cannot reactivate a key label that is not quarantined: {label}")
+    if pending_work_exists is not None and not pending_work_exists:
+        raise RuntimeError(
+            "cannot reactivate key labels with no pending work: "
+            f"{labels}")
+
+    appended = []
+    for label in labels:
+        if label not in quarantined_keys:
+            continue
         before = sorted(quarantined_keys)
         quarantined_keys.remove(label)
         after = sorted(quarantined_keys)
@@ -7600,7 +7734,8 @@ def _restore_key_failover_queue_state(
             })
         selected_failover_counts[sample] = count
         if item["key_label"] in quarantined_keys:
-            handoff_fifo.append(_mark_not_started_pending_assignment(item))
+            handoff_fifo.append(
+                _preserve_pending_provenance_assignment(item))
         else:
             if item["key_label"] not in pending_by_key:
                 raise RuntimeError(
@@ -7615,12 +7750,19 @@ def _restore_key_failover_queue_state(
     }
 
 
+def _queue_has_pending_work(restored):
+    return bool(
+        restored["handoff_fifo"]
+        or any(restored["pending_by_key"].values()))
+
+
 def _run_worker_queue(
         args, out_dir, inspection_manifest, task_plans, keys, assignments,
         resume_authorizations, dispatch_log, running,
         infrastructure_incomplete_samples, evaluator_incomplete_samples,
         completed_samples, total_assignment_count, slots_per_key,
-        not_started_no_healthy_key_samples=None):
+        not_started_no_healthy_key_samples=None,
+        resume_pending_no_healthy_key_samples=None):
     """Drain stable per-key FIFO queues without a cross-key wave barrier."""
     if running:
         raise RuntimeError("cannot start a worker queue while workers are active")
@@ -7636,6 +7778,7 @@ def _run_worker_queue(
             getattr(args, "reactivate_key_label", None),
             getattr(args, "key_reactivation_reason", None)
             or getattr(args, "resume_reason", None),
+            pending_work_exists=_queue_has_pending_work(restored),
         )
         if getattr(args, "reactivate_key_label", None):
             restored = _restore_key_failover_queue_state(
@@ -7693,6 +7836,10 @@ def _run_worker_queue(
         not_started_no_healthy_key_samples
         if not_started_no_healthy_key_samples is not None else set()
     )
+    resume_pending_no_healthy_key_samples = (
+        resume_pending_no_healthy_key_samples
+        if resume_pending_no_healthy_key_samples is not None else set()
+    )
     last_report = 0.0
     last_inspection = {
         "errors": [], "api_calls": 0, "preservation_violations": 0}
@@ -7718,12 +7865,6 @@ def _run_worker_queue(
             dispatch_log=dispatch_log,
             failover_counts=failover_counts)
         if batch:
-            for item in batch:
-                # Once a replacement worker is actually launched, any prior
-                # terminal infrastructure status is superseded regardless of
-                # whether routing changed label or reactivated the same label.
-                infrastructure_incomplete_samples.discard(item["sample"])
-                not_started_no_healthy_key_samples.discard(item["sample"])
             refill_index += 1
             if args.campaign_role == "confirmation":
                 evaluate_confirmation_known_usage_gate(
@@ -7732,6 +7873,16 @@ def _run_worker_queue(
             launched = _launch_worker_batch(
                 args, out_dir, inspection_manifest, task_plans, keys, batch,
                 resume_authorizations, dispatch_log, running)
+            launched_samples = set(launched)
+            if launched_samples != {item["sample"] for item in batch}:
+                raise RuntimeError("worker launch batch returned incomplete")
+            for sample in launched_samples:
+                # Once a replacement worker is actually launched, any prior
+                # terminal infrastructure status is superseded regardless of
+                # whether routing changed label or reactivated the same label.
+                infrastructure_incomplete_samples.discard(sample)
+                not_started_no_healthy_key_samples.discard(sample)
+                resume_pending_no_healthy_key_samples.discard(sample)
             append_jsonl_locked(
                 dispatch_log,
                 {
@@ -7753,22 +7904,63 @@ def _run_worker_queue(
             )
         if not running:
             if any(pending_by_key.values()) or handoff_fifo:
+                stranded_items = [
+                    item
+                    for items in pending_by_key.values()
+                    for item in items
+                ] + list(handoff_fifo)
                 not_started = sorted({
-                    item["sample"]
-                    for items in pending_by_key.values()
-                    for item in items
-                } | {
-                    item["sample"] for item in handoff_fifo
-                    if _is_not_started_pending_assignment(item)
+                    item["sample"] for item in stranded_items
+                    if _pending_provenance(item) == PENDING_NEVER_STARTED
                 })
-                stranded = sorted({
-                    item["sample"]
-                    for items in pending_by_key.values()
-                    for item in items
-                } | {item["sample"] for item in handoff_fifo})
+                stranded = sorted({item["sample"] for item in stranded_items})
+                provenance_by_sample = {
+                    item["sample"]: _pending_provenance(item)
+                    for item in stranded_items
+                    if _pending_provenance(item) is not None
+                }
+                infrastructure_pending = sorted(
+                    (set(stranded) & set(infrastructure_incomplete_samples))
+                    | {
+                        item["sample"] for item in stranded_items
+                        if _pending_provenance(item)
+                        == PENDING_INFRASTRUCTURE_INCOMPLETE
+                    })
+                for sample in infrastructure_pending:
+                    provenance_by_sample.setdefault(
+                        sample, PENDING_INFRASTRUCTURE_INCOMPLETE)
                 not_started = sorted(
-                    set(not_started) - set(infrastructure_incomplete_samples))
+                    set(not_started) - set(infrastructure_pending))
+                resume_pending = sorted(
+                    item["sample"] for item in stranded_items
+                    if _pending_provenance(item) == PENDING_INTERRUPTED
+                )
+                resume_pending = sorted(
+                    set(resume_pending)
+                    - set(not_started)
+                    - set(infrastructure_pending))
+                partition_sets = [
+                    set(infrastructure_pending), set(not_started),
+                    set(resume_pending),
+                ]
+                partition_union = set().union(*partition_sets)
+                if (sum(len(items) for items in partition_sets)
+                        != len(partition_union)
+                        or partition_union != set(stranded)):
+                    raise RuntimeError(
+                        "queue exhaustion pending partition is invalid")
+                if (set(provenance_by_sample) != set(stranded)
+                        or any(value not in {
+                            PENDING_INFRASTRUCTURE_INCOMPLETE,
+                            PENDING_NEVER_STARTED,
+                            PENDING_INTERRUPTED,
+                        } for value in provenance_by_sample.values())):
+                    raise RuntimeError(
+                        "queue exhaustion pending provenance is invalid")
+                infrastructure_incomplete_samples.update(
+                    infrastructure_pending)
                 not_started_no_healthy_key_samples.update(not_started)
+                resume_pending_no_healthy_key_samples.update(resume_pending)
                 append_jsonl_locked(
                     dispatch_log,
                     {
@@ -7778,7 +7970,15 @@ def _run_worker_queue(
                         "quarantined_key_labels": sorted(
                             quarantined_keys),
                         "pending_samples": stranded,
+                        "infrastructure_incomplete_samples": (
+                            infrastructure_pending),
                         "not_started_pending_samples": not_started,
+                        "resume_pending_no_healthy_key_samples": (
+                            resume_pending),
+                        "pending_sample_provenance": {
+                            sample: provenance_by_sample[sample]
+                            for sample in stranded
+                        },
                         "created_at": datetime.now().astimezone().isoformat(
                             timespec="seconds"),
                     },
@@ -7868,6 +8068,8 @@ def _run_worker_queue(
                 infrastructure_incomplete_samples),
             "not_started_no_healthy_key_samples": sorted(
                 not_started_no_healthy_key_samples),
+            "resume_pending_no_healthy_key_samples": sorted(
+                resume_pending_no_healthy_key_samples),
             "evaluator_incomplete_samples": sorted(
                 evaluator_incomplete_samples),
         },
@@ -8327,6 +8529,7 @@ def _launch_under_lease(args, out_dir):
     resume_authorizations = {}
     incomplete_samples = set()
     not_started_no_healthy_key_samples = set()
+    resume_pending_no_healthy_key_samples = set()
     evaluator_incomplete_samples = set()
     completed_samples = set()
     audited_stale = []
@@ -8457,6 +8660,8 @@ def _launch_under_lease(args, out_dir):
         if args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
             queue_kwargs["not_started_no_healthy_key_samples"] = (
                 not_started_no_healthy_key_samples)
+            queue_kwargs["resume_pending_no_healthy_key_samples"] = (
+                resume_pending_no_healthy_key_samples)
         _run_worker_queue(
             args, out_dir, inspection_manifest, task_plans, keys,
             launch_assignments, resume_authorizations, dispatch_log,
@@ -8465,7 +8670,8 @@ def _launch_under_lease(args, out_dir):
             **queue_kwargs,
         )
         if (incomplete_samples or evaluator_incomplete_samples
-                or not_started_no_healthy_key_samples):
+                or not_started_no_healthy_key_samples
+                or resume_pending_no_healthy_key_samples):
             inspection = inspect_campaign(
                 out_dir, inspection_manifest,
                 required_complete_samples=completed_samples,
@@ -8480,6 +8686,8 @@ def _launch_under_lease(args, out_dir):
                         incomplete_samples),
                     "not_started_no_healthy_key_samples": sorted(
                         not_started_no_healthy_key_samples),
+                    "resume_pending_no_healthy_key_samples": sorted(
+                        resume_pending_no_healthy_key_samples),
                     "evaluator_incomplete_samples": sorted(
                         evaluator_incomplete_samples),
                     "completed_samples": sorted(completed_samples),
@@ -8492,6 +8700,8 @@ def _launch_under_lease(args, out_dir):
                 + ",".join(sorted(incomplete_samples))
                 + " not_started_no_healthy_key_samples="
                 + ",".join(sorted(not_started_no_healthy_key_samples))
+                + " resume_pending_no_healthy_key_samples="
+                + ",".join(sorted(resume_pending_no_healthy_key_samples))
                 + " evaluator_samples="
                 + ",".join(sorted(evaluator_incomplete_samples)),
                 file=sys.stderr, flush=True,
