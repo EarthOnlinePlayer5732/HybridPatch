@@ -7948,6 +7948,9 @@ def _run_metadata_storage_mode_unlocked(out_dir, metadata_path):
         if declared_storage not in {None, RUN_METADATA_STORAGE_EVENT_V1}:
             raise RuntimeError("dispatch manifest run metadata storage is invalid")
     if events_exists or pending_exists:
+        if not registry_exists:
+            raise RuntimeError(
+                "run metadata event recovery registry is missing")
         return "event"
     if recovery_dir_exists:
         if not registry_exists:
@@ -8516,6 +8519,11 @@ def _register_run_metadata_event_recovery_receipt_unlocked(
 
 
 def _reconcile_run_metadata_event_pending_unlocked(out_dir):
+    if (os.path.isfile(_run_metadata_event_pending_path(out_dir))
+            and not os.path.isfile(
+                _run_metadata_event_recovery_registry_path(out_dir))):
+        raise RuntimeError(
+            "run metadata event recovery registry is missing")
     loaded = _read_run_metadata_event_pending(out_dir)
     if loaded is None:
         return False

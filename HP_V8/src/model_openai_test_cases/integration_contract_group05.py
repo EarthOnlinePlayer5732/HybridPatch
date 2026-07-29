@@ -1024,6 +1024,7 @@ class IntegrationContractGroup05Mixin:
             # It must not bootstrap the new authoritative registry.
             recovery_path.unlink()
             registry_path.unlink()
+            registry_path.parent.rmdir()
             projection["event_recovery_receipt_count"] = 0
             projection["event_recovery_receipts_sha256"] = hashlib.sha256(
                 b"[]").hexdigest()
@@ -1032,25 +1033,45 @@ class IntegrationContractGroup05Mixin:
                 run_meta.read_quiescent_run_metadata_snapshot(out_dir)
             self.assertFalse(registry_path.exists())
 
-            # Simulate old code reopening that already-washed state and dying
-            # while appending a later event.  The new pending WAL must not be
-            # allowed to initialize an empty registry and thereby erase the
-            # missing earlier recovery from history.
+            # Even if old code could previously reopen this washed state, the
+            # storage classifier now rejects the missing authoritative
+            # directory before a later pending WAL can be created.
+            with self.assertRaisesRegex(RuntimeError, "registry is missing"):
+                run_meta.append_run_metadata(out_dir, **kwargs)
+            self.assertFalse(pending_path.exists())
+            self.assertFalse(registry_path.exists())
+
+    def test_recovery_registry_directory_loss_with_pending_fails_closed(self):
+        kwargs = run_metadata_kwargs(
+            command="python recovery-registry-directory-loss-test",
+            num_round_trips=1, distractor=False)
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                run_meta, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    run_meta, "code_fingerprint",
+                    return_value={"event": "registry-directory-loss"}):
+            invocation = run_meta.append_run_metadata(out_dir, **kwargs)
             with mock.patch.object(
-                    run_meta, "_read_run_metadata_event_recovery_receipts",
-                    return_value=[]), mock.patch.object(
-                        run_meta,
-                        "_ensure_run_metadata_event_recovery_registry_unlocked",
-                        return_value={}), mock.patch.object(
-                            run_meta, "_append_run_metadata_event_bytes",
-                            side_effect=event_append_crash(
-                                7, "injected later legacy pending")):
+                    run_meta, "_append_run_metadata_event_bytes",
+                    side_effect=event_append_crash(
+                        7, "injected partial event")):
                 with self.assertRaises(SystemExit):
-                    run_meta.append_run_metadata(out_dir, **kwargs)
+                    run_meta.finish_run_metadata(
+                        out_dir, invocation["invocation_id"])
+
+            pending_path = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_PENDING_FILENAME)
+            recovery_dir = pathlib.Path(
+                out_dir, run_meta.METADATA_EVENT_RECOVERY_DIRECTORY)
             self.assertTrue(pending_path.is_file())
+            for child in recovery_dir.iterdir():
+                child.unlink()
+            recovery_dir.rmdir()
+
             with self.assertRaisesRegex(RuntimeError, "registry is missing"):
                 run_meta.read_run_metadata_snapshot(out_dir)
-            self.assertFalse(registry_path.exists())
+            self.assertTrue(pending_path.is_file())
+            self.assertFalse(recovery_dir.exists())
 
     def test_public_projection_reconcile_completes_pending_event_cuts(self):
         kwargs = run_metadata_kwargs(
