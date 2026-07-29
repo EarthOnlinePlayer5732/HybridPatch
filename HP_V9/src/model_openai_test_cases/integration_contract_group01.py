@@ -28,14 +28,18 @@ class IntegrationContractGroup01Mixin:
     def _exercise_worker_exit_audit_queue(
             self, manifest, *, sample_count=1, slots_per_key=None,
             delta_inspection=None, full_inspection=None,
-            full_interval=None, expected_error=None):
+            full_interval=None, expected_error=None, staggered=False):
         class FakeProcess:
             returncode = None
 
-            def __init__(self, pid):
+            def __init__(self, pid, polls_before_exit=0):
                 self.pid = pid
+                self.polls_before_exit = polls_before_exit
 
             def poll(self):
+                if self.polls_before_exit > 0:
+                    self.polls_before_exit -= 1
+                    return None
                 self.returncode = 0
                 return self.returncode
 
@@ -57,7 +61,9 @@ class IntegrationContractGroup01Mixin:
                 launched.append(sample)
                 running[sample] = {
                     **item,
-                    "process": FakeProcess(1000 + index),
+                    "process": FakeProcess(
+                        1000 + index,
+                        polls_before_exit=(index - 1 if staggered else 0)),
                     "log": mock.Mock(),
                     "worker_launch_id": f"worker-{sample}",
                     "exit_recorded": False,
@@ -239,6 +245,30 @@ class IntegrationContractGroup01Mixin:
             result["full_call_args"][0].kwargs["required_complete_samples"],
             set(samples))
 
+    def test_thirty_worker_staggered_exit_audits_and_refills_one_slot(self):
+        samples = [f"sample-{index:03d}" for index in range(31)]
+        manifest = self._incremental_exit_audit_manifest(samples)
+        result = self._exercise_worker_exit_audit_queue(
+            manifest,
+            sample_count=31,
+            slots_per_key=30,
+            staggered=True,
+        )
+        self.assertEqual(result["launched"], samples)
+        self.assertEqual(result["delta_calls"], 31)
+        self.assertEqual(result["full_calls"], 1)
+        self.assertEqual(
+            result["delta_call_args"][0].kwargs["active_samples"],
+            set(samples[1:30]),
+        )
+        self.assertTrue(any(
+            row.get("event") == "queue_slots_released"
+            and row.get("workers") == [{
+                "sample": samples[0], "disposition": "finished",
+            }]
+            for row in result["dispatch_rows"]
+        ))
+
     def test_deepseek_exit_audit_legacy_transport_falls_back_to_full_scan(self):
         manifest = self._incremental_exit_audit_manifest(
             ["sample-000"], revision="opencode_openai_compatible/5")
@@ -287,7 +317,7 @@ class IntegrationContractGroup01Mixin:
             row.get("event") == "queue_slots_released"
             for row in result["dispatch_rows"]))
 
-    def test_deepseek_exit_delta_audits_new_api_sample_from_active_worker(self):
+    def test_deepseek_exit_delta_separates_active_api_from_exited_results(self):
         manifest = self._incremental_exit_audit_manifest(
             ["sample-exited", "sample-active"])
         with tempfile.TemporaryDirectory() as out_dir:
@@ -301,6 +331,8 @@ class IntegrationContractGroup01Mixin:
             with mock.patch.object(
                     paired_dispatch, "_inspect_deepseek_key_failover_audit",
                     return_value=[]), mock.patch.object(
+                        paired_dispatch, "_inspect_deepseek_active_api_delta",
+                        return_value=[]) as active_api_audit, mock.patch.object(
                         paired_dispatch, "inspect_campaign",
                         return_value={
                             "errors": [], "api_calls": 1,
@@ -319,9 +351,24 @@ class IntegrationContractGroup01Mixin:
         self.assertIsNotNone(next_state)
         self.assertEqual(
             inspect.call_args.kwargs["audit_samples"],
-            {"sample-exited", "sample-active"})
+            {"sample-exited"})
         self.assertEqual(
             inspect.call_args.kwargs["terminal_audit_samples"],
+            {"sample-exited"})
+        self.assertFalse(
+            inspect.call_args.kwargs["require_campaign_quiescence"])
+        self.assertEqual(
+            active_api_audit.call_args.args[2],
+            [{
+                "request_id": "request-from-active-worker",
+                "sample": "sample-active",
+            }],
+        )
+        self.assertEqual(
+            active_api_audit.call_args.kwargs["active_samples"],
+            {"sample-active"})
+        self.assertEqual(
+            active_api_audit.call_args.kwargs["exited_samples"],
             {"sample-exited"})
         preloaded = inspect.call_args.kwargs["preloaded_ledgers"]
         self.assertEqual(
@@ -379,6 +426,10 @@ class IntegrationContractGroup01Mixin:
                     side_effect=AssertionError(
                         "scoped inspector re-read outcomes from disk")), \
                 mock.patch.object(
+                    paired_dispatch, "read_quiescent_run_metadata_snapshot",
+                    side_effect=AssertionError(
+                        "scoped inspector required campaign quiescence")), \
+                mock.patch.object(
                     paired_dispatch, "_git_identity",
                     return_value=("1" * 40, "clean")):
             inspection = paired_dispatch.inspect_campaign(
@@ -391,6 +442,94 @@ class IntegrationContractGroup01Mixin:
             )
 
         self.assertIsInstance(inspection["errors"], list)
+
+    def test_campaign_quiescence_is_independent_from_terminal_provenance(self):
+        self.assertEqual(
+            paired_dispatch._campaign_metadata_quiescence_errors([{
+                "status": "finished",
+                "finished_at": None,
+            }, {
+                "status": "running",
+                "finished_at": None,
+            }]),
+            ["campaign metadata is not quiescent"],
+        )
+        self.assertEqual(
+            paired_dispatch._campaign_metadata_quiescence_errors([{
+                "status": "finished",
+                "finished_at": None,
+            }]),
+            ["campaign finished_at is incomplete"],
+        )
+        self.assertEqual(
+            paired_dispatch._campaign_metadata_quiescence_errors([{
+                "status": "finished",
+                "finished_at": "2026-07-29T12:00:00+08:00",
+            }]),
+            [],
+        )
+
+        manifest = self._incremental_exit_audit_manifest(["sample"])
+        base_result = {
+            "errors": [], "api_calls": 0,
+            "preservation_violations": 0,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_inspect_deepseek_campaign",
+                    return_value=dict(base_result)), \
+                mock.patch.object(
+                    paired_dispatch, "read_quiescent_run_metadata_snapshot",
+                    side_effect=RuntimeError(
+                        "run metadata event campaign is not quiescent"),
+                ) as quiescent_reader:
+            pathlib.Path(
+                out_dir, "run_metadata_events.jsonl").write_text(
+                    "", encoding="utf-8")
+            inspection = paired_dispatch.inspect_campaign(
+                out_dir, manifest,
+                require_terminal_provenance=True,
+            )
+        quiescent_reader.assert_called_once_with(out_dir)
+        self.assertIn(
+            "run metadata is not quiescent: "
+            "run metadata event campaign is not quiescent",
+            inspection["errors"],
+        )
+
+    def test_scoped_terminal_audit_rejects_campaign_quiescence_request(self):
+        manifest = self._incremental_exit_audit_manifest(["sample"])
+        with tempfile.TemporaryDirectory() as out_dir, self.assertRaisesRegex(
+                RuntimeError, "quiescence requires an unscoped audit"):
+            paired_dispatch.inspect_campaign(
+                out_dir, manifest,
+                require_terminal_provenance=True,
+                require_campaign_quiescence=True,
+                audit_samples={"sample"},
+            )
+
+    def test_incomplete_never_started_campaign_allows_pristine_metadata_store(self):
+        manifest = self._incremental_exit_audit_manifest(["sample"])
+        base_result = {
+            "errors": [], "api_calls": 0,
+            "preservation_violations": 0,
+        }
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_inspect_deepseek_campaign",
+                    return_value=dict(base_result)), \
+                mock.patch.object(
+                    paired_dispatch, "read_quiescent_run_metadata_snapshot",
+                    side_effect=AssertionError(
+                        "pristine never-started campaign read metadata"),
+                ) as quiescent_reader:
+            inspection = paired_dispatch.inspect_campaign(
+                out_dir,
+                manifest,
+                require_terminal_provenance=True,
+            )
+        quiescent_reader.assert_not_called()
+        self.assertEqual(inspection["errors"], [])
 
     def test_transport_exhaustion_isolates_one_worker_and_sibling_completes(self):
         with tempfile.TemporaryDirectory() as out_dir:
@@ -1214,7 +1353,9 @@ class IntegrationContractGroup01Mixin:
 
     def test_worker_terminal_provenance_accepts_finished_and_local_incomplete(self):
         launch = {"sample": "sample", "pid": 101}
-        created_at = "2026-07-29T12:00:00+08:00"
+        started_at = "2026-07-29T11:59:00+08:00"
+        finished_at = "2026-07-29T12:00:00+08:00"
+        created_at = "2026-07-29T12:00:01+08:00"
         for status, returncode in (
                 ("finished", 0),
                 ("infrastructure_incomplete", 2),
@@ -1236,7 +1377,10 @@ class IntegrationContractGroup01Mixin:
                         "status": status,
                         "worker_pid": 101,
                         "samples": ["sample"],
+                        "invocation_started_at": started_at,
+                        "invocation_finished_at": finished_at,
                     }],
+                    require_invocation_finished_at=True,
                 )
                 self.assertTrue(proof["ordinary_ok"])
 
@@ -1254,9 +1398,80 @@ class IntegrationContractGroup01Mixin:
                 "status": "infrastructure_incomplete",
                 "worker_pid": 101,
                 "samples": ["sample"],
+                "invocation_started_at": started_at,
+                "invocation_finished_at": finished_at,
             }],
+            require_invocation_finished_at=True,
         )
         self.assertFalse(invalid["ordinary_ok"])
+
+        for records in ([], [{
+                "status": "finished",
+                "worker_pid": 101,
+                "samples": ["sample"],
+                "invocation_started_at": started_at,
+                "invocation_finished_at": finished_at,
+            }] * 2):
+            with self.subTest(record_count=len(records)):
+                proof = paired_dispatch._worker_terminal_provenance(
+                    launch,
+                    {
+                        "sample": "sample",
+                        "pid": 101,
+                        "returncode": 0,
+                        "disposition": "finished",
+                        "created_at": created_at,
+                    },
+                    records,
+                    require_invocation_finished_at=True,
+                )
+                self.assertFalse(proof["ordinary_ok"])
+
+    def test_worker_terminal_provenance_requires_ordered_aware_invocation_time(self):
+        launch = {"sample": "sample", "pid": 101}
+        exit_row = {
+            "sample": "sample",
+            "pid": 101,
+            "returncode": 0,
+            "disposition": "finished",
+            "created_at": "2026-07-29T12:00:01+08:00",
+        }
+        base = {
+            "status": "finished",
+            "worker_pid": 101,
+            "samples": ["sample"],
+            "invocation_started_at": "2026-07-29T11:59:00+08:00",
+            "invocation_finished_at": "2026-07-29T12:00:00+08:00",
+        }
+        invalid_records = [
+            {**base, "invocation_finished_at": None},
+            {**base, "invocation_finished_at": "2026-07-29T12:00:00"},
+            {
+                **base,
+                "invocation_started_at": "2026-07-29T12:00:01+08:00",
+            },
+        ]
+        for record in invalid_records:
+            with self.subTest(record=record):
+                proof = paired_dispatch._worker_terminal_provenance(
+                    launch, exit_row, [record],
+                    require_invocation_finished_at=True)
+                self.assertFalse(proof["ordinary_ok"])
+
+        recovered = {
+            **base,
+            "status": "interrupted_by_dispatcher",
+            "invocation_finished_at": "2026-07-29T12:00:02+08:00",
+        }
+        proof = paired_dispatch._worker_terminal_provenance(
+            launch,
+            {**exit_row, "returncode": 1, "disposition": "campaign_fatal"},
+            [recovered],
+            require_invocation_finished_at=True,
+        )
+        self.assertTrue(proof["basic_exit_ok"])
+        self.assertFalse(proof["exit_after_invocation_ok"])
+        self.assertFalse(proof["ordinary_ok"])
 
     def test_worker_queue_idle_poll_stops_on_campaign_latch(self):
         class FakeProcess:

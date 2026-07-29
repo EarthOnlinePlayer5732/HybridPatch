@@ -210,6 +210,168 @@ class DeepSeekOpenCodeCampaignGroup01Mixin:
             self.assertEqual(len(real_read_jsonl(os.path.join(
                 out_dir, "fullrewrite", f"{sample}.jsonl"))), 2)
 
+    def test_scoped_terminal_audit_accepts_finished_worker_while_sibling_runs(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            sibling = "sample-running"
+            manifest["config"]["samples"].append(sibling)
+            manifest["config"]["run_metadata_storage"] = (
+                run_meta.RUN_METADATA_STORAGE_EVENT_V1)
+            manifest["task_plans"][sibling] = dict(
+                manifest["task_plans"][sample])
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "dispatch_manifest.json"), manifest)
+
+            metadata_path = os.path.join(out_dir, "run_metadata.jsonl")
+            finished = run_meta._read_jsonl_records_with_retry(metadata_path)[0]
+            finished.update({
+                "status": "finished",
+                "invocation_started_at": "2026-07-29T11:00:00+08:00",
+                "invocation_finished_at": "2026-07-29T12:00:00+08:00",
+                "finished_at": None,
+            })
+            running = copy.deepcopy(finished)
+            running.update({
+                "invocation_id": "invocation-running",
+                "worker_launch_id": "worker-running",
+                "worker_pid": worker_pid + 1,
+                "samples": [sibling],
+                "status": "running",
+                "invocation_finished_at": None,
+                "finished_at": None,
+            })
+            run_meta._write_jsonl_atomic(metadata_path, [finished, running])
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "dispatch_log.jsonl"), {
+                    "event": "worker_exit",
+                    "worker_launch_id": worker_id,
+                    "sample": sample,
+                    "pid": worker_pid,
+                    "returncode": 0,
+                    "disposition": "finished",
+                    "created_at": "2026-07-29T12:00:01+08:00",
+                })
+            paired_dispatch._write_active_worker_set(
+                out_dir, manifest, [{
+                    "worker_launch_id": "worker-running",
+                    "sample": sibling,
+                }])
+
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")), mock.patch.object(
+                        paired_dispatch, "read_run_metadata_snapshot",
+                        return_value=[finished, running]):
+                inspection = paired_dispatch.inspect_campaign(
+                    out_dir,
+                    manifest,
+                    require_terminal_provenance=True,
+                    require_campaign_quiescence=False,
+                    audit_samples={sample},
+                    terminal_audit_samples={sample},
+                )
+            self.assertEqual(inspection["errors"], [])
+
+            finished["invocation_finished_at"] = None
+            run_meta._write_jsonl_atomic(metadata_path, [finished, running])
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")), mock.patch.object(
+                        paired_dispatch, "read_run_metadata_snapshot",
+                        return_value=[finished, running]):
+                invalid = paired_dispatch.inspect_campaign(
+                    out_dir,
+                    manifest,
+                    require_terminal_provenance=True,
+                    require_campaign_quiescence=False,
+                    audit_samples={sample},
+                    terminal_audit_samples={sample},
+                )
+            self.assertIn(
+                f"worker exit provenance incomplete: {worker_id}",
+                invalid["errors"],
+            )
+
+    def test_active_api_delta_audits_transport_without_reading_live_results(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            api_row = self._deepseek_api_row(
+                out_dir, sample, worker_id, worker_pid, "forward")
+            metadata = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "run_metadata.jsonl"))
+            preloaded = {
+                name: []
+                for name in paired_dispatch._DEEPSEEK_INCREMENTAL_LEDGER_FILES
+            }
+            preloaded["dispatch_log.jsonl"] = (
+                run_meta._read_jsonl_records_with_retry(
+                    os.path.join(out_dir, "dispatch_log.jsonl")))
+            with mock.patch.object(
+                    paired_dispatch, "_fold_run_metadata_events",
+                    return_value=metadata), mock.patch.object(
+                        paired_dispatch, "_read_relay_publication_snapshot",
+                        side_effect=AssertionError(
+                            "active API delta read live result/checkpoint")):
+                errors = paired_dispatch._inspect_deepseek_active_api_delta(
+                    out_dir,
+                    manifest,
+                    [api_row],
+                    first_row_number=1,
+                    active_samples={sample},
+                    exited_samples=set(),
+                    preloaded_ledgers=preloaded,
+                )
+            self.assertEqual(errors, [])
+
+            invalid = dict(api_row, transport_revision="wrong/revision")
+            with mock.patch.object(
+                    paired_dispatch, "_fold_run_metadata_events",
+                    return_value=metadata):
+                errors = paired_dispatch._inspect_deepseek_active_api_delta(
+                    out_dir,
+                    manifest,
+                    [invalid],
+                    first_row_number=41,
+                    active_samples={sample},
+                    exited_samples=set(),
+                    preloaded_ledgers=preloaded,
+                )
+            self.assertIn(
+                "DeepSeek API transport_revision mismatch at row 41",
+                errors,
+            )
+
+    def test_active_api_delta_rejects_row_without_active_or_exited_owner(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            api_row = self._deepseek_api_row(
+                out_dir, sample, worker_id, worker_pid, "forward")
+            preloaded = {
+                name: []
+                for name in paired_dispatch._DEEPSEEK_INCREMENTAL_LEDGER_FILES
+            }
+            preloaded["dispatch_log.jsonl"] = (
+                run_meta._read_jsonl_records_with_retry(
+                    os.path.join(out_dir, "dispatch_log.jsonl")))
+            with mock.patch.object(
+                    paired_dispatch, "_fold_run_metadata_events",
+                    return_value=[]):
+                errors = paired_dispatch._inspect_deepseek_active_api_delta(
+                    out_dir,
+                    manifest,
+                    [api_row],
+                    first_row_number=7,
+                    active_samples=set(),
+                    exited_samples=set(),
+                    preloaded_ledgers=preloaded,
+                )
+            self.assertEqual(errors, [
+                "new API row is not owned by an active/exited sample at row 7",
+            ])
+
     def test_active_retry_exhaustion_waits_for_sample_outcome_publication(self):
         with tempfile.TemporaryDirectory() as out_dir:
             manifest, sample, worker_id, worker_pid = (

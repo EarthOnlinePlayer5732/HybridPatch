@@ -1,6 +1,32 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-30 - After Failure / Before Fresh Retry: HP_V9 scoped-exit audit semantics
+
+- failed run：`HP_V9/exp_20260729_dsv4f_234r10_v9_r2` 在首个 worker 正常退出后触发
+  `dispatcher_integrity_failure: campaign finished_at is incomplete`。停止时 finished=1、
+  interrupted=29、not_started=204；HP/FR committed rows=328/292；713 个 API terminal row
+  全部 HTTP 200，502=0、503=0，preservation=0。该目录保持 failed-informative，只读保留，
+  不删除 stop、不手工补 metadata、不普通 resume。
+- root cause：scoped worker-exit audit 把单 invocation 的 terminal provenance 与全 campaign
+  quiescence 混为一个开关。事件 metadata 在仍有 sibling running 时按设计保持共享
+  `finished_at=None`，即使退出 invocation 已有合法 `invocation_finished_at`；因此第一个错峰
+  退出必然误报，不是时序抖动。
+- related races：旧的预载 API snapshot 被用于随后实时读取的活跃 result/checkpoint，可能把
+  合法新 result 误判为缺 API linkage；start barrier 的单次 metadata fold 也可能已看到
+  invocation、尚未看到随后发布的 write-once task plan，从而误报 handshake mismatch。
+- fix boundary：拆分 `require_terminal_provenance` / `require_campaign_quiescence`；完整 result
+  scoped audit 只覆盖 exited samples，活跃 API delta 只做 row-local transport/runtime/worker
+  自洽；task-plan key 缺失延迟一 poll，已观察冲突仍立即 fail closed；terminal provenance
+  新增唯一 metadata、aware/order invocation time 与 recovered identity 校验。
+- next run：修复不改变 prompt、protocol、executor、evaluator、seed、RT10、transport `/6` 或
+  evidence schema。完成零 API gates 和 clean commit 后只允许 fresh r3 out_dir；本条记录本身
+  未调用 API、未启动、恢复或修改任何实验。
+- validation：canonical regression `326/326`（`52 fast + 166 component + 108
+  recovery`）、30-worker stress `5/5`、core identity `1/1`、HybridPatch executor `72/72`、
+  splitters byte-exact、postprocess `14` 项（`1` skip）、tier selector `4/4`、145 个 Python
+  文件 `py_compile` 与 `git diff --check` 全部通过；均为零 API。
+
 ## 2026-07-29 - Before Retry: HP_V9 worker-start metadata publication race
 
 - failed start：`exp_20260729_dsv4f_234r10_v9` 在首批 30 worker start barrier 触发

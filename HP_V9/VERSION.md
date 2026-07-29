@@ -1232,3 +1232,40 @@ shard 或 SQLite WAL 的新 evidence schema。若 fresh full234 的 telemetry �
 
 本轮未调用 provider API、未启动或恢复正式实验、未修改任何历史实验或证据文件，也未声称
 付费 full234 已通过。
+
+## 2026-07-30 首次真实错峰退出后的控制面修复
+
+`exp_20260729_dsv4f_234r10_v9_r2` 在首个 worker 正常退出、其余 worker 仍运行时被
+scoped exit audit 错误停止。根因不是模型、transport、Key、evaluator 或 preservation，
+而是 inspector 把 invocation 级终止证明与 campaign 级静止证明合并在
+`require_terminal_provenance`：已退出 worker 已有 `invocation_finished_at`，但事件 metadata
+按设计要等最后一个 invocation 结束后才发布共享 `finished_at`。运行中局部审计因此稳定误报
+`campaign finished_at is incomplete`。该目录保留为 failed-informative，不删除 stop、不手工
+补 metadata、不普通 resume。
+
+本补丁不改变 evidence schema，也不改变 V8 scientific core。控制面修复为：
+
+1. `require_terminal_provenance` 与 `require_campaign_quiescence` 成为两个独立门。worker-exit
+   scoped audit 只要求退出 invocation 的唯一 metadata、带时区且有序的
+   `invocation_started_at` / `invocation_finished_at`、exit 时间与 disposition；运行中每 20 个
+   terminal worker 的 full audit 两门都关闭；complete/incomplete 最终审计两门都开启。
+2. scoped exit audit 只对 `exited_samples` 读取 result/checkpoint。活跃 worker 本轮新增的 API
+   row 只验证 runtime、request、retry、compact transport sidecar、active ownership、launch、
+   authorization、metadata 与 capability，不读取仍可变化的 result/checkpoint，也不提前做
+   committed linkage。linkage 在该 worker 退出、周期 full audit或最终 audit 时验证。
+3. worker start barrier 将“invocation 已进入本轮 metadata fold、但该 sample 的 write-once
+   `task_plan_registered` 尚未进入”视为晚到发布，下一 poll 重新 fold；sample key 已出现但
+   SHA/RT 不同仍立即 fail closed。
+4. terminal provenance 不再从同一 `worker_launch_id` 的多条 metadata 中向后寻找旧终态；
+   ordinary terminal 只接受唯一 metadata。recovered terminal 也复用 PID/sample/time 基础证明，
+   preauthorization recovery 明确拒绝 bool/non-integer return code 与无时区 exit 时间。
+
+修复范围仅为 `paired_campaign_dispatch.py`、对应 integration/DeepSeek campaign 回归和活动日志；
+共享 JSONL、metadata full-fold 与 evidence-format migration 不在本补丁内。正式 provider 实验
+只能使用新 out_dir，不能把该修复解释为对 r2 的无授权原地恢复。
+
+最终零 API 验证：canonical regression `326/326`（`52 fast + 166 component + 108
+recovery`），30-worker control-plane stress `5/5`，V9 scientific-core identity `1/1`，
+HybridPatch executor `72/72`，splitters byte-exact PASS，postprocess `14` 项 PASS（Windows
+symlink 权限相关 `1` 项 skip），tier selector `4/4`，`HP_V9/src` 与 `tools` 共 145 个 Python
+文件 `py_compile` PASS，`git diff --check` PASS。验证未调用 provider。

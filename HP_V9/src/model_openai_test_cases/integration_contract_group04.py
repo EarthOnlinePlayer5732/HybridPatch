@@ -994,6 +994,146 @@ class IntegrationContractGroup04Mixin:
                 ["sample-a", "sample-b"],
             )
 
+    def test_dispatch_authorization_refolds_when_task_plan_event_is_late(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            sample = "sample-a"
+            worker_id = "worker-a"
+            invocation_id = "invocation-a"
+            pid = 301
+            plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["target"])
+            plan_sha = paired_dispatch._sha256(plan_path)
+            task_plans = {
+                sample: {
+                    "path": os.path.basename(plan_path),
+                    "sha256": plan_sha,
+                    "forward_state_sequence": ["target"],
+                },
+            }
+            ready_path, ack_path = paired_dispatch._worker_barrier_paths(
+                out_dir, worker_id)
+            run_meta.write_json_atomic(ready_path, {
+                "schema": "anchorpatch.worker_ready/1",
+                "worker_launch_id": worker_id,
+                "worker_pid": pid,
+                "invocation_id": invocation_id,
+                "sample": sample,
+                "task_plan_path": os.path.abspath(plan_path),
+                "task_plan_sha256": plan_sha,
+            })
+            process = mock.Mock(pid=pid)
+            process.poll.return_value = None
+            running = {
+                sample: {
+                    "process": process,
+                    "worker_launch_id": worker_id,
+                    "ready_path": ready_path,
+                    "ack_path": ack_path,
+                },
+            }
+            base = {
+                "invocation_id": invocation_id,
+                "status": "running",
+                "worker_launch_id": worker_id,
+                "worker_pid": pid,
+                "samples": [sample],
+            }
+            late = {**base, "task_plans": {}}
+            complete = {
+                **base,
+                "task_plans": {
+                    sample: {"sha256": plan_sha, "round_trips": 1},
+                },
+            }
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            with mock.patch.object(
+                    paired_dispatch, "read_run_metadata_snapshot",
+                    side_effect=[[late], [complete]],
+            ) as metadata_snapshot, mock.patch.object(
+                    paired_dispatch, "_worker_lease_is_held", return_value=True
+            ), mock.patch.object(paired_dispatch.time, "sleep") as sleep:
+                paired_dispatch._authorize_workers(
+                    out_dir, running, task_plans, dispatch_log, 1.0)
+
+            self.assertEqual(metadata_snapshot.call_count, 2)
+            self.assertEqual(sleep.call_count, 1)
+            self.assertTrue(os.path.isfile(ack_path))
+            rows = run_meta._read_jsonl_records_with_retry(dispatch_log)
+            self.assertEqual([row["sample"] for row in rows], [sample])
+
+    def test_dispatch_authorization_rejects_observed_task_plan_conflict(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            sample = "sample-a"
+            worker_id = "worker-a"
+            invocation_id = "invocation-a"
+            pid = 302
+            plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, ["target"])
+            plan_sha = paired_dispatch._sha256(plan_path)
+            task_plans = {
+                sample: {
+                    "path": os.path.basename(plan_path),
+                    "sha256": plan_sha,
+                    "forward_state_sequence": ["target"],
+                },
+            }
+            ready_path, ack_path = paired_dispatch._worker_barrier_paths(
+                out_dir, worker_id)
+            run_meta.write_json_atomic(ready_path, {
+                "schema": "anchorpatch.worker_ready/1",
+                "worker_launch_id": worker_id,
+                "worker_pid": pid,
+                "invocation_id": invocation_id,
+                "sample": sample,
+                "task_plan_path": os.path.abspath(plan_path),
+                "task_plan_sha256": plan_sha,
+            })
+            process = mock.Mock(pid=pid)
+            process.poll.return_value = None
+            running = {
+                sample: {
+                    "process": process,
+                    "worker_launch_id": worker_id,
+                    "ready_path": ready_path,
+                    "ack_path": ack_path,
+                },
+            }
+            base = {
+                "invocation_id": invocation_id,
+                "status": "running",
+                "worker_launch_id": worker_id,
+                "worker_pid": pid,
+                "samples": [sample],
+            }
+            conflicting = {
+                **base,
+                "task_plans": {
+                    sample: {"sha256": "f" * 64, "round_trips": 1},
+                },
+            }
+            valid = {
+                **base,
+                "task_plans": {
+                    sample: {"sha256": plan_sha, "round_trips": 1},
+                },
+            }
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            with mock.patch.object(
+                    paired_dispatch, "read_run_metadata_snapshot",
+                    side_effect=[[conflicting], [valid]],
+            ) as metadata_snapshot, mock.patch.object(
+                    paired_dispatch, "_worker_lease_is_held", return_value=True
+            ), mock.patch.object(paired_dispatch.time, "sleep") as sleep:
+                with self.assertRaisesRegex(
+                        RuntimeError, "worker task-plan handshake mismatch"):
+                    paired_dispatch._authorize_workers(
+                        out_dir, running, task_plans, dispatch_log, 1.0)
+
+            self.assertEqual(metadata_snapshot.call_count, 1)
+            sleep.assert_not_called()
+            self.assertFalse(os.path.exists(ack_path))
+            self.assertFalse(os.path.exists(dispatch_log))
+
     def test_runner_waits_for_exact_dispatch_authorization_before_api(self):
         with tempfile.TemporaryDirectory() as out_dir:
             plan_path = os.path.join(out_dir, "sample.task_plan.json")

@@ -4396,11 +4396,24 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                     f"worker metadata handshake mismatch: {sample}"
                 )
             metadata_record = matches[0]
-            if (metadata_record.get("task_plans") or {}).get(sample) != {
-                    "sha256": expected_plan,
-                    "round_trips": len(task_plans[sample][
-                        "forward_state_sequence"]),
-            }:
+            metadata_task_plans = metadata_record.get("task_plans")
+            expected_metadata_task_plan = {
+                "sha256": expected_plan,
+                "round_trips": len(task_plans[sample][
+                    "forward_state_sequence"]),
+            }
+            if not isinstance(metadata_task_plans, dict):
+                raise RuntimeError(
+                    f"worker task-plan handshake mismatch: {sample}"
+                )
+            if sample not in metadata_task_plans:
+                # The invocation can enter this cohort fold immediately before
+                # its write-once task_plan_registered event.  A ready file may
+                # then appear while this old snapshot is being inspected.
+                # Defer only an absent key; an observed conflicting value is a
+                # durable identity violation and still fails closed below.
+                continue
+            if metadata_task_plans[sample] != expected_metadata_task_plan:
                 raise RuntimeError(
                     f"worker task-plan handshake mismatch: {sample}"
                 )
@@ -4924,23 +4937,56 @@ def _exact_nonnegative_int(value):
     )
 
 
-def _worker_terminal_provenance(launch, exit_row, worker_metadata):
+def _aware_datetime(value):
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
+
+
+def _worker_terminal_provenance(
+        launch, exit_row, worker_metadata, *,
+        require_invocation_finished_at=False):
     """Return the shared launch/exit/metadata terminal-state proof."""
-    terminal = next((
-        record for record in reversed(worker_metadata or [])
-        if record.get("status") in {
-            "finished", "infrastructure_incomplete", "evaluator_incomplete",
-        }
-    ), (worker_metadata or [{}])[-1])
+    terminal = (
+        worker_metadata[0]
+        if isinstance(worker_metadata, list) and len(worker_metadata) == 1
+        else {}
+    )
     created_at = (
         exit_row.get("created_at") if isinstance(exit_row, dict) else None
     )
-    timestamp_ok = False
-    if isinstance(created_at, str):
-        try:
-            timestamp_ok = datetime.fromisoformat(created_at).tzinfo is not None
-        except ValueError:
-            timestamp_ok = False
+    exit_created_at = _aware_datetime(created_at)
+    timestamp_ok = exit_created_at is not None
+    invocation_started_at = _aware_datetime(
+        terminal.get("invocation_started_at"))
+    invocation_finished_at = _aware_datetime(
+        terminal.get("invocation_finished_at"))
+    invocation_timestamp_present = (
+        terminal.get("invocation_started_at") is not None
+        or terminal.get("invocation_finished_at") is not None
+    )
+    invocation_timestamp_ok = (
+        not require_invocation_finished_at
+        and not invocation_timestamp_present
+    ) or (
+        invocation_started_at is not None
+        and invocation_finished_at is not None
+        and invocation_finished_at >= invocation_started_at
+    )
+    exit_after_invocation_ok = (
+        not invocation_timestamp_present
+        or (
+            exit_created_at is not None
+            and invocation_finished_at is not None
+            and exit_created_at >= invocation_finished_at
+        )
+    )
     basic_exit_ok = (
         isinstance(exit_row, dict)
         and exit_row.get("sample") == launch.get("sample")
@@ -4951,13 +4997,15 @@ def _worker_terminal_provenance(launch, exit_row, worker_metadata):
         and terminal.get("worker_pid") == launch.get("pid")
         and terminal.get("samples") == [launch.get("sample")]
         and timestamp_ok
+        and invocation_timestamp_ok
     )
-    if basic_exit_ok and terminal.get("status") == "finished":
+    if (basic_exit_ok and exit_after_invocation_ok
+            and terminal.get("status") == "finished"):
         ordinary_ok = (
             exit_row.get("returncode") == 0
             and exit_row.get("disposition") == "finished"
         )
-    elif (basic_exit_ok
+    elif (basic_exit_ok and exit_after_invocation_ok
           and terminal.get("status") in {
               "infrastructure_incomplete", "evaluator_incomplete"}):
         ordinary_ok = (
@@ -4970,9 +5018,19 @@ def _worker_terminal_provenance(launch, exit_row, worker_metadata):
     return {
         "terminal": terminal,
         "timestamp_ok": timestamp_ok,
+        "invocation_timestamp_ok": invocation_timestamp_ok,
+        "exit_after_invocation_ok": exit_after_invocation_ok,
         "basic_exit_ok": basic_exit_ok,
         "ordinary_ok": ordinary_ok,
     }
+
+
+def _campaign_metadata_quiescence_errors(metadata):
+    if any(record.get("status") == "running" for record in metadata):
+        return ["campaign metadata is not quiescent"]
+    if any(record.get("finished_at") is None for record in metadata):
+        return ["campaign finished_at is incomplete"]
+    return []
 
 
 def _valid_deepseek_compact_transport_sidecar(row, path):
@@ -5447,12 +5505,18 @@ def _inspect_deepseek_key_failover_audit(
 
 def _inspect_deepseek_campaign(
         out_dir, manifest, *, require_complete=False,
-        require_terminal_provenance=None, active_samples=None,
+        require_terminal_provenance=None, require_campaign_quiescence=None,
+        active_samples=None,
         required_complete_samples=None, audit_samples=None,
         terminal_audit_samples=None, preloaded_ledgers=None):
     """Audit a DeepSeek prefix, including frozen /3-/4-/5 and current /6."""
     if require_terminal_provenance is None:
         require_terminal_provenance = require_complete
+    if require_campaign_quiescence is None:
+        require_campaign_quiescence = (
+            require_complete
+            or (require_terminal_provenance and audit_samples is None)
+        )
     config = manifest.get("config") or {}
     expected_samples = set(config.get("samples") or [])
     scoped_audit = audit_samples is not None
@@ -5497,6 +5561,8 @@ def _inspect_deepseek_campaign(
         errors.append("DeepSeek completion scope exceeds audit sample scope")
     if not terminal_scope <= sample_scope:
         errors.append("DeepSeek terminal scope exceeds audit sample scope")
+    if require_campaign_quiescence and scoped_audit:
+        errors.append("campaign quiescence requires an unscoped audit")
 
     runtime_identity = (
         config.get("transport"), config.get("transport_revision")
@@ -6150,25 +6216,27 @@ def _inspect_deepseek_campaign(
             errors.append(
                 "not all required latest run_metadata invocations are finished")
     if require_terminal_provenance:
-        if any(
-                record.get("finished_at") is None
-                for record in audited_metadata
-                if set(record.get("samples") or []) & terminal_scope):
-            errors.append("campaign finished_at is incomplete")
         for worker_id, launch in launches.items():
             if launch.get("sample") not in terminal_scope:
                 continue
             exit_row = exits.get(worker_id)
             worker_metadata = metadata_by_worker.get(worker_id) or []
             terminal_provenance = _worker_terminal_provenance(
-                launch, exit_row, worker_metadata)
+                launch, exit_row, worker_metadata,
+                require_invocation_finished_at=(
+                    config.get("run_metadata_storage")
+                    == RUN_METADATA_STORAGE_EVENT_V1),
+            )
             terminal = terminal_provenance["terminal"]
             ordinary_terminal = terminal_provenance["ordinary_ok"]
             recovered_terminal = (
+                terminal_provenance["basic_exit_ok"]
+                and
                 worker_id in recovered_worker_ids
                 and isinstance(exit_row, dict)
                 and exit_row.get("sample") == launch.get("sample")
                 and exit_row.get("pid") == launch.get("pid")
+                and _is_exact_int(exit_row.get("returncode"))
                 and exit_row.get("returncode") != 0
                 and exit_row.get("disposition") == "campaign_fatal"
                 and terminal.get("status") in {
@@ -6179,8 +6247,10 @@ def _inspect_deepseek_campaign(
                 and isinstance(exit_row, dict)
                 and exit_row.get("sample") == launch.get("sample")
                 and exit_row.get("pid") == launch.get("pid")
+                and _is_exact_int(exit_row.get("returncode"))
                 and exit_row.get("returncode") != 0
                 and exit_row.get("disposition") == "campaign_fatal"
+                and terminal_provenance["timestamp_ok"]
                 and not worker_metadata
                 and worker_id not in authorizations
                 and worker_id not in api_rows_by_worker
@@ -6190,6 +6260,9 @@ def _inspect_deepseek_campaign(
                     and not recovered_preauthorization):
                 errors.append(
                     f"worker exit provenance incomplete: {worker_id}")
+
+    if require_campaign_quiescence:
+        errors.extend(_campaign_metadata_quiescence_errors(metadata))
 
     return {
         "errors": sorted(set(errors)),
@@ -6211,12 +6284,20 @@ def _inspect_deepseek_campaign(
 
 
 def inspect_campaign(out_dir, manifest, *, require_complete=False,
-                     require_terminal_provenance=None, active_samples=None,
+                     require_terminal_provenance=None,
+                     require_campaign_quiescence=None, active_samples=None,
                      required_complete_samples=None, method_phase=None,
                      audit_samples=None, terminal_audit_samples=None,
                      preloaded_ledgers=None):
     if require_terminal_provenance is None:
         require_terminal_provenance = require_complete
+    if require_campaign_quiescence is None:
+        require_campaign_quiescence = (
+            require_complete
+            or (require_terminal_provenance and audit_samples is None)
+        )
+    if require_campaign_quiescence and audit_samples is not None:
+        raise RuntimeError("campaign quiescence requires an unscoped audit")
     config = manifest["config"]
     snapshot_mode_error = None
     try:
@@ -6225,13 +6306,27 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     except ValueError as exc:
         snapshot_mode_error = str(exc)
     quiescent_metadata_error = None
-    if (require_complete and config.get("run_metadata_storage")
+    if (require_campaign_quiescence and config.get("run_metadata_storage")
             == RUN_METADATA_STORAGE_EVENT_V1):
-        try:
-            if not read_quiescent_run_metadata_snapshot(out_dir):
-                quiescent_metadata_error = "run metadata is missing"
-        except RuntimeError as exc:
-            quiescent_metadata_error = str(exc)
+        metadata_evidence_paths = (
+            os.path.join(out_dir, "run_metadata_events.jsonl"),
+            os.path.join(out_dir, "run_metadata.jsonl"),
+            os.path.join(out_dir, "run_metadata_event_pending.json"),
+            os.path.join(out_dir, "run_metadata_projection_receipt.json"),
+            os.path.join(out_dir, "run_metadata_event_recoveries"),
+        )
+        pristine_never_started = (
+            not require_complete
+            and not any(os.path.exists(path)
+                        for path in metadata_evidence_paths)
+        )
+        if not pristine_never_started:
+            try:
+                if (not read_quiescent_run_metadata_snapshot(out_dir)
+                        and require_complete):
+                    quiescent_metadata_error = "run metadata is missing"
+            except RuntimeError as exc:
+                quiescent_metadata_error = str(exc)
     if config.get("campaign_role") in DEEPSEEK_CAMPAIGN_ROLES:
         if method_phase is not None:
             raise RuntimeError(
@@ -6239,6 +6334,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
         result = _inspect_deepseek_campaign(
             out_dir, manifest, require_complete=require_complete,
             require_terminal_provenance=require_terminal_provenance,
+            require_campaign_quiescence=require_campaign_quiescence,
             active_samples=active_samples,
             required_complete_samples=required_complete_samples,
             audit_samples=audit_samples,
@@ -6268,6 +6364,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             inspect_campaign(
                 out_dir, manifest, require_complete=require_complete,
                 require_terminal_provenance=require_terminal_provenance,
+                require_campaign_quiescence=require_campaign_quiescence,
                 active_samples=active_samples,
                 required_complete_samples=required_complete_samples,
                 method_phase=phase,
@@ -7271,15 +7368,18 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             errors.append(
                 "not all required latest run_metadata invocations are finished"
             )
-    if require_terminal_provenance and any(
-            record.get("finished_at") is None for record in metadata):
-        errors.append("campaign finished_at is incomplete")
+    if require_campaign_quiescence:
+        errors.extend(_campaign_metadata_quiescence_errors(metadata))
     if formal_manifest and require_terminal_provenance:
         for worker_id, launch in launches_by_worker.items():
             exit_row = exits_by_worker.get(worker_id)
             reconciliation = reconciliations_by_worker.get(worker_id)
             terminal_provenance = _worker_terminal_provenance(
-                launch, exit_row, metadata_by_worker.get(worker_id, []))
+                launch, exit_row, metadata_by_worker.get(worker_id, []),
+                require_invocation_finished_at=(
+                    config.get("run_metadata_storage")
+                    == RUN_METADATA_STORAGE_EVENT_V1),
+            )
             terminal_metadata = terminal_provenance["terminal"]
             basic_exit_ok = terminal_provenance["basic_exit_ok"]
             timestamp_ok = terminal_provenance["timestamp_ok"]
@@ -7309,6 +7409,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                 and reconciliation_time_ok
             )
             recovered_interruption_ok = (
+                basic_exit_ok
+                and
                 worker_id in recovered_worker_ids
                 and isinstance(exit_row, dict)
                 and exit_row.get("sample") == launch.get("sample")
@@ -8574,6 +8676,222 @@ def _initialize_deepseek_exit_audit_state(out_dir):
     }
 
 
+def _inspect_deepseek_active_api_delta(
+        out_dir, manifest, api_rows, *, first_row_number, active_samples,
+        exited_samples, preloaded_ledgers):
+    """Validate newly published active-worker API rows without reading results.
+
+    Result/checkpoint files remain mutable until their worker exits.  This
+    validator is deliberately limited to row-local transport/runtime evidence
+    and the already-published worker identity chain; result linkage is audited
+    after exit or by a periodic/final full inspection.
+    """
+    errors = []
+    config = manifest.get("config") or {}
+    expected_samples = set(config.get("samples") or [])
+    expected_methods = set(config.get("method_set") or [])
+    target_rt = config.get("num_round_trips")
+    expected_transport = config.get("transport")
+    expected_transport_revision = config.get("transport_revision")
+    active_samples = set(active_samples or [])
+    exited_samples = set(exited_samples or [])
+
+    dispatch_rows = preloaded_ledgers["dispatch_log.jsonl"]
+    launches = {}
+    authorizations = {}
+    for row in dispatch_rows:
+        event = row.get("event")
+        if event not in {"launch", "worker_authorized"}:
+            continue
+        worker_id = row.get("worker_launch_id")
+        target = launches if event == "launch" else authorizations
+        if not isinstance(worker_id, str) or not worker_id:
+            errors.append(f"{event} missing worker_launch_id")
+        elif worker_id in target:
+            errors.append(f"duplicate {event} record: {worker_id}")
+        else:
+            target[worker_id] = row
+
+    metadata = _fold_run_metadata_events(
+        preloaded_ledgers["run_metadata_events.jsonl"])
+    metadata_by_worker = {}
+    for record in metadata:
+        worker_id = record.get("worker_launch_id")
+        if isinstance(worker_id, str) and worker_id:
+            metadata_by_worker.setdefault(worker_id, []).append(record)
+
+    try:
+        active_payload = _read_json(_active_worker_set_path(out_dir))
+        active_worker_rows = active_payload.get("workers")
+        if (active_payload.get("schema")
+                != "anchorpatch.active_worker_set/1"
+                or not isinstance(active_worker_rows, dict)):
+            raise RuntimeError("active worker set schema is invalid")
+    except (OSError, ValueError, RuntimeError):
+        active_worker_rows = {}
+        if any(row.get("sample") in active_samples for row in api_rows):
+            errors.append("active worker set is missing or invalid")
+
+    provider_guard_mode = _provider_guard_mode(manifest)
+    manifest_digest = _canonical_record_sha256(manifest)
+    for index, row in enumerate(api_rows, first_row_number):
+        sample = row.get("sample")
+        if sample in exited_samples:
+            continue
+        if sample not in active_samples:
+            errors.append(
+                f"new API row is not owned by an active/exited sample at row "
+                f"{index}")
+            continue
+
+        method = row.get("method")
+        rt = row.get("rt_index")
+        direction = row.get("direction")
+        call_kind = row.get("call_kind")
+        allowed_kinds = (
+            {"hybridpatch_primary", "hybridpatch_repair"}
+            if method == "hybridpatch" else {"fullrewrite_primary"}
+        )
+        if (sample not in expected_samples or method not in expected_methods
+                or not _is_exact_int(rt) or not 1 <= rt <= target_rt
+                or direction not in {"forward", "backward"}
+                or call_kind not in allowed_kinds):
+            errors.append(f"unmappable API ledger row {index}")
+            continue
+
+        worker_id = row.get("worker_launch_id")
+        worker_pid = row.get("worker_pid")
+        launch = launches.get(worker_id)
+        authorization = authorizations.get(worker_id)
+        worker_metadata = metadata_by_worker.get(worker_id) or []
+        active_worker = active_worker_rows.get(worker_id)
+        if (not isinstance(active_worker, dict)
+                or active_worker.get("sample") != sample):
+            errors.append(f"active API worker ownership mismatch at row {index}")
+
+        capability_sha = None
+        if (provider_guard_mode
+                == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1
+                and isinstance(authorization, dict)):
+            capability = {
+                key: authorization.get(key)
+                for key in _WORKER_START_CAPABILITY_FIELDS
+            }
+            capability_sha = _canonical_record_sha256(capability)
+            plan = (manifest.get("task_plans") or {}).get(sample) or {}
+            _ready_path, start_path = _worker_barrier_paths(out_dir, worker_id)
+            try:
+                published_capability = _read_json(start_path)
+            except (OSError, ValueError, RuntimeError):
+                published_capability = None
+            if (not isinstance(launch, dict)
+                    or capability.get("schema")
+                    != WORKER_START_CAPABILITY_SCHEMA
+                    or capability.get("worker_launch_id") != worker_id
+                    or capability.get("worker_pid") != worker_pid
+                    or capability.get("sample") != sample
+                    or not isinstance(capability.get("invocation_id"), str)
+                    or not capability.get("invocation_id")
+                    or capability.get("task_plan_sha256")
+                    != plan.get("sha256")
+                    or capability.get("provider_guard_mode")
+                    != provider_guard_mode
+                    or capability.get("dispatcher_pid")
+                    != launch.get("dispatcher_pid")
+                    or capability.get("dispatcher_instance_id")
+                    != launch.get("dispatcher_instance_id")
+                    or capability.get("transport_revision")
+                    != expected_transport_revision
+                    or capability.get("dispatch_manifest_canonical_sha256")
+                    != manifest_digest
+                    or authorization.get("worker_start_capability_sha256")
+                    != capability_sha
+                    or published_capability != capability):
+                errors.append(
+                    f"worker start capability mismatch: {worker_id}")
+
+        auditable_model_empty = (
+            row.get("classification") == "transport-valid but model-empty"
+            and row.get("response_classification") == "model_empty"
+            and row.get("error_type") == "model_empty"
+            and row.get("raw_content_length") == 0
+            and row.get("stream_complete") is True
+            and row.get("http_status") == 200
+        )
+        auditable_failure = _deepseek_failed_retry_row(row)
+        for key, expected in {
+                "schema": API_CALL_SCHEMA,
+                "model": DEEPSEEK_MODEL,
+                "base_url": DEEPSEEK_BASE_URL,
+                "request_url": f"{DEEPSEEK_BASE_URL}/chat/completions",
+                "transport": expected_transport,
+                "transport_revision": expected_transport_revision,
+                "transport_resume_policy": None,
+                "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
+                "max_tokens": DEEPSEEK_MAX_TOKENS,
+                "provider_called": True,
+                "response_replayed": False,
+        }.items():
+            if row.get(key) != expected:
+                errors.append(f"DeepSeek API {key} mismatch at row {index}")
+        if row.get("generation_index") != 0:
+            errors.append(f"DeepSeek API generation mismatch at row {index}")
+        if ((row.get("classification") is not None
+             and not auditable_model_empty and not auditable_failure)
+                or (row.get("stream_complete") is not True
+                    and not auditable_failure)
+                or (row.get("input_tokens") is None
+                    and not auditable_failure)
+                or (row.get("output_tokens") is None
+                    and not auditable_failure)):
+            errors.append(f"DeepSeek API response incomplete at row {index}")
+        if (not auditable_failure
+                and not _valid_deepseek_retry_evidence(row)):
+            errors.append(f"DeepSeek retry evidence invalid at row {index}")
+        if not _valid_deepseek_transport_sidecar(out_dir, row):
+            errors.append(f"DeepSeek transport sidecar invalid at row {index}")
+
+        request_path = row.get("raw_request_saved_path")
+        try:
+            request_payload = (
+                _read_json(request_path)
+                if isinstance(request_path, str) and request_path else {}
+            )
+        except (OSError, ValueError, RuntimeError):
+            request_payload = {}
+        request_body = request_payload.get("request_body")
+        if (not auditable_failure
+                and (not isinstance(request_body, dict)
+                or request_body.get("model") != DEEPSEEK_MODEL
+                or request_body.get("reasoning_effort")
+                != DEEPSEEK_REASONING_EFFORT
+                or request_body.get("max_completion_tokens")
+                != DEEPSEEK_MAX_TOKENS
+                or request_body.get("stream") is not True
+                or request_body.get("stream_options")
+                != {"include_usage": True})):
+            errors.append(
+                f"DeepSeek raw request transport audit failed at row {index}")
+
+        if (not isinstance(launch, dict)
+                or launch.get("sample") != sample
+                or launch.get("pid") != worker_pid
+                or not isinstance(authorization, dict)
+                or authorization.get("sample") != sample
+                or authorization.get("worker_pid") != worker_pid
+                or len(worker_metadata) != 1
+                or worker_metadata[0].get("worker_pid") != worker_pid
+                or worker_metadata[0].get("samples") != [sample]):
+            errors.append(f"API worker provenance mismatch at row {index}")
+        if (provider_guard_mode
+                == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1
+                and row.get("worker_start_capability_sha256")
+                != capability_sha):
+            errors.append(f"API worker capability mismatch at row {index}")
+
+    return errors
+
+
 def _audit_deepseek_exit_delta(
         out_dir, manifest, state, *, exited_samples, active_samples,
         required_complete_samples):
@@ -8623,12 +8941,22 @@ def _audit_deepseek_exit_delta(
         next_rows["sample_outcomes.jsonl"],
         launches,
     ))
-    audit_samples = set(exited_samples) | new_api_samples
+    errors.extend(_inspect_deepseek_active_api_delta(
+        out_dir,
+        manifest,
+        delta_rows["api_calls.jsonl"],
+        first_row_number=first_api_number,
+        active_samples=set(active_samples),
+        exited_samples=set(exited_samples),
+        preloaded_ledgers=next_rows,
+    ))
+    audit_samples = set(exited_samples)
     inspect_started = time.monotonic()
     local = inspect_campaign(
         out_dir,
         manifest,
         require_terminal_provenance=True,
+        require_campaign_quiescence=False,
         active_samples=set(active_samples),
         required_complete_samples=set(required_complete_samples),
         audit_samples=audit_samples,
@@ -8639,6 +8967,7 @@ def _audit_deepseek_exit_delta(
         out_dir, "incremental_exit_audit",
         time.monotonic() - inspect_started,
         audit_sample_count=len(audit_samples),
+        active_api_sample_count=len(new_api_samples - audit_samples),
         terminal_sample_count=len(exited_samples),
         api_row_count=next_cursors["api_calls.jsonl"]["row_count"],
     )
@@ -8969,6 +9298,8 @@ def _run_worker_queue(
                     full_inspection = inspect_campaign(
                         out_dir,
                         inspection_manifest,
+                        require_terminal_provenance=False,
+                        require_campaign_quiescence=False,
                         active_samples=set(running),
                         required_complete_samples=set(completed_samples),
                     )
@@ -9047,6 +9378,7 @@ def _append_remaining134_incomplete(
         required_complete_samples=states["finished"],
         method_phase=method_phase,
         require_terminal_provenance=True,
+        require_campaign_quiescence=True,
     )
     if inspection["errors"]:
         raise RuntimeError("; ".join(inspection["errors"]))
@@ -9671,7 +10003,8 @@ def _launch_under_lease_impl(args, out_dir):
             inspection = inspect_campaign(
                 out_dir, inspection_manifest,
                 required_complete_samples=completed_samples,
-                require_terminal_provenance=True)
+                require_terminal_provenance=True,
+                require_campaign_quiescence=True)
             record_slow_control_operation(
                 out_dir, "campaign_terminal_full_audit",
                 time.monotonic() - terminal_audit_started,
@@ -9711,7 +10044,9 @@ def _launch_under_lease_impl(args, out_dir):
             return 2
         terminal_audit_started = time.monotonic()
         inspection = inspect_campaign(
-            out_dir, inspection_manifest, require_complete=True)
+            out_dir, inspection_manifest, require_complete=True,
+            require_terminal_provenance=True,
+            require_campaign_quiescence=True)
         record_slow_control_operation(
             out_dir, "campaign_terminal_full_audit",
             time.monotonic() - terminal_audit_started,
