@@ -134,6 +134,7 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
         launch_batches = []
         lifecycle = []
         infrastructure = set()
+        not_started = set()
         evaluator = set()
         completed = set()
         labels = sorted({item["key_label"] for item in assignments})
@@ -246,13 +247,15 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
                 paired_dispatch._run_worker_queue(
                     args, out_dir, manifest, task_plans, keys, assignments,
                     {}, dispatch_log, {}, infrastructure, evaluator,
-                    completed, len(assignments), slots_per_key)
+                    completed, len(assignments), slots_per_key,
+                    not_started)
 
             rows = paired_dispatch._read_jsonl(dispatch_log)
         return {
             "launch_batches": launch_batches,
             "rows": rows,
             "infrastructure": infrastructure,
+            "not_started": not_started,
             "evaluator": evaluator,
             "completed": completed,
             "lifecycle": lifecycle,
@@ -520,10 +523,49 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
             ["quota-a", "quota-b", "quota-x"],
         )
         self.assertEqual(
-            result["infrastructure"],
-            {"quota-a", "quota-b", "quota-x"},
+            exhausted[0]["not_started_pending_samples"],
+            ["quota-b"],
         )
+        self.assertEqual(
+            result["infrastructure"],
+            {"quota-a", "quota-x"},
+        )
+        self.assertEqual(result["not_started"], {"quota-b"})
         self.assertEqual(result["completed"], set())
+
+    def test_legacy_queue_exhausted_pending_can_resume_after_new_key(self):
+        assignment = self._assignment("quota-b", "KEY_1")
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "queue_exhausted_no_healthy_key",
+                "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+                "quarantined_key_labels": ["KEY_1", "KEY_2"],
+                "pending_samples": ["quota-b"],
+            })
+            for event in ("queue_complete", "campaign_incomplete"):
+                paired_dispatch.append_jsonl_locked(dispatch_log, {
+                    "event": event,
+                    "completed_samples": [],
+                    "infrastructure_incomplete_samples": ["quota-b"],
+                    "evaluator_incomplete_samples": [],
+                })
+
+            self.assertEqual(
+                paired_dispatch._verified_deepseek_resume_missing_samples(
+                    out_dir, [assignment]),
+                {"quota-b"},
+            )
+
+            paired_dispatch.append_jsonl_locked(dispatch_log, {
+                "event": "launch",
+                "sample": "quota-b",
+                "key_label": "KEY_1",
+                "worker_launch_id": "worker-started",
+            })
+            with self.assertRaisesRegex(RuntimeError, "cannot prove pending"):
+                paired_dispatch._verified_deepseek_resume_missing_samples(
+                    out_dir, [assignment])
 
     def test_key_failover_inspector_rejects_tamper(self):
         manifest, dispatch_rows, api_rows, outcome_rows, launches = (
@@ -774,6 +816,88 @@ class DeepSeekOpenCodeCampaignGroup06Mixin:
                     row["worker_launch_id"]: row for row in rotated_launches
                 }),
             [],
+        )
+
+    def test_replaced_key_label_can_be_reactivated_for_resume(self):
+        assignments = [
+            self._assignment("sample-a", "KEY_1"),
+            self._assignment("sample-b", "KEY_1"),
+        ]
+        manifest = self._queue_manifest(assignments)
+        quarantine = {
+            "event": "key_quarantined",
+            "key_label": "KEY_1",
+            "observation_index": 1,
+            "reason": paired_dispatch.DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON,
+        }
+        keys = {"KEY_1": "replacement-secret", "KEY_2": "healthy-secret"}
+        blocked = paired_dispatch._restore_key_failover_queue_state(
+            manifest, [quarantine], assignments, {"KEY_1": "replacement-secret"})
+        self.assertEqual(blocked["quarantined_keys"], {"KEY_1"})
+        self.assertEqual(
+            [item["sample"] for item in blocked["handoff_fifo"]],
+            ["sample-a", "sample-b"],
+        )
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
+            rows = paired_dispatch._append_key_reactivation_events(
+                dispatch_log, [quarantine], keys, ["KEY_1"],
+                "operator replaced key material")
+            persisted = paired_dispatch._read_jsonl(dispatch_log)
+
+        self.assertEqual(len(persisted), 1)
+        self.assertEqual(persisted[0]["event"], paired_dispatch.KEY_REACTIVATION_EVENT)
+        self.assertNotIn("replacement-secret", json.dumps(persisted[0]))
+        self.assertEqual(rows[-1], persisted[0])
+        restored = paired_dispatch._restore_key_failover_queue_state(
+            manifest, rows, assignments, keys)
+        self.assertEqual(restored["quarantined_keys"], set())
+        self.assertEqual(restored["handoff_fifo"], [])
+        self.assertEqual(
+            [item["sample"] for item in restored["pending_by_key"]["KEY_1"]],
+            ["sample-a", "sample-b"],
+        )
+
+    def test_key_reactivation_inspector_binds_epoch(self):
+        manifest, dispatch_rows, api_rows, outcome_rows, _launches = (
+            self._audit_fixture())
+        reactivation = {
+            "event": paired_dispatch.KEY_REACTIVATION_EVENT,
+            "key_label": "KEY_1",
+            "reason": "operator replaced key material",
+            "reactivation_index": 1,
+            "observed_quota_count": 1,
+            "quarantined_key_labels_before": ["KEY_1"],
+            "quarantined_key_labels_after": [],
+        }
+        relaunch = {
+            "event": "launch",
+            "sample": "sample-a",
+            "key_label": "KEY_1",
+            "original_key_label": "KEY_1",
+            "prior_key_label": None,
+            "failover_count": 0,
+            "failover_reason": None,
+            "worker_launch_id": "worker-a-retry",
+        }
+        rows = [dispatch_rows[0], dispatch_rows[1], reactivation, relaunch]
+        launches = {
+            row["worker_launch_id"]: row
+            for row in rows if row.get("event") == "launch"
+        }
+        self.assertEqual(
+            paired_dispatch._inspect_deepseek_key_failover_audit(
+                manifest, rows, api_rows, outcome_rows, launches),
+            [],
+        )
+
+        tampered = copy.deepcopy(rows)
+        tampered[2]["reactivation_index"] = 2
+        self.assertIn(
+            "key reactivation evidence invalid",
+            "; ".join(paired_dispatch._inspect_deepseek_key_failover_audit(
+                manifest, tampered, api_rows, outcome_rows, launches)),
         )
 
     def test_key_failover_inspector_binds_repeated_quota_observations(self):

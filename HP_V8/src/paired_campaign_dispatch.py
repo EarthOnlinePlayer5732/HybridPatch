@@ -151,6 +151,8 @@ DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON = "opencode_monthly_usage_limit"
 DEEPSEEK_MONTHLY_USAGE_LIMIT_MESSAGE_PREFIX = (
     "Monthly usage limit reached."
 )
+KEY_REACTIVATION_EVENT = "key_reactivated"
+NOT_STARTED_PENDING_FIELD = "_not_started_pending"
 METHOD_PHASE_COMPLETE_SCHEMA = "anchorpatch.method_phase_complete/1"
 CONFIRMATION_KNOWN_USAGE_LIMIT_USD = 130.0
 CONFIRMATION_EXPERIMENT_ID = (
@@ -2052,6 +2054,64 @@ def _verify_queued_pending_samples(
             )
 
 
+def _legacy_queue_exhausted_pending_evidence(
+        out_dir, sample, evidence, *, method_phase=None):
+    """Accept ef90019 queue-exhausted aggregates only for never-started work."""
+    if not evidence:
+        return False
+    dispatch_rows = _read_jsonl(os.path.join(out_dir, "dispatch_log.jsonl"))
+    dispatch_indices = []
+    for item in evidence:
+        if not item.startswith("dispatch_log.jsonl:"):
+            return False
+        try:
+            index = int(item.rsplit(":", 1)[1])
+        except (TypeError, ValueError):
+            return False
+        if index < 1 or index > len(dispatch_rows):
+            return False
+        dispatch_indices.append(index)
+
+    queue_exhausted_indices = []
+    for row_index, record in enumerate(dispatch_rows, 1):
+        if record.get("event") != "queue_exhausted_no_healthy_key":
+            continue
+        if method_phase is not None and record.get("method_phase") != method_phase:
+            continue
+        pending = record.get("pending_samples")
+        if sample not in (pending or []):
+            continue
+        not_started = record.get("not_started_pending_samples")
+        if not_started is not None and sample not in not_started:
+            continue
+        if (record.get("reason") == DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON
+                and isinstance(record.get("quarantined_key_labels"), list)):
+            queue_exhausted_indices.append(row_index)
+    if not any(
+            index < min(dispatch_indices)
+            for index in queue_exhausted_indices):
+        return False
+
+    allowed_events = {"queue_complete", "campaign_incomplete"}
+    for index in dispatch_indices:
+        row = dispatch_rows[index - 1]
+        event = row.get("event")
+        if event not in allowed_events:
+            return False
+        if method_phase is not None and row.get("method_phase") != method_phase:
+            return False
+        if sample in (row.get("completed_samples") or []):
+            return False
+        if sample in (row.get("evaluator_incomplete_samples") or []):
+            return False
+        if sample in (row.get("not_started_no_healthy_key_samples") or []):
+            continue
+        if sample in (row.get("infrastructure_incomplete_samples") or []):
+            continue
+        return False
+    return True
+
+
 def _valid_deepseek_failed_retry_evidence(row):
     """Validate the complete attempt chain for one exhausted DeepSeek call."""
     attempts = row.get("transport_attempts")
@@ -2243,6 +2303,10 @@ def _verified_deepseek_resume_missing_samples(out_dir, assignments):
         evidence = _queued_pending_evidence(
             out_dir, sample, item.get("methods") or [])
         if not evidence:
+            allowed.add(sample)
+            continue
+        if _legacy_queue_exhausted_pending_evidence(
+                out_dir, sample, evidence):
             allowed.add(sample)
             continue
         parent_worker = parent_loss_workers.get(sample)
@@ -4542,14 +4606,14 @@ def _inspect_deepseek_key_failover_audit(
 
     quarantined_at = {}
     quota_observations = {}
+    key_reactivations = {}
     used_quota_api_rows = set()
     failover_counts = {}
     assigned_failovers = {}
-    quarantine_count = 0
     has_failover_history = any(
         row.get("event") in {
             "key_quarantined", "key_quota_observed",
-            "key_failover_assigned",
+            "key_failover_assigned", KEY_REACTIVATION_EVENT,
         }
         for row in dispatch_rows
     )
@@ -4570,12 +4634,13 @@ def _inspect_deepseek_key_failover_audit(
                 errors.append(f"key quota observation reason mismatch: {key_label}")
 
             if event == "key_quarantined":
-                quarantine_count += 1
                 if key_label in quarantined_at:
-                    errors.append(f"duplicate key quarantine: {key_label}")
-                if (row.get("quarantine_index") != quarantine_count
-                        or row.get("quarantined_key_count") != quarantine_count
-                        or row.get("observation_index") != 1):
+                    errors.append(f"duplicate active key quarantine: {key_label}")
+                expected_quarantined_count = len(quarantined_at) + 1
+                if (row.get("quarantine_index")
+                        != expected_quarantined_count
+                        or row.get("quarantined_key_count")
+                        != expected_quarantined_count):
                     errors.append(
                         f"key quarantine count is not contiguous: {key_label}")
             elif key_label not in quarantined_at:
@@ -4652,6 +4717,27 @@ def _inspect_deepseek_key_failover_audit(
                 quarantined_at[key_label] = event_index
             continue
 
+        if event == KEY_REACTIVATION_EVENT:
+            key_label = row.get("key_label")
+            expected_index = key_reactivations.get(key_label, 0) + 1
+            before = sorted(quarantined_at)
+            after = sorted(label for label in quarantined_at
+                           if label != key_label)
+            if (not isinstance(key_label, str) or not key_label
+                    or key_label not in quarantined_at
+                    or row.get("reactivation_index") != expected_index
+                    or row.get("observed_quota_count")
+                    != quota_observations.get(key_label, 0)
+                    or row.get("quarantined_key_labels_before") != before
+                    or row.get("quarantined_key_labels_after") != after
+                    or not isinstance(row.get("reason"), str)
+                    or not row.get("reason").strip()):
+                errors.append(f"key reactivation evidence invalid: {key_label}")
+                continue
+            key_reactivations[key_label] = expected_index
+            del quarantined_at[key_label]
+            continue
+
         if event == "key_failover_assigned":
             sample = row.get("sample")
             from_label = row.get("from_key_label")
@@ -4698,6 +4784,7 @@ def _inspect_deepseek_key_failover_audit(
         if event == "queue_exhausted_no_healthy_key":
             known_keys = sorted(quarantined_at)
             pending_samples = row.get("pending_samples")
+            not_started_samples = row.get("not_started_pending_samples")
             if (row.get("reason") != DEEPSEEK_MONTHLY_USAGE_LIMIT_REASON
                     or row.get("quarantined_key_labels") != known_keys
                     or len(known_keys)
@@ -4708,6 +4795,14 @@ def _inspect_deepseek_key_failover_audit(
                     or any(sample not in expected_samples
                            for sample in pending_samples)):
                 errors.append("queue exhaustion key/sample evidence invalid")
+            if (not_started_samples is not None
+                    and (not isinstance(not_started_samples, list)
+                         or not_started_samples
+                         != sorted(set(not_started_samples))
+                         or not set(not_started_samples).issubset(
+                             set(pending_samples or [])))):
+                errors.append(
+                    "queue exhaustion not-started evidence invalid")
             continue
 
         if event not in {"launch", "launch_intent"}:
@@ -6885,6 +6980,22 @@ def _original_key_label(item):
     return item.get("original_key_label") or item.get("key_label")
 
 
+def _mark_not_started_pending_assignment(item):
+    marked = dict(item)
+    marked[NOT_STARTED_PENDING_FIELD] = True
+    return marked
+
+
+def _is_not_started_pending_assignment(item):
+    return item.get(NOT_STARTED_PENDING_FIELD) is True
+
+
+def _clear_not_started_pending_assignment(item):
+    cleared = dict(item)
+    cleared.pop(NOT_STARTED_PENDING_FIELD, None)
+    return cleared
+
+
 def _failover_count(item):
     value = item.get("failover_count", 0)
     if not _is_exact_int(value) or value < 0:
@@ -7155,7 +7266,7 @@ def _append_key_failover_assignment(
     original_label = _original_key_label(item)
     sample = item["sample"]
     next_count = failover_counts.get(sample, _failover_count(item)) + 1
-    assigned = dict(item)
+    assigned = _clear_not_started_pending_assignment(item)
     assigned.update({
         "key_label": destination_label,
         "original_key_label": original_label,
@@ -7206,7 +7317,8 @@ def _take_available_assignments(
         if label in quarantined_keys:
             continue
         for _index in range(min(free, len(pending))):
-            batch.append(pending.pop(0))
+            batch.append(_clear_not_started_pending_assignment(
+                pending.pop(0)))
             free -= 1
         while free > 0 and handoff_fifo:
             batch.append(_append_key_failover_assignment(
@@ -7261,8 +7373,72 @@ def _append_key_quarantine(
         return False
     queued = pending_by_key.get(key_label) or []
     pending_by_key[key_label] = []
-    handoff_fifo.extend(queued)
+    handoff_fifo.extend(
+        _mark_not_started_pending_assignment(item) for item in queued)
     return True
+
+
+def _append_key_reactivation_events(
+        dispatch_log, dispatch_rows, keys, requested_labels, reason):
+    """Record operator-attested replacement key material for quarantined labels."""
+    labels = list(requested_labels or [])
+    if not labels:
+        return dispatch_rows
+    if len(labels) != len(set(labels)):
+        raise RuntimeError("duplicate key reactivation labels are invalid")
+    if not isinstance(reason, str) or not reason.strip():
+        raise RuntimeError("key reactivation requires a non-empty reason")
+    unknown = [label for label in labels if label not in keys]
+    if unknown:
+        raise RuntimeError(f"cannot reactivate unknown key labels: {unknown}")
+
+    quarantined_keys = set()
+    quota_observation_counts = {}
+    reactivation_counts = {}
+    for row in dispatch_rows:
+        event = row.get("event")
+        label = row.get("key_label")
+        if not isinstance(label, str) or not label:
+            continue
+        if event in {"key_quarantined", "key_quota_observed"}:
+            observed = row.get("observation_index")
+            if _is_exact_int(observed):
+                quota_observation_counts[label] = max(
+                    quota_observation_counts.get(label, 0), observed)
+            if event == "key_quarantined":
+                quarantined_keys.add(label)
+        elif event == KEY_REACTIVATION_EVENT:
+            index = row.get("reactivation_index")
+            if _is_exact_int(index):
+                reactivation_counts[label] = max(
+                    reactivation_counts.get(label, 0), index)
+            quarantined_keys.discard(label)
+
+    appended = []
+    for label in labels:
+        if label not in quarantined_keys:
+            if reactivation_counts.get(label, 0) > 0:
+                continue
+            raise RuntimeError(
+                f"cannot reactivate a key label that is not quarantined: {label}")
+        before = sorted(quarantined_keys)
+        quarantined_keys.remove(label)
+        after = sorted(quarantined_keys)
+        record = {
+            "event": KEY_REACTIVATION_EVENT,
+            "key_label": label,
+            "reason": reason.strip(),
+            "reactivation_index": reactivation_counts.get(label, 0) + 1,
+            "observed_quota_count": quota_observation_counts.get(label, 0),
+            "quarantined_key_labels_before": before,
+            "quarantined_key_labels_after": after,
+            "created_at": datetime.now().astimezone().isoformat(
+                timespec="seconds"),
+        }
+        append_jsonl_locked(dispatch_log, record)
+        reactivation_counts[label] = record["reactivation_index"]
+        appended.append(record)
+    return [*dispatch_rows, *appended]
 
 
 def _restore_key_failover_queue_state(
@@ -7291,6 +7467,7 @@ def _restore_key_failover_queue_state(
 
     quarantined_keys = set()
     quota_observation_counts = {}
+    key_reactivations = {}
     failover_counts = {sample: 0 for sample in manifest_key_by_sample}
     current_key_by_sample = {}
     routing_origin_by_sample = {}
@@ -7298,7 +7475,7 @@ def _restore_key_failover_queue_state(
     has_failover_history = any(
         row.get("event") in {
             "key_quarantined", "key_quota_observed",
-            "key_failover_assigned",
+            "key_failover_assigned", KEY_REACTIVATION_EVENT,
         }
         for row in dispatch_rows
     )
@@ -7321,7 +7498,27 @@ def _restore_key_failover_queue_state(
                 raise RuntimeError(
                     "durable key quarantine history is invalid")
             quota_observation_counts[label] = expected_observation
-            quarantined_keys.add(label)
+            if event == "key_quarantined":
+                quarantined_keys.add(label)
+            continue
+        if event == KEY_REACTIVATION_EVENT:
+            label = row.get("key_label")
+            expected_index = key_reactivations.get(label, 0) + 1
+            before = sorted(quarantined_keys)
+            after = sorted(item for item in quarantined_keys if item != label)
+            if (label not in key_labels
+                    or label not in quarantined_keys
+                    or row.get("reactivation_index") != expected_index
+                    or row.get("observed_quota_count")
+                    != quota_observation_counts.get(label, 0)
+                    or row.get("quarantined_key_labels_before") != before
+                    or row.get("quarantined_key_labels_after") != after
+                    or not isinstance(row.get("reason"), str)
+                    or not row.get("reason").strip()):
+                raise RuntimeError(
+                    "durable key reactivation history is invalid")
+            key_reactivations[label] = expected_index
+            quarantined_keys.remove(label)
             continue
         if event == "key_failover_assigned":
             sample = row.get("sample")
@@ -7403,7 +7600,7 @@ def _restore_key_failover_queue_state(
             })
         selected_failover_counts[sample] = count
         if item["key_label"] in quarantined_keys:
-            handoff_fifo.append(item)
+            handoff_fifo.append(_mark_not_started_pending_assignment(item))
         else:
             if item["key_label"] not in pending_by_key:
                 raise RuntimeError(
@@ -7422,13 +7619,27 @@ def _run_worker_queue(
         args, out_dir, inspection_manifest, task_plans, keys, assignments,
         resume_authorizations, dispatch_log, running,
         infrastructure_incomplete_samples, evaluator_incomplete_samples,
-        completed_samples, total_assignment_count, slots_per_key):
+        completed_samples, total_assignment_count, slots_per_key,
+        not_started_no_healthy_key_samples=None):
     """Drain stable per-key FIFO queues without a cross-key wave barrier."""
     if running:
         raise RuntimeError("cannot start a worker queue while workers are active")
     if args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
+        dispatch_rows = _read_jsonl(dispatch_log)
+        # Validate the existing durable routing history before appending an
+        # operator reactivation event.  A corrupt history must remain
+        # byte-for-byte unchanged when resume fails closed.
         restored = _restore_key_failover_queue_state(
-            inspection_manifest, _read_jsonl(dispatch_log), assignments, keys)
+            inspection_manifest, dispatch_rows, assignments, keys)
+        dispatch_rows = _append_key_reactivation_events(
+            dispatch_log, dispatch_rows, keys,
+            getattr(args, "reactivate_key_label", None),
+            getattr(args, "key_reactivation_reason", None)
+            or getattr(args, "resume_reason", None),
+        )
+        if getattr(args, "reactivate_key_label", None):
+            restored = _restore_key_failover_queue_state(
+                inspection_manifest, dispatch_rows, assignments, keys)
     else:
         pending_by_key = {}
         failover_counts = {}
@@ -7478,6 +7689,10 @@ def _run_worker_queue(
     quarantined_keys = restored["quarantined_keys"]
     quota_observation_counts = restored["quota_observation_counts"]
     handoff_fifo = restored["handoff_fifo"]
+    not_started_no_healthy_key_samples = (
+        not_started_no_healthy_key_samples
+        if not_started_no_healthy_key_samples is not None else set()
+    )
     last_report = 0.0
     last_inspection = {
         "errors": [], "api_calls": 0, "preservation_violations": 0}
@@ -7504,9 +7719,11 @@ def _run_worker_queue(
             failover_counts=failover_counts)
         if batch:
             for item in batch:
-                if _failover_count(item) > 0:
-                    infrastructure_incomplete_samples.discard(
-                        item["sample"])
+                # Once a replacement worker is actually launched, any prior
+                # terminal infrastructure status is superseded regardless of
+                # whether routing changed label or reactivated the same label.
+                infrastructure_incomplete_samples.discard(item["sample"])
+                not_started_no_healthy_key_samples.discard(item["sample"])
             refill_index += 1
             if args.campaign_role == "confirmation":
                 evaluate_confirmation_known_usage_gate(
@@ -7536,12 +7753,22 @@ def _run_worker_queue(
             )
         if not running:
             if any(pending_by_key.values()) or handoff_fifo:
+                not_started = sorted({
+                    item["sample"]
+                    for items in pending_by_key.values()
+                    for item in items
+                } | {
+                    item["sample"] for item in handoff_fifo
+                    if _is_not_started_pending_assignment(item)
+                })
                 stranded = sorted({
                     item["sample"]
                     for items in pending_by_key.values()
                     for item in items
                 } | {item["sample"] for item in handoff_fifo})
-                infrastructure_incomplete_samples.update(stranded)
+                not_started = sorted(
+                    set(not_started) - set(infrastructure_incomplete_samples))
+                not_started_no_healthy_key_samples.update(not_started)
                 append_jsonl_locked(
                     dispatch_log,
                     {
@@ -7551,6 +7778,7 @@ def _run_worker_queue(
                         "quarantined_key_labels": sorted(
                             quarantined_keys),
                         "pending_samples": stranded,
+                        "not_started_pending_samples": not_started,
                         "created_at": datetime.now().astimezone().isoformat(
                             timespec="seconds"),
                     },
@@ -7600,10 +7828,8 @@ def _run_worker_queue(
                 + ", ".join(conditions)
             )
         if exited:
-            # One inspection covers every worker observed exiting in this poll.
-            # Idle polls only observe process state; repeatedly re-reading the
-            # full append-only campaign ledgers and transport sidecars made the
-            # control plane scale with elapsed time instead of completed work.
+            # Keep the existing fail-closed full inspection until a dedicated
+            # worker-local/delta audit verifies every released slot.
             last_inspection = inspect_campaign(
                 out_dir, inspection_manifest,
                 active_samples=set(running),
@@ -7640,6 +7866,8 @@ def _run_worker_queue(
             "completed_samples": sorted(completed_samples),
             "infrastructure_incomplete_samples": sorted(
                 infrastructure_incomplete_samples),
+            "not_started_no_healthy_key_samples": sorted(
+                not_started_no_healthy_key_samples),
             "evaluator_incomplete_samples": sorted(
                 evaluator_incomplete_samples),
         },
@@ -8098,6 +8326,7 @@ def _launch_under_lease(args, out_dir):
     launch_assignments = list(assignments)
     resume_authorizations = {}
     incomplete_samples = set()
+    not_started_no_healthy_key_samples = set()
     evaluator_incomplete_samples = set()
     completed_samples = set()
     audited_stale = []
@@ -8181,6 +8410,10 @@ def _launch_under_lease(args, out_dir):
         )
         latest_outcomes = _latest_sample_outcomes(
             out_dir, [item["sample"] for item in assignments])
+        incomplete_samples = {
+            sample for sample, outcome in latest_outcomes.items()
+            if outcome.get("status") == "infrastructure_incomplete"
+        }
         completed_samples = {
             sample for sample, outcome in latest_outcomes.items()
             if outcome.get("status") == "finished"
@@ -8220,13 +8453,19 @@ def _launch_under_lease(args, out_dir):
                     ),
                 })
             append_jsonl_locked(dispatch_log, resume_record)
+        queue_kwargs = {}
+        if args.campaign_role in DEEPSEEK_CAMPAIGN_ROLES:
+            queue_kwargs["not_started_no_healthy_key_samples"] = (
+                not_started_no_healthy_key_samples)
         _run_worker_queue(
             args, out_dir, inspection_manifest, task_plans, keys,
             launch_assignments, resume_authorizations, dispatch_log,
             running, incomplete_samples, evaluator_incomplete_samples,
             completed_samples, len(assignments), slots_per_key,
+            **queue_kwargs,
         )
-        if incomplete_samples or evaluator_incomplete_samples:
+        if (incomplete_samples or evaluator_incomplete_samples
+                or not_started_no_healthy_key_samples):
             inspection = inspect_campaign(
                 out_dir, inspection_manifest,
                 required_complete_samples=completed_samples,
@@ -8239,6 +8478,8 @@ def _launch_under_lease(args, out_dir):
                     "event": "campaign_incomplete",
                     "infrastructure_incomplete_samples": sorted(
                         incomplete_samples),
+                    "not_started_no_healthy_key_samples": sorted(
+                        not_started_no_healthy_key_samples),
                     "evaluator_incomplete_samples": sorted(
                         evaluator_incomplete_samples),
                     "completed_samples": sorted(completed_samples),
@@ -8249,6 +8490,8 @@ def _launch_under_lease(args, out_dir):
             print(
                 "RESULT INCOMPLETE infrastructure_samples="
                 + ",".join(sorted(incomplete_samples))
+                + " not_started_no_healthy_key_samples="
+                + ",".join(sorted(not_started_no_healthy_key_samples))
                 + " evaluator_samples="
                 + ",".join(sorted(evaluator_incomplete_samples)),
                 file=sys.stderr, flush=True,
@@ -8374,6 +8617,12 @@ def main():
     parser.add_argument("--dry_run", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--resume_reason", default=None)
+    parser.add_argument(
+        "--reactivate_key_label", action="append", default=[],
+        help="resume-only DeepSeek key label whose secret was operator-replaced")
+    parser.add_argument(
+        "--key_reactivation_reason",
+        help="optional reason for --reactivate_key_label; defaults to --resume_reason")
     parser.add_argument(
         "--snapshot_mode",
         choices=(SNAPSHOT_MODE_ALL, SNAPSHOT_MODE_FAILURES, SNAPSHOT_MODE_OFF),
@@ -8537,6 +8786,15 @@ def main():
         parser.error("--resume_reason requires --resume")
     if args.confirm_workers_stopped and not args.resume:
         parser.error("--confirm_workers_stopped requires --resume")
+    if args.reactivate_key_label:
+        if not args.resume:
+            parser.error("--reactivate_key_label requires --resume")
+        if args.campaign_role not in DEEPSEEK_CAMPAIGN_ROLES:
+            parser.error("--reactivate_key_label is only valid for DeepSeek campaigns")
+        if len(args.reactivate_key_label) != len(set(args.reactivate_key_label)):
+            parser.error("--reactivate_key_label contains duplicates")
+    if args.key_reactivation_reason and not args.reactivate_key_label:
+        parser.error("--key_reactivation_reason requires --reactivate_key_label")
     return launch(args)
 
 
