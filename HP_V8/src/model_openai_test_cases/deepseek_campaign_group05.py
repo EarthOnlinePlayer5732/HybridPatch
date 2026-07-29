@@ -885,6 +885,136 @@ class DeepSeekOpenCodeCampaignGroup05Mixin:
                 ],
                 ["worker-parent-loss-0"])
 
+    def test_parent_loss_authorizer_proves_only_zero_post_unpublished_capability(self):
+        for with_attempt_evidence in (False, True):
+            with self.subTest(with_attempt_evidence=with_attempt_evidence), \
+                    tempfile.TemporaryDirectory() as out_dir:
+                fixture = self._write_dispatcher_parent_loss_fixture(
+                    out_dir, ["running", "running"], metadata_mode="event")
+                manifest = fixture["manifest"]
+                manifest["config"]["provider_guard_mode"] = (
+                    paired_dispatch
+                    .PROVIDER_GUARD_WORKER_START_CAPABILITY_V1)
+                states = [
+                    f"state-{index}"
+                    for index in range(
+                        1,
+                        paired_dispatch.DEEPSEEK_FULL234_ROUND_TRIPS + 1,
+                    )
+                ]
+                for worker in fixture["workers"]:
+                    sample = worker["sample"]
+                    plan_path = os.path.join(
+                        out_dir, f"{sample}.task_plan.json")
+                    utils_relay_plan.save_relay_task_plan(plan_path, states)
+                    manifest["task_plans"][sample] = {
+                        "path": os.path.basename(plan_path),
+                        "sha256": paired_dispatch._sha256(plan_path),
+                        "forward_state_sequence": states,
+                    }
+                run_meta.write_json_atomic(
+                    os.path.join(out_dir, "dispatch_manifest.json"), manifest)
+                manifest_digest = (
+                    paired_dispatch._canonical_record_sha256(manifest))
+                workers_by_id = {
+                    worker["worker_launch_id"]: worker
+                    for worker in fixture["workers"]
+                }
+                dispatch_path = os.path.join(
+                    out_dir, "dispatch_log.jsonl")
+                dispatch_rows = ledger_recovery._read_jsonl(dispatch_path)
+                capabilities = {}
+                rewritten = []
+                for row in dispatch_rows:
+                    if row.get("event") != "worker_authorized":
+                        rewritten.append(row)
+                        continue
+                    worker_id = row["worker_launch_id"]
+                    worker = workers_by_id[worker_id]
+                    sample = worker["sample"]
+                    capability = {
+                        "schema": "anchorpatch.worker_start/2",
+                        "worker_launch_id": worker_id,
+                        "worker_pid": worker["worker_pid"],
+                        "invocation_id": worker["invocation_id"],
+                        "sample": sample,
+                        "task_plan_sha256": manifest[
+                            "task_plans"][sample]["sha256"],
+                        "provider_guard_mode": (
+                            paired_dispatch
+                            .PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+                        "dispatcher_pid": fixture["dispatcher_pid"],
+                        "dispatcher_instance_id": fixture[
+                            "dispatcher_instance_id"],
+                        "run_git_commit": fixture["commit"],
+                        "transport_revision": (
+                            paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                        "dispatch_manifest_canonical_sha256": (
+                            manifest_digest),
+                    }
+                    capabilities[worker_id] = capability
+                    rewritten.append({
+                        "event": "worker_authorized",
+                        **capability,
+                        "worker_start_capability_sha256": (
+                            paired_dispatch._canonical_record_sha256(
+                                capability)),
+                    })
+                run_meta._write_jsonl_atomic(dispatch_path, rewritten)
+
+                published_worker = fixture["workers"][0]
+                _ready_path, start_path = paired_dispatch._worker_barrier_paths(
+                    out_dir, published_worker["worker_launch_id"])
+                run_meta.write_json_atomic(
+                    start_path,
+                    capabilities[published_worker["worker_launch_id"]])
+                missing_worker = fixture["workers"][1]
+                if with_attempt_evidence:
+                    run_meta.append_jsonl_locked(
+                        os.path.join(
+                            out_dir, "api_attempt_ledger.jsonl"), {
+                            "schema": run_meta.API_ATTEMPT_SCHEMA,
+                            "worker_launch_id": missing_worker[
+                                "worker_launch_id"],
+                            "sample": missing_worker["sample"],
+                            "semantic_call_id": (
+                                "fullrewrite/"
+                                f"{missing_worker['sample']}/rt01/forward/"
+                                "fullrewrite_primary/g000"),
+                            "event": "semantic_request",
+                        })
+
+                commit = fixture["commit"]
+                fingerprint = fixture["fingerprint"]
+                git_result = mock.Mock(stdout="")
+                with mock.patch.object(
+                        ledger_recovery, "_git_identity",
+                        return_value=(commit, "clean")), mock.patch.object(
+                            ledger_recovery, "code_fingerprint",
+                            return_value=fingerprint), mock.patch.object(
+                                ledger_recovery, "_git_changed_paths",
+                                return_value=[]), mock.patch.object(
+                                    run_meta, "_git_identity",
+                                    return_value=(commit, "clean")), \
+                        mock.patch.object(
+                            run_meta, "code_fingerprint",
+                            return_value=fingerprint), mock.patch.object(
+                                run_meta.subprocess, "run",
+                                return_value=git_result):
+                    ledger_recovery.authorize(
+                        out_dir, dispatcher_process_lost=True)
+                    authorization = (
+                        run_meta.read_campaign_recovery_authorization(out_dir))
+
+                expected = (
+                    [] if with_attempt_evidence else
+                    [missing_worker["worker_launch_id"]])
+                self.assertEqual(
+                    authorization[
+                        "unpublished_worker_start_capability_ids"],
+                    expected,
+                )
+
     def test_stopless_registered_prelaunch_has_recovery_entry(self):
         with tempfile.TemporaryDirectory() as out_dir:
             fixture = self._write_dispatcher_parent_loss_fixture(

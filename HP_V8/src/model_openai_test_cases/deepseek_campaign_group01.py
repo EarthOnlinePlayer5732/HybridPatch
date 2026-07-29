@@ -4,6 +4,141 @@ from .support import *
 
 
 class DeepSeekOpenCodeCampaignGroup01Mixin:
+    def _write_capability_recovery_inspection_fixture(
+            self, out_dir, worker_specs):
+        manifest, first_sample, _worker_id, worker_pid = (
+            self._write_inspection_fixture(out_dir))
+        samples = [spec["sample"] for spec in worker_specs]
+        first_plan = manifest["task_plans"][first_sample]
+        states = list(first_plan["forward_state_sequence"])
+        manifest["config"].update({
+            "samples": samples,
+            "run_metadata_storage": run_meta.RUN_METADATA_STORAGE_EVENT_V1,
+            "provider_guard_mode": (
+                paired_dispatch.PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+        })
+        manifest["assignments"] = []
+        manifest["task_plans"] = {}
+        for spec in worker_specs:
+            sample = spec["sample"]
+            plan_path = os.path.join(out_dir, f"{sample}.task_plan.json")
+            utils_relay_plan.save_relay_task_plan(plan_path, states)
+            manifest["task_plans"][sample] = {
+                "path": os.path.basename(plan_path),
+                "sha256": paired_dispatch._sha256(plan_path),
+                "forward_state_sequence": states,
+            }
+            for method in manifest["config"]["method_set"]:
+                os.makedirs(os.path.join(out_dir, method), exist_ok=True)
+        run_meta.write_json_atomic(
+            os.path.join(out_dir, "dispatch_manifest.json"), manifest)
+        manifest_digest = paired_dispatch._canonical_record_sha256(manifest)
+        dispatcher_pid = 4242
+        dispatcher_instance_id = "dispatcher-recovery"
+        template = run_meta._read_jsonl_records_with_retry(
+            os.path.join(out_dir, "run_metadata.jsonl"))[0]
+        dispatch_rows = []
+        metadata = []
+        capabilities = {}
+        for index, spec in enumerate(worker_specs, 1):
+            sample = spec["sample"]
+            worker_id = spec["worker_launch_id"]
+            pid = worker_pid + index
+            invocation_id = f"invocation-{worker_id}"
+            plan_sha = manifest["task_plans"][sample]["sha256"]
+            capability = {
+                "schema": "anchorpatch.worker_start/2",
+                "worker_launch_id": worker_id,
+                "worker_pid": pid,
+                "invocation_id": invocation_id,
+                "sample": sample,
+                "task_plan_sha256": plan_sha,
+                "provider_guard_mode": (
+                    paired_dispatch
+                    .PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+                "run_git_commit": spec["capability_commit"],
+                "transport_revision": (
+                    paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                "dispatch_manifest_canonical_sha256": manifest_digest,
+            }
+            capability_sha = paired_dispatch._canonical_record_sha256(
+                capability)
+            dispatch_rows.extend([{
+                "event": "launch",
+                "worker_launch_id": worker_id,
+                "sample": sample,
+                "pid": pid,
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+            }, {
+                "event": "worker_authorized",
+                **capability,
+                "worker_start_capability_sha256": capability_sha,
+            }])
+            if spec.get("ack_published", True):
+                _ready_path, start_path = (
+                    paired_dispatch._worker_barrier_paths(
+                        out_dir, worker_id))
+                run_meta.write_json_atomic(start_path, capability)
+            record = copy.deepcopy(template)
+            record.update({
+                "invocation_id": invocation_id,
+                "worker_launch_id": worker_id,
+                "worker_pid": pid,
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+                "samples": [sample],
+                "run_git_commit": spec["metadata_commit"],
+                "git_tree_state": "clean",
+                "status": "interrupted_by_dispatcher",
+                "finished_at": "2026-07-29T00:00:00+08:00",
+            })
+            metadata.append(record)
+            capabilities[worker_id] = {
+                "record": capability,
+                "sha256": capability_sha,
+                "worker_pid": pid,
+            }
+        run_meta._write_jsonl_atomic(
+            os.path.join(out_dir, "dispatch_log.jsonl"), dispatch_rows)
+        paired_dispatch._write_active_worker_set(out_dir, manifest, [])
+        return manifest, metadata, capabilities
+
+    @staticmethod
+    def _capability_recovery_incident_evidence(worker_specs, capabilities):
+        recovered_ids = frozenset(
+            spec["worker_launch_id"] for spec in worker_specs)
+        return {
+            "api_row_hashes": frozenset(),
+            "api_incident_kinds": {},
+            "attempt_row_hashes": frozenset(),
+            "transport_sidecar_hashes": frozenset(),
+            "transport_sidecars_by_api_row_hash": {},
+            "worker_launch_ids": recovered_ids,
+            "unpublished_worker_start_capability_ids": frozenset(
+                spec["worker_launch_id"] for spec in worker_specs
+                if not spec.get("ack_published", True)),
+            "deepseek_recovered_workers": {},
+            "preauthorization_worker_launch_ids": frozenset(),
+            "provider_access_retry_authorizations": {},
+            "provider_access_resume_samples": frozenset(),
+            "dispatcher_parent_loss_workers": {
+                spec["sample"]: {
+                    "sample": spec["sample"],
+                    "worker_launch_id": spec["worker_launch_id"],
+                    "worker_pid": capabilities[
+                        spec["worker_launch_id"]]["worker_pid"],
+                    "invocation_id": (
+                        f"invocation-{spec['worker_launch_id']}"),
+                    "status": "running",
+                }
+                for spec in worker_specs
+            },
+            "authorization_id": "recovery-a",
+        }
+
     def test_live_inspection_avoids_deepseek_api_linkage_torn_snapshot(self):
         with tempfile.TemporaryDirectory() as out_dir:
             manifest, sample, worker_id, worker_pid = (
@@ -954,6 +1089,232 @@ class DeepSeekOpenCodeCampaignGroup01Mixin:
                         )
                 finally:
                     portalocker.unlock(lease)
+
+    def test_inspector_rejects_api_row_with_wrong_worker_capability_sha(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, sample, worker_id, worker_pid = (
+                self._write_inspection_fixture(out_dir))
+            manifest["config"].update({
+                "run_metadata_storage": run_meta.RUN_METADATA_STORAGE_EVENT_V1,
+                "provider_guard_mode": (
+                    paired_dispatch
+                    .PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+            })
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "dispatch_manifest.json"), manifest)
+            dispatcher_pid = 4242
+            dispatcher_instance_id = "dispatcher-a"
+            plan_sha = manifest["task_plans"][sample]["sha256"]
+            capability = {
+                "schema": "anchorpatch.worker_start/2",
+                "worker_launch_id": worker_id,
+                "worker_pid": worker_pid,
+                "invocation_id": "invocation-a",
+                "sample": sample,
+                "task_plan_sha256": plan_sha,
+                "provider_guard_mode": (
+                    paired_dispatch
+                    .PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+                "dispatcher_pid": dispatcher_pid,
+                "dispatcher_instance_id": dispatcher_instance_id,
+                "run_git_commit": manifest["run_git_commit"],
+                "transport_revision": (
+                    paired_dispatch.DEEPSEEK_TRANSPORT_REVISION),
+                "dispatch_manifest_canonical_sha256": (
+                    paired_dispatch._canonical_record_sha256(manifest)),
+            }
+            _ready_path, start_path = paired_dispatch._worker_barrier_paths(
+                out_dir, worker_id)
+            run_meta.write_json_atomic(start_path, capability)
+            run_meta._write_jsonl_atomic(
+                os.path.join(out_dir, "dispatch_log.jsonl"), [{
+                    "event": "launch",
+                    "worker_launch_id": worker_id,
+                    "sample": sample,
+                    "pid": worker_pid,
+                    "dispatcher_pid": dispatcher_pid,
+                    "dispatcher_instance_id": dispatcher_instance_id,
+                }, {
+                    "event": "worker_authorized",
+                    **capability,
+                    "worker_start_capability_sha256": (
+                        paired_dispatch._canonical_record_sha256(capability)),
+                }])
+            api_row = self._deepseek_api_row(
+                out_dir, sample, worker_id, worker_pid, "forward")
+            api_row["worker_start_capability_sha256"] = "f" * 64
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), api_row)
+            metadata = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "run_metadata.jsonl"))
+
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=(manifest["run_git_commit"], "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "read_run_metadata_snapshot",
+                        return_value=metadata):
+                inspection = paired_dispatch._inspect_deepseek_campaign(
+                    out_dir, manifest, active_samples={sample})
+            self.assertIn(
+                "API worker capability mismatch at row 1",
+                inspection["errors"],
+            )
+            self.assertNotIn(
+                f"worker start capability mismatch: {worker_id}",
+                inspection["errors"],
+            )
+
+    def test_inspector_accepts_mixed_original_and_recovery_capability_commits(self):
+        original_commit = "1" * 40
+        recovery_commit = "2" * 40
+        worker_specs = [{
+            "sample": "historical-sample",
+            "worker_launch_id": "worker-historical",
+            "capability_commit": original_commit,
+            "metadata_commit": original_commit,
+            "ack_published": True,
+        }, {
+            "sample": "recovery-sample",
+            "worker_launch_id": "worker-recovery",
+            "capability_commit": recovery_commit,
+            "metadata_commit": recovery_commit,
+            "ack_published": True,
+        }]
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, metadata, capabilities = (
+                self._write_capability_recovery_inspection_fixture(
+                    out_dir, worker_specs))
+            evidence = self._capability_recovery_incident_evidence(
+                worker_specs, capabilities)
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=(recovery_commit, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "read_run_metadata_snapshot",
+                        return_value=metadata), mock.patch.object(
+                            paired_dispatch,
+                            "read_campaign_recovery_authorization",
+                            return_value={
+                                "recovery_kind": (
+                                    run_meta
+                                    .DISPATCHER_PROCESS_LOST_RECOVERY_KIND),
+                                "recovery_git_commit": recovery_commit,
+                            }), mock.patch.object(
+                                paired_dispatch,
+                                "campaign_recovery_incident_evidence",
+                                return_value=evidence):
+                inspection = paired_dispatch._inspect_deepseek_campaign(
+                    out_dir, manifest, active_samples=set())
+            self.assertFalse(any(
+                "worker start capability mismatch" in error
+                for error in inspection["errors"]
+            ), inspection["errors"])
+
+    def test_inspector_rejects_capability_commit_mismatched_with_metadata(self):
+        original_commit = "1" * 40
+        recovery_commit = "2" * 40
+        worker_specs = [{
+            "sample": "historical-sample",
+            "worker_launch_id": "worker-historical",
+            "capability_commit": original_commit,
+            "metadata_commit": recovery_commit,
+            "ack_published": True,
+        }]
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, metadata, capabilities = (
+                self._write_capability_recovery_inspection_fixture(
+                    out_dir, worker_specs))
+            evidence = self._capability_recovery_incident_evidence(
+                worker_specs, capabilities)
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=(recovery_commit, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "read_run_metadata_snapshot",
+                        return_value=metadata), mock.patch.object(
+                            paired_dispatch,
+                            "read_campaign_recovery_authorization",
+                            return_value={
+                                "recovery_kind": (
+                                    run_meta
+                                    .DISPATCHER_PROCESS_LOST_RECOVERY_KIND),
+                                "recovery_git_commit": recovery_commit,
+                            }), mock.patch.object(
+                                paired_dispatch,
+                                "campaign_recovery_incident_evidence",
+                                return_value=evidence):
+                inspection = paired_dispatch._inspect_deepseek_campaign(
+                    out_dir, manifest, active_samples=set())
+            self.assertIn(
+                "worker capability/metadata identity mismatch: "
+                "worker-historical",
+                inspection["errors"],
+            )
+
+    def test_recovered_partial_ack_zero_post_is_accepted_but_post_is_rejected(self):
+        recovery_commit = "2" * 40
+        worker_specs = [{
+            "sample": "ack-published-sample",
+            "worker_launch_id": "worker-ack-published",
+            "capability_commit": recovery_commit,
+            "metadata_commit": recovery_commit,
+            "ack_published": True,
+        }, {
+            "sample": "ack-missing-sample",
+            "worker_launch_id": "worker-ack-missing",
+            "capability_commit": recovery_commit,
+            "metadata_commit": recovery_commit,
+            "ack_published": False,
+        }]
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, metadata, capabilities = (
+                self._write_capability_recovery_inspection_fixture(
+                    out_dir, worker_specs))
+            evidence = self._capability_recovery_incident_evidence(
+                worker_specs, capabilities)
+
+            def inspect():
+                with mock.patch.object(
+                        paired_dispatch, "_git_identity",
+                        return_value=(recovery_commit, "clean")), \
+                        mock.patch.object(
+                            paired_dispatch, "read_run_metadata_snapshot",
+                            return_value=metadata), mock.patch.object(
+                                paired_dispatch,
+                                "read_campaign_recovery_authorization",
+                                return_value={
+                                    "recovery_kind": (
+                                        run_meta
+                                        .DISPATCHER_PROCESS_LOST_RECOVERY_KIND),
+                                    "recovery_git_commit": recovery_commit,
+                                }), mock.patch.object(
+                                    paired_dispatch,
+                                    "campaign_recovery_incident_evidence",
+                                    return_value=evidence):
+                    return paired_dispatch._inspect_deepseek_campaign(
+                        out_dir, manifest, active_samples=set())
+
+            before_post = inspect()
+            self.assertNotIn(
+                "worker start capability mismatch: worker-ack-missing",
+                before_post["errors"],
+            )
+
+            missing = capabilities["worker-ack-missing"]
+            api_row = self._deepseek_api_row(
+                out_dir, "ack-missing-sample", "worker-ack-missing",
+                missing["worker_pid"], "forward",
+                request_id="call-after-missing-ack")
+            api_row["worker_start_capability_sha256"] = missing["sha256"]
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), api_row)
+            after_post = inspect()
+            self.assertIn(
+                "unpublished worker capability has API evidence: "
+                "worker-ack-missing",
+                after_post["errors"],
+            )
 
     def test_resume_classifier_pending_requires_explicit_recovery_mode(self):
         with tempfile.TemporaryDirectory() as out_dir:

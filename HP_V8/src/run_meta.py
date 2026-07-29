@@ -80,6 +80,11 @@ EMERGENCY_STOP_DIRECTORY = "campaign_stop_emergency"
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
+PROVIDER_GUARD_ACTIVE_SET_V1 = "active_worker_set_v1"
+PROVIDER_GUARD_WORKER_START_CAPABILITY_V1 = (
+    "worker_start_capability_v1"
+)
+WORKER_START_CAPABILITY_SCHEMA = "anchorpatch.worker_start/2"
 DEEPSEEK_COMPACT_TRANSPORT_REVISION = "opencode_openai_compatible/6"
 DEEPSEEK_COMPACT_EVENT_SCHEMA = "anchorpatch.transport_event/2"
 SAMPLE_OUTCOME_SCHEMA = "anchorpatch.sample_outcome/1"
@@ -89,6 +94,9 @@ SNAPSHOT_MODE_OFF = "off"
 SNAPSHOT_MODES = frozenset({
     SNAPSHOT_MODE_ALL, SNAPSHOT_MODE_FAILURES, SNAPSHOT_MODE_OFF,
 })
+
+_WORKER_START_CAPABILITY_LOCK = threading.Lock()
+_WORKER_START_CAPABILITY = None
 CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA = (
     "anchorpatch.campaign_recovery_authorization/1"
 )
@@ -624,6 +632,143 @@ def _raise_if_campaign_stopped(out_dir):
         )
 
 
+def _reject_worker_runtime_authorization(out_dir, sample_id, reason):
+    worker_id = os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID")
+    record_campaign_stop_condition(
+        out_dir,
+        "worker_authorization_drift",
+        sample=sample_id,
+        attempted_worker_launch_id=worker_id,
+        authorization_reason=reason,
+    )
+    _raise_if_campaign_stopped(out_dir)
+    raise CampaignStoppedError("worker runtime authorization drift")
+
+
+def install_worker_start_capability(
+        out_dir, sample_id, invocation_id, task_plan_sha256, capability):
+    """Validate and cache one immutable dispatcher start capability.
+
+    This is called once at the worker start barrier.  Provider hot guards use
+    the in-process copy and therefore never need to reopen the shared active
+    worker set for current DeepSeek /6 campaigns.
+    """
+    try:
+        manifest_path = os.path.join(
+            os.path.abspath(out_dir), "dispatch_manifest.json")
+        with open(manifest_path, encoding="utf-8") as handle:
+            manifest = json.load(handle)
+        config = manifest.get("config") if isinstance(manifest, dict) else None
+        dispatcher_pid = int(os.environ.get("ANCHORPATCH_DISPATCHER_PID", ""))
+        expected = {
+            "schema": WORKER_START_CAPABILITY_SCHEMA,
+            "worker_launch_id": os.environ.get(
+                "ANCHORPATCH_WORKER_LAUNCH_ID"),
+            "worker_pid": os.getpid(),
+            "invocation_id": invocation_id,
+            "sample": sample_id,
+            "task_plan_sha256": task_plan_sha256,
+            "provider_guard_mode": (
+                PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+            "dispatcher_pid": dispatcher_pid,
+            "dispatcher_instance_id": os.environ.get(
+                "ANCHORPATCH_DISPATCHER_INSTANCE_ID"),
+            "run_git_commit": os.environ.get(
+                "ANCHORPATCH_EXPECTED_GIT_COMMIT"),
+            "transport_revision": config.get("transport_revision"),
+            "dispatch_manifest_canonical_sha256": (
+                _canonical_record_sha256(manifest)),
+        }
+        valid_manifest = (
+            isinstance(config, dict)
+            and config.get("campaign_role") == "deepseek_full234"
+            and config.get("num_round_trips") == 10
+            and config.get("transport_revision")
+            == DEEPSEEK_COMPACT_TRANSPORT_REVISION
+            and config.get("run_metadata_storage") == RUN_METADATA_STORAGE_EVENT_V1
+            and config.get("provider_guard_mode")
+            == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1
+        )
+        if (os.environ.get("ANCHORPATCH_PROVIDER_GUARD_MODE")
+                != PROVIDER_GUARD_WORKER_START_CAPABILITY_V1
+                or not valid_manifest
+                or not isinstance(capability, dict)
+                or capability != expected):
+            raise RuntimeError("worker start capability identity mismatch")
+        cached = {
+            "out_dir": os.path.abspath(out_dir),
+            "sample": sample_id,
+            "capability": dict(capability),
+            "sha256": _canonical_record_sha256(capability),
+        }
+        global _WORKER_START_CAPABILITY
+        with _WORKER_START_CAPABILITY_LOCK:
+            if (_WORKER_START_CAPABILITY is not None
+                    and _WORKER_START_CAPABILITY != cached):
+                raise RuntimeError(
+                    "a different worker start capability is already installed")
+            _WORKER_START_CAPABILITY = cached
+        return dict(cached)
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        _reject_worker_runtime_authorization(
+            out_dir, sample_id, f"start capability install failed: {exc}")
+
+
+def clear_worker_start_capability():
+    global _WORKER_START_CAPABILITY
+    with _WORKER_START_CAPABILITY_LOCK:
+        _WORKER_START_CAPABILITY = None
+
+
+def worker_start_capability_provenance():
+    with _WORKER_START_CAPABILITY_LOCK:
+        cached = (
+            dict(_WORKER_START_CAPABILITY)
+            if isinstance(_WORKER_START_CAPABILITY, dict) else None)
+    if cached is None:
+        return {}
+    return {"worker_start_capability_sha256": cached["sha256"]}
+
+
+def _worker_start_capability_installed():
+    with _WORKER_START_CAPABILITY_LOCK:
+        return isinstance(_WORKER_START_CAPABILITY, dict)
+
+
+def enforce_worker_start_capability(out_dir, sample_id):
+    with _WORKER_START_CAPABILITY_LOCK:
+        cached = (
+            dict(_WORKER_START_CAPABILITY)
+            if isinstance(_WORKER_START_CAPABILITY, dict) else None)
+    capability = cached.get("capability") if cached else None
+    try:
+        dispatcher_pid = int(os.environ.get("ANCHORPATCH_DISPATCHER_PID", ""))
+    except (TypeError, ValueError):
+        dispatcher_pid = None
+    valid = (
+        isinstance(capability, dict)
+        and cached.get("out_dir") == os.path.abspath(out_dir)
+        and cached.get("sample") == sample_id
+        and cached.get("sha256") == _canonical_record_sha256(capability)
+        and capability.get("schema") == WORKER_START_CAPABILITY_SCHEMA
+        and capability.get("worker_launch_id")
+        == os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID")
+        and capability.get("worker_pid") == os.getpid()
+        and capability.get("sample") == sample_id
+        and capability.get("dispatcher_pid")
+        == dispatcher_pid
+        and capability.get("dispatcher_instance_id")
+        == os.environ.get("ANCHORPATCH_DISPATCHER_INSTANCE_ID")
+        and capability.get("run_git_commit")
+        == os.environ.get("ANCHORPATCH_EXPECTED_GIT_COMMIT")
+        and os.environ.get("ANCHORPATCH_PROVIDER_GUARD_MODE")
+        == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1
+    )
+    if not valid:
+        _reject_worker_runtime_authorization(
+            out_dir, sample_id, "cached start capability mismatch")
+
+
 def enforce_active_worker_authorization(out_dir, sample_id):
     """Fail closed if this process is not in the dispatcher's active set."""
     worker_id = os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID")
@@ -675,7 +820,20 @@ def _enforce_pre_call_campaign_guards(out_dir, sample_id):
     dispatcher authorization, and final inspection.
     """
     _raise_if_campaign_stopped(out_dir)
-    enforce_active_worker_authorization(out_dir, sample_id)
+    guard_mode = os.environ.get(
+        "ANCHORPATCH_PROVIDER_GUARD_MODE", PROVIDER_GUARD_ACTIVE_SET_V1)
+    capability_installed = _worker_start_capability_installed()
+    if capability_installed and guard_mode != (
+            PROVIDER_GUARD_WORKER_START_CAPABILITY_V1):
+        _reject_worker_runtime_authorization(
+            out_dir, sample_id, "installed capability mode was downgraded")
+    if guard_mode == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1:
+        enforce_worker_start_capability(out_dir, sample_id)
+    elif guard_mode == PROVIDER_GUARD_ACTIVE_SET_V1:
+        enforce_active_worker_authorization(out_dir, sample_id)
+    else:
+        _reject_worker_runtime_authorization(
+            out_dir, sample_id, "unknown provider guard mode")
     # Close the latch-check window as far as a file-based latch permits. Calls
     # already in flight may finish, but no later semantic call proceeds after
     # another worker durably sets the latch.
@@ -2214,7 +2372,7 @@ class ApiCallRecorder:
         context = semantic_context or self._semantic_context(
             call_kind or "primary"
         )
-        return {
+        record = {
             "schema": API_CALL_SCHEMA,
             "created_local": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "sample": self.sample_id,
@@ -2234,6 +2392,8 @@ class ApiCallRecorder:
             "worker_launch_id": self.worker_launch_id,
             "worker_pid": os.getpid(),
         }
+        record.update(worker_start_capability_provenance())
+        return record
 
     def _semantic_root(self, call_kind):
         rt = "rtNA" if self.rt_index is None else f"rt{int(self.rt_index):02d}"
@@ -6284,6 +6444,8 @@ def read_campaign_recovery_authorization(
         worker_ids = record.get("recovered_worker_launch_ids")
         preauthorization_worker_ids = record.get(
             "preauthorization_worker_launch_ids", [])
+        unpublished_capability_ids = record.get(
+            "unpublished_worker_start_capability_ids", [])
         if (not isinstance(dispatcher_pid, int)
                 or isinstance(dispatcher_pid, bool) or dispatcher_pid <= 0
                 or not isinstance(dispatcher_instance_id, str)
@@ -6303,7 +6465,13 @@ def read_campaign_recovery_authorization(
                 != len(set(preauthorization_worker_ids))
                 or any(not isinstance(item, str) or not item
                        for item in preauthorization_worker_ids)
-                or not set(preauthorization_worker_ids) <= set(worker_ids)):
+                or not set(preauthorization_worker_ids) <= set(worker_ids)
+                or not isinstance(unpublished_capability_ids, list)
+                or len(unpublished_capability_ids)
+                != len(set(unpublished_capability_ids))
+                or any(not isinstance(item, str) or not item
+                       for item in unpublished_capability_ids)
+                or not set(unpublished_capability_ids) <= set(worker_ids)):
             raise RuntimeError(
                 "dispatcher parent-loss recovery scope is invalid")
 
@@ -6472,6 +6640,9 @@ def read_campaign_recovery_authorization(
             prior_preauthorization_ids = set(
                 superseded.get(
                     "preauthorization_worker_launch_ids") or [])
+            prior_unpublished_capability_ids = set(
+                superseded.get(
+                    "unpublished_worker_start_capability_ids") or [])
             prior_resume_samples = set(
                 superseded.get("provider_access_resume_samples") or [])
             prior_provider_retries = list(
@@ -6494,6 +6665,7 @@ def read_campaign_recovery_authorization(
             identity_transition_valid = False
             prior_worker_ids = set()
             prior_preauthorization_ids = set()
+            prior_unpublished_capability_ids = set()
             prior_resume_samples = set()
             prior_provider_retries = []
             prior_parent_resume_workers = []
@@ -6808,6 +6980,49 @@ def read_campaign_recovery_authorization(
                     raise RuntimeError(
                         "dispatcher parent-loss dispatch evidence is duplicated")
                 target[worker_id] = row
+        api_path = os.path.join(out_dir, "api_calls.jsonl")
+        api_worker_ids = {
+            row.get("worker_launch_id")
+            for row in (
+                _read_jsonl_records_with_retry(api_path)
+                if os.path.isfile(api_path) else [])
+        }
+        attempt_path = os.path.join(out_dir, "api_attempt_ledger.jsonl")
+        attempt_worker_ids = {
+            row.get("worker_launch_id")
+            for row in (
+                _read_jsonl_records_with_retry(attempt_path)
+                if os.path.isfile(attempt_path) else [])
+        }
+        sidecar_worker_ids = {
+            entry.get("worker_launch_id")
+            for entry in (record.get("incident_transport_sidecars") or [])
+            if isinstance(entry, dict)
+        }
+        provider_evidence_worker_ids = (
+            api_worker_ids | attempt_worker_ids | sidecar_worker_ids)
+        current_unpublished_capability_ids = set()
+        for worker_id, item in current_workers.items():
+            authorization = authorizations.get(worker_id)
+            safe_worker_id = "".join(
+                char if char.isalnum() or char in "._-" else "_"
+                for char in worker_id)
+            start_path = os.path.join(
+                out_dir, "worker_barriers",
+                f"{safe_worker_id}.start.json")
+            if (item["status"] == "interrupted_by_dispatcher"
+                    and isinstance(authorization, dict)
+                    and authorization.get("schema")
+                    == WORKER_START_CAPABILITY_SCHEMA
+                    and not os.path.exists(start_path)
+                    and worker_id not in provider_evidence_worker_ids):
+                current_unpublished_capability_ids.add(worker_id)
+        if set(unpublished_capability_ids) != (
+                prior_unpublished_capability_ids
+                | current_unpublished_capability_ids):
+            raise RuntimeError(
+                "dispatcher parent-loss unpublished worker capability "
+                "scope mismatch")
         expected_launched_ids = set(current_workers) - current_registered_ids
         if set(launches) != expected_launched_ids:
             raise RuntimeError(
@@ -7499,6 +7714,7 @@ def campaign_recovery_incident_evidence(out_dir):
             "worker_launch_ids": frozenset(),
             "deepseek_recovered_workers": {},
             "preauthorization_worker_launch_ids": frozenset(),
+            "unpublished_worker_start_capability_ids": frozenset(),
             "provider_access_retry_authorizations": {},
             "provider_access_resume_samples": frozenset(),
             "dispatcher_parent_loss_workers": {},
@@ -7553,6 +7769,9 @@ def campaign_recovery_incident_evidence(out_dir):
         },
         "preauthorization_worker_launch_ids": frozenset(
             authorization.get("preauthorization_worker_launch_ids", [])),
+        "unpublished_worker_start_capability_ids": frozenset(
+            authorization.get(
+                "unpublished_worker_start_capability_ids", [])),
         "provider_access_retry_authorizations": provider_access_retries,
         "provider_access_resume_samples": frozenset(
             authorization.get("provider_access_resume_samples") or []),

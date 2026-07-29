@@ -46,12 +46,17 @@ from run_meta import (RunLogger, dump_step_docs, append_run_metadata,
                       append_jsonl_locked,
                       enforce_active_worker_authorization,
                       enforce_campaign_runtime_guards,
+                      install_worker_start_capability,
+                      clear_worker_start_capability,
                       read_campaign_stop_conditions,
                       record_campaign_stop_condition,
                       record_emergency_campaign_stop_condition,
                       record_sample_outcome, normalize_snapshot_mode,
                       SNAPSHOT_MODE_ALL, SNAPSHOT_MODE_FAILURES,
-                      SNAPSHOT_MODE_OFF, warn_best_effort_io)
+                      SNAPSHOT_MODE_OFF, warn_best_effort_io,
+                      PROVIDER_GUARD_ACTIVE_SET_V1,
+                      PROVIDER_GUARD_WORKER_START_CAPABILITY_V1,
+                      WORKER_START_CAPABILITY_SCHEMA)
 from hybrid_prompt import (build_hybrid_prompt, build_hybrid_repair_prompt,
                            classify_operation_family, extract_hybrid_json)
 from hybrid_executor import apply_hybrid
@@ -210,23 +215,40 @@ def _dispatch_worker_start_barrier(out_dir, samples, num_round_trips,
     while time.monotonic() < deadline:
         stop_records = read_campaign_stop_conditions(out_dir)
         if stop_records:
-            raise RuntimeError(
-                "campaign stopped before worker authorization: "
-                f"{stop_records[0].get('condition')}"
-            )
+            conditions = sorted({
+                str(row.get("condition")) for row in stop_records
+            })
+            raise CampaignStoppedError(
+                "campaign stop latch is set: " + ", ".join(conditions))
         if os.path.isfile(ack_path):
             with open(ack_path, encoding="utf-8") as handle:
                 ack = json.load(handle)
-            expected = {
-                "schema": "anchorpatch.worker_start/1",
-                "worker_launch_id": worker_id,
-                "worker_pid": os.getpid(),
-                "invocation_id": invocation_id,
-                "sample": sample_id,
-                "task_plan_sha256": entry["sha256"],
-            }
-            if ack != expected:
-                raise RuntimeError("dispatcher worker authorization mismatch")
+            guard_mode = os.environ.get(
+                "ANCHORPATCH_PROVIDER_GUARD_MODE",
+                PROVIDER_GUARD_ACTIVE_SET_V1,
+            )
+            if guard_mode == PROVIDER_GUARD_ACTIVE_SET_V1:
+                expected = {
+                    "schema": "anchorpatch.worker_start/1",
+                    "worker_launch_id": worker_id,
+                    "worker_pid": os.getpid(),
+                    "invocation_id": invocation_id,
+                    "sample": sample_id,
+                    "task_plan_sha256": entry["sha256"],
+                }
+                if ack != expected:
+                    raise RuntimeError(
+                        "dispatcher worker authorization mismatch")
+            elif guard_mode == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1:
+                if (not isinstance(ack, dict)
+                        or ack.get("schema")
+                        != WORKER_START_CAPABILITY_SCHEMA):
+                    raise RuntimeError(
+                        "dispatcher worker capability schema mismatch")
+                install_worker_start_capability(
+                    out_dir, sample_id, invocation_id, entry["sha256"], ack)
+            else:
+                raise RuntimeError("unknown provider guard mode")
             return ready
         time.sleep(0.1)
     raise RuntimeError("timed out waiting for dispatcher worker authorization")
@@ -392,7 +414,32 @@ def _require_formal_dispatch_environment(out_dir, samples, model=None):
             "formal paired campaign requires one leased dispatcher worker; "
             f"missing={missing}"
         )
-    enforce_active_worker_authorization(out_dir, samples[0])
+    with open(manifest_path, encoding="utf-8") as handle:
+        manifest = json.load(handle)
+    config = manifest.get("config") if isinstance(manifest, dict) else None
+    if not isinstance(config, dict):
+        raise RuntimeError("formal paired campaign manifest config is invalid")
+    guard_mode = config.get(
+        "provider_guard_mode", PROVIDER_GUARD_ACTIVE_SET_V1)
+    environment_mode = os.environ.get(
+        "ANCHORPATCH_PROVIDER_GUARD_MODE", PROVIDER_GUARD_ACTIVE_SET_V1)
+    if guard_mode != environment_mode:
+        raise RuntimeError("provider guard mode differs from dispatcher manifest")
+    if guard_mode == PROVIDER_GUARD_ACTIVE_SET_V1:
+        enforce_active_worker_authorization(out_dir, samples[0])
+    elif guard_mode == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1:
+        if (config.get("campaign_role") != "deepseek_full234"
+                or config.get("num_round_trips") != 10
+                or config.get("transport_revision")
+                != "opencode_openai_compatible/6"
+                or config.get("run_metadata_storage") != "event_v1"):
+            raise RuntimeError(
+                "worker start capability is not valid for this campaign")
+        # The capability does not exist yet.  It is installed only after the
+        # dispatcher has durably published worker_authorized and released the
+        # start barrier.
+    else:
+        raise RuntimeError("unknown provider guard mode")
 
 
 def _read_committed_rounds(jsonl_path):
@@ -1670,20 +1717,22 @@ def main():
             read_campaign_stop_conditions(args.out_dir)
             if isinstance(exc, CampaignStoppedError) else []
         )
-        operator_pause_interruption = (
+        dispatcher_interruption = (
             isinstance(exc, CampaignStoppedError)
             and stop_conditions
             and all(
-                row.get("condition")
-                == "operator_directed_dispatcher_pause"
+                row.get("condition") in {
+                    "operator_directed_dispatcher_pause",
+                    "dispatcher_process_lost",
+                }
                 for row in stop_conditions
             )
         )
-        if operator_pause_interruption:
+        if dispatcher_interruption:
             # The dispatcher retains the active-set witness.  Publishing this
             # exact terminal metadata status lets the offline, hash-bound
-            # operator-pause transaction close the worker without converting
-            # a cooperative stop into an unrelated worker_fatal_error.
+            # dispatcher recovery transaction close the worker without
+            # converting a cooperative stop into an unrelated fatal error.
             finish_status = "interrupted_by_dispatcher"
         elif (failure_class == "evaluator_incomplete"
                 and len(args.sample) == 1
@@ -1759,8 +1808,12 @@ def main():
                 pass
         raise
     finally:
-        finish_run_metadata(
-            args.out_dir, run_metadata["invocation_id"], status=finish_status)
+        try:
+            finish_run_metadata(
+                args.out_dir, run_metadata["invocation_id"],
+                status=finish_status)
+        finally:
+            clear_worker_start_capability()
 
 
 def _run_cli_with_worker_lease():

@@ -4,6 +4,56 @@ from .support import *
 
 
 class IntegrationContractGroup04Mixin:
+    @staticmethod
+    def _worker_start_capability_fixture(out_dir, *, sample="sample"):
+        worker_id = "worker-a"
+        invocation_id = "invocation-a"
+        dispatcher_pid = 4242
+        dispatcher_instance_id = "dispatcher-a"
+        commit = "1" * 40
+        plan_sha = "a" * 64
+        manifest = {
+            "schema": paired_dispatch.SCHEMA,
+            "run_git_commit": commit,
+            "config": {
+                "campaign_role": "deepseek_full234",
+                "num_round_trips": 10,
+                "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                "transport_revision": "opencode_openai_compatible/6",
+                "run_metadata_storage": (
+                    run_meta.RUN_METADATA_STORAGE_EVENT_V1),
+                "provider_guard_mode": (
+                    paired_dispatch.PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+            },
+        }
+        manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+        run_meta.write_json_atomic(manifest_path, manifest)
+        capability = {
+            "schema": "anchorpatch.worker_start/2",
+            "worker_launch_id": worker_id,
+            "worker_pid": os.getpid(),
+            "invocation_id": invocation_id,
+            "sample": sample,
+            "task_plan_sha256": plan_sha,
+            "provider_guard_mode": (
+                paired_dispatch.PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+            "dispatcher_pid": dispatcher_pid,
+            "dispatcher_instance_id": dispatcher_instance_id,
+            "run_git_commit": commit,
+            "transport_revision": "opencode_openai_compatible/6",
+            "dispatch_manifest_canonical_sha256": (
+                run_meta._canonical_record_sha256(manifest)),
+        }
+        environment = {
+            "ANCHORPATCH_WORKER_LAUNCH_ID": worker_id,
+            "ANCHORPATCH_DISPATCHER_PID": str(dispatcher_pid),
+            "ANCHORPATCH_DISPATCHER_INSTANCE_ID": dispatcher_instance_id,
+            "ANCHORPATCH_EXPECTED_GIT_COMMIT": commit,
+            "ANCHORPATCH_PROVIDER_GUARD_MODE": (
+                paired_dispatch.PROVIDER_GUARD_WORKER_START_CAPABILITY_V1),
+        }
+        return manifest, capability, environment
+
     def test_campaign_stop_latch_is_first_writer_wins_and_blocks_work(self):
         with tempfile.TemporaryDirectory() as out_dir:
             first = run_meta.record_campaign_stop_condition(
@@ -102,6 +152,143 @@ class IntegrationContractGroup04Mixin:
 
             self.assertEqual(plan_reads, [])
             self.assertEqual(run_meta.read_campaign_stop_conditions(out_dir), [])
+
+    def test_worker_start_capability_hot_guard_avoids_active_set_and_binds_api(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            _manifest, capability, environment = (
+                self._worker_start_capability_fixture(out_dir))
+            run_meta.clear_worker_start_capability()
+            try:
+                with mock.patch.dict(os.environ, environment, clear=True):
+                    installed = run_meta.install_worker_start_capability(
+                        out_dir, "sample", "invocation-a", "a" * 64,
+                        capability,
+                    )
+                    with mock.patch.object(
+                            run_meta, "enforce_active_worker_authorization",
+                            side_effect=AssertionError(
+                                "capability hot guard must not read active set"
+                            )) as active_guard:
+                        run_meta.enforce_campaign_runtime_guards(
+                            out_dir, "sample")
+                    active_guard.assert_not_called()
+
+                    recorder = run_meta.ApiCallRecorder(
+                        out_dir, "fullrewrite", "sample", None,
+                        "deepseek-v4-flash", mock.Mock())
+                    recorder.set_step(1, "forward", "target")
+                    row = recorder._base_record(
+                        "call-a", call_kind="fullrewrite_primary")
+                self.assertEqual(
+                    row["worker_start_capability_sha256"],
+                    installed["sha256"],
+                )
+                self.assertEqual(
+                    row["worker_start_capability_sha256"],
+                    run_meta._canonical_record_sha256(capability),
+                )
+            finally:
+                run_meta.clear_worker_start_capability()
+
+    def test_legacy_runtime_guard_defaults_to_active_worker_set(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            worker_id = "worker-legacy"
+            active_path = os.path.join(out_dir, "active_worker_set.json")
+            run_meta.write_json_atomic(active_path, {
+                "schema": "anchorpatch.active_worker_set/1",
+                "workers": {worker_id: {"sample": "sample"}},
+            })
+            environment = {
+                "ANCHORPATCH_WORKER_LAUNCH_ID": worker_id,
+                "ANCHORPATCH_ACTIVE_WORKER_SET_PATH": active_path,
+            }
+            run_meta.clear_worker_start_capability()
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(
+                        run_meta, "enforce_worker_start_capability",
+                        side_effect=AssertionError(
+                            "legacy guard must not require a capability"
+                        )) as capability_guard:
+                run_meta.enforce_campaign_runtime_guards(out_dir, "sample")
+            capability_guard.assert_not_called()
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir), [])
+
+    def test_worker_start_capability_identity_drift_fails_closed(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            _manifest, capability, environment = (
+                self._worker_start_capability_fixture(out_dir))
+            capability = dict(capability)
+            capability["dispatch_manifest_canonical_sha256"] = "f" * 64
+            run_meta.clear_worker_start_capability()
+            try:
+                with mock.patch.dict(os.environ, environment, clear=True):
+                    with self.assertRaises(run_meta.CampaignStoppedError):
+                        run_meta.install_worker_start_capability(
+                            out_dir, "sample", "invocation-a", "a" * 64,
+                            capability,
+                        )
+                stop = run_meta.read_campaign_stop_conditions(out_dir)[0]
+                self.assertEqual(
+                    stop["condition"], "worker_authorization_drift")
+                self.assertIn(
+                    "start capability install failed",
+                    stop["authorization_reason"],
+                )
+            finally:
+                run_meta.clear_worker_start_capability()
+
+    def test_only_fresh_exact_deepseek_v6_manifest_enables_capability_guard(self):
+        samples = ["sample-a", "sample-b", "sample-c"]
+        labels = ["KEY_1", "KEY_2", "KEY_3"]
+        assignments = paired_dispatch.build_key_assignments(
+            samples, labels, 10,
+            alternate_within_key=True, allow_queue=True)
+        task_plans = {
+            sample: {
+                "path": f"{sample}.task_plan.json",
+                "sha256": "a" * 64,
+                "forward_state_sequence": ["target"],
+            }
+            for sample in samples
+        }
+        args = argparse.Namespace(
+            campaign_role="deepseek_full234",
+            num_round_trips=10,
+            seed=42,
+            slots_per_key=10,
+            smoke_dir=None,
+        )
+        with tempfile.TemporaryDirectory() as out_dir, mock.patch.object(
+                paired_dispatch, "_git_identity",
+                return_value=("1" * 40, "clean")), mock.patch.object(
+                    paired_dispatch, "code_fingerprint",
+                    return_value={"unit": "test"}):
+            fresh = paired_dispatch.build_manifest(
+                out_dir, samples, assignments, task_plans, args)
+            self.assertEqual(
+                fresh["config"]["provider_guard_mode"],
+                paired_dispatch.PROVIDER_GUARD_WORKER_START_CAPABILITY_V1,
+            )
+
+            legacy = copy.deepcopy(fresh)
+            legacy["config"].pop("provider_guard_mode")
+            run_meta.write_json_atomic(
+                os.path.join(out_dir, "dispatch_manifest.json"), legacy)
+            rebuilt = paired_dispatch.build_manifest(
+                out_dir, samples, assignments, task_plans, args)
+            self.assertNotIn("provider_guard_mode", rebuilt["config"])
+            self.assertEqual(
+                paired_dispatch._provider_guard_mode(rebuilt),
+                paired_dispatch.PROVIDER_GUARD_ACTIVE_SET_V1,
+            )
+
+            invalid = copy.deepcopy(fresh)
+            invalid["config"]["transport_revision"] = (
+                "opencode_openai_compatible/5")
+            with self.assertRaisesRegex(
+                    RuntimeError, "provider guard mode is invalid"):
+                paired_dispatch._provider_guard_mode(invalid)
 
     def test_stop_latched_during_transport_preflight_blocks_provider_post(self):
         with tempfile.TemporaryDirectory() as out_dir, mock.patch.dict(
@@ -352,6 +539,32 @@ class IntegrationContractGroup04Mixin:
                     portalocker.unlock(lease)
             self.assertFalse(os.path.exists(ack_path))
 
+    def test_dispatch_v2_capability_uses_runtime_recovery_commit(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            manifest, _capability, _environment = (
+                self._worker_start_capability_fixture(out_dir))
+            process = mock.Mock(pid=101)
+            ack = paired_dispatch._worker_start_ack(
+                manifest, "sample",
+                {
+                    "worker_launch_id": "worker-a",
+                    "process": process,
+                    "dispatcher_pid": 4242,
+                    "dispatcher_instance_id": "dispatcher-a",
+                    "runtime_git_commit": "2" * 40,
+                },
+                {"invocation_id": "invocation-a"},
+                "a" * 64,
+            )
+            self.assertEqual(ack["schema"], "anchorpatch.worker_start/2")
+            self.assertEqual(ack["run_git_commit"], "2" * 40)
+            self.assertNotEqual(
+                ack["run_git_commit"], manifest["run_git_commit"])
+            self.assertEqual(
+                ack["dispatch_manifest_canonical_sha256"],
+                paired_dispatch._canonical_record_sha256(manifest),
+            )
+
     def test_dispatch_cohort_authorization_is_durable_before_any_ack(self):
         with tempfile.TemporaryDirectory() as out_dir:
             task_plans = {}
@@ -508,6 +721,74 @@ class IntegrationContractGroup04Mixin:
             snapshot = run_meta.read_run_metadata_snapshot(out_dir)
             self.assertEqual(
                 snapshot[0]["task_plans"]["sample"]["sha256"], plan_sha)
+
+    def test_capability_mode_is_allowed_before_v2_start_barrier_install(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            _manifest, _capability, environment = (
+                self._worker_start_capability_fixture(out_dir))
+            environment.update({
+                "ANCHORPATCH_WORKER_LOCK_PATH": os.path.join(
+                    out_dir, "worker.lock"),
+                "ANCHORPATCH_WORKER_READY_PATH": os.path.join(
+                    out_dir, "worker.ready.json"),
+                "ANCHORPATCH_WORKER_ACK_PATH": os.path.join(
+                    out_dir, "worker.start.json"),
+                "ANCHORPATCH_ACTIVE_WORKER_SET_PATH": os.path.join(
+                    out_dir, "active_worker_set.json"),
+                "ANCHORPATCH_EXPECTED_GIT_TREE_STATE": "clean",
+                "ANCHORPATCH_EXPECTED_TASK_PLAN_SHA256": "a" * 64,
+                "ANCHORPATCH_EXPECTED_TASK_PLAN_PATH": os.path.join(
+                    out_dir, "sample.task_plan.json"),
+            })
+            run_meta.clear_worker_start_capability()
+            with mock.patch.dict(os.environ, environment, clear=True), \
+                    mock.patch.object(
+                        experiment_runner,
+                        "enforce_active_worker_authorization",
+                        side_effect=AssertionError(
+                            "capability is installed after the start barrier"
+                        )) as active_guard:
+                experiment_runner._require_formal_dispatch_environment(
+                    out_dir, ["sample"], model="deepseek-v4-flash")
+            active_guard.assert_not_called()
+            self.assertEqual(run_meta.worker_start_capability_provenance(), {})
+
+    def test_runner_v2_barrier_installs_exact_worker_start_capability(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            _manifest, capability, environment = (
+                self._worker_start_capability_fixture(out_dir))
+            ready_path, ack_path = paired_dispatch._worker_barrier_paths(
+                out_dir, capability["worker_launch_id"])
+            run_meta.write_json_atomic(ack_path, capability)
+            environment.update({
+                "ANCHORPATCH_WORKER_READY_PATH": ready_path,
+                "ANCHORPATCH_WORKER_ACK_PATH": ack_path,
+                "ANCHORPATCH_START_BARRIER_TIMEOUT": "1",
+            })
+            run_meta.clear_worker_start_capability()
+            try:
+                with mock.patch.dict(os.environ, environment, clear=True), \
+                        mock.patch.object(
+                            experiment_runner, "register_task_plan",
+                            return_value={"sha256": "a" * 64}) as register:
+                    ready = experiment_runner._dispatch_worker_start_barrier(
+                        out_dir, ["sample"], 10, "invocation-a")
+                    run_meta.enforce_campaign_runtime_guards(
+                        out_dir, "sample")
+                register.assert_called_once_with(
+                    out_dir, "sample",
+                    os.path.abspath(os.path.join(
+                        out_dir, "sample.task_plan.json")),
+                    num_round_trips=10,
+                )
+                self.assertEqual(ready["schema"], "anchorpatch.worker_ready/1")
+                self.assertEqual(
+                    run_meta.worker_start_capability_provenance(), {
+                        "worker_start_capability_sha256": (
+                            run_meta._canonical_record_sha256(capability)),
+                    })
+            finally:
+                run_meta.clear_worker_start_capability()
 
     def test_worker_authorization_retries_transient_active_set_read(self):
         with tempfile.TemporaryDirectory() as out_dir:

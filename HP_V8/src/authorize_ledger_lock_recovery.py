@@ -23,6 +23,7 @@ from paired_campaign_dispatch import (
     DEEPSEEK_FULL234_ROUND_TRIPS,
     DEEPSEEK_TRANSPORT,
     DEEPSEEK_TRANSPORT_REVISION,
+    WORKER_START_CAPABILITY_SCHEMA,
     _actual_sample_progress,
     _assert_worker_leases_free,
     _audit_running_invocation_provenance,
@@ -32,6 +33,7 @@ from paired_campaign_dispatch import (
     _verified_evaluator_incomplete,
     _verified_deepseek_infrastructure_incomplete,
     _verified_infrastructure_incomplete,
+    _worker_barrier_paths,
     _write_active_worker_set,
 )
 from run_meta import (
@@ -4115,6 +4117,50 @@ def _authorize_dispatcher_process_lost(
         item["worker_launch_id"]
         for item in recovery_scope["registered_prelaunch_workers"]
     )
+    dispatch_rows = _read_jsonl(os.path.join(out_dir, "dispatch_log.jsonl"))
+    authorization_rows = {}
+    for row in dispatch_rows:
+        if row.get("event") != "worker_authorized":
+            continue
+        worker_id = row.get("worker_launch_id")
+        if worker_id in authorization_rows:
+            raise RuntimeError(
+                "dispatcher parent-loss worker authorization is duplicated")
+        authorization_rows[worker_id] = row
+    api_path = os.path.join(out_dir, "api_calls.jsonl")
+    api_worker_ids = {
+        row.get("worker_launch_id")
+        for row in (_read_jsonl(api_path) if os.path.isfile(api_path) else [])
+    }
+    attempt_path = os.path.join(out_dir, "api_attempt_ledger.jsonl")
+    attempt_worker_ids = {
+        row.get("worker_launch_id")
+        for row in (
+            _read_jsonl(attempt_path)
+            if os.path.isfile(attempt_path) else [])
+    }
+    sidecar_worker_ids = {
+        row.get("worker_launch_id")
+        for row in incidents.get("transport_sidecars", [])
+    }
+    provider_evidence_worker_ids = (
+        api_worker_ids | attempt_worker_ids | sidecar_worker_ids)
+    current_unpublished_capability_ids = set()
+    for item in recovery_scope["interrupted_workers"]:
+        worker_id = item["worker_launch_id"]
+        authorization = authorization_rows.get(worker_id)
+        _ready_path, start_path = _worker_barrier_paths(out_dir, worker_id)
+        if (isinstance(authorization, dict)
+                and authorization.get("schema")
+                == WORKER_START_CAPABILITY_SCHEMA
+                and not os.path.exists(start_path)
+                and worker_id not in provider_evidence_worker_ids):
+            current_unpublished_capability_ids.add(worker_id)
+    unpublished_capability_ids = sorted(set(
+        list((prior_authorization or {}).get(
+            "unpublished_worker_start_capability_ids") or [])
+        + list(current_unpublished_capability_ids)
+    ))
     api_incidents = _merge_incident_entries(
         (prior_authorization or {}).get("incident_api_rows"),
         incidents["api"],
@@ -4282,6 +4328,8 @@ def _authorize_dispatcher_process_lost(
         "recovered_worker_launch_ids": recovered_worker_ids,
         "preauthorization_worker_launch_ids": list(
             preauthorization_worker_ids),
+        "unpublished_worker_start_capability_ids": (
+            unpublished_capability_ids),
         "incident_api_rows": api_incidents,
         "incident_attempt_rows": attempt_incidents,
         "incident_transport_sidecars": transport_sidecar_incidents,

@@ -102,6 +102,17 @@ AUDITED_OPERATOR_PAUSE_RUNTIME = {
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
+PROVIDER_GUARD_ACTIVE_SET_V1 = "active_worker_set_v1"
+PROVIDER_GUARD_WORKER_START_CAPABILITY_V1 = (
+    "worker_start_capability_v1"
+)
+WORKER_START_CAPABILITY_SCHEMA = "anchorpatch.worker_start/2"
+_WORKER_START_CAPABILITY_FIELDS = (
+    "schema", "worker_launch_id", "worker_pid", "invocation_id", "sample",
+    "task_plan_sha256", "provider_guard_mode", "dispatcher_pid",
+    "dispatcher_instance_id", "run_git_commit", "transport_revision",
+    "dispatch_manifest_canonical_sha256",
+)
 TRANSPORT_RESUME_POLICY = "exact_payload_new_semantic_call/1"
 SAMPLES_ROOT = os.path.join(_ROOT, "data", "samples_delegate52")
 SMOKE_SAMPLES = ["treebank4", "obj3d2"]
@@ -4272,8 +4283,48 @@ def _assert_worker_leases_free(out_dir, samples):
         )
 
 
+def _worker_start_ack(manifest, sample, item, ready, task_plan_sha256):
+    mode = (
+        _provider_guard_mode(manifest)
+        if isinstance(manifest, dict) else PROVIDER_GUARD_ACTIVE_SET_V1)
+    base = {
+        "worker_launch_id": item["worker_launch_id"],
+        "worker_pid": item["process"].pid,
+        "invocation_id": ready["invocation_id"],
+        "sample": sample,
+        "task_plan_sha256": task_plan_sha256,
+    }
+    if mode == PROVIDER_GUARD_ACTIVE_SET_V1:
+        return {"schema": "anchorpatch.worker_start/1", **base}
+    runtime_git_commit = item.get("runtime_git_commit")
+    if not isinstance(runtime_git_commit, str) or not runtime_git_commit:
+        raise RuntimeError("worker capability runtime Git identity is missing")
+    return {
+        "schema": WORKER_START_CAPABILITY_SCHEMA,
+        **base,
+        "provider_guard_mode": mode,
+        "dispatcher_pid": item.get("dispatcher_pid"),
+        "dispatcher_instance_id": item.get("dispatcher_instance_id"),
+        "run_git_commit": runtime_git_commit,
+        "transport_revision": (manifest.get("config") or {}).get(
+            "transport_revision"),
+        "dispatch_manifest_canonical_sha256": (
+            _canonical_record_sha256(manifest)),
+    }
+
+
+def _write_or_verify_worker_start_ack(path, ack):
+    if os.path.isfile(path):
+        if _read_json(path) != ack:
+            raise RuntimeError("existing worker start capability differs")
+        return
+    write_json_atomic(path, ack)
+    if _read_json(path) != ack:
+        raise RuntimeError("worker start capability publication mismatch")
+
+
 def _authorize_workers(out_dir, running, task_plans, dispatch_log,
-                       timeout_seconds, *, pause_check=None):
+                       timeout_seconds, *, pause_check=None, manifest=None):
     """Release workers only after lease/PID/metadata/plan identity closes."""
     deadline = time.monotonic() + timeout_seconds
     ready_by_sample = {}
@@ -4386,15 +4437,9 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
         pause_check("before_worker_authorization_records")
     for sample, item in running.items():
         ready = ready_by_sample[sample]
-        ack = {
-            "schema": "anchorpatch.worker_start/1",
-            "worker_launch_id": item["worker_launch_id"],
-            "worker_pid": item["process"].pid,
-            "invocation_id": ready["invocation_id"],
-            "sample": sample,
-            "task_plan_sha256": task_plans[sample]["sha256"],
-        }
-        authorization_records.append({
+        ack = _worker_start_ack(
+            manifest, sample, item, ready, task_plans[sample]["sha256"])
+        authorization_record = {
             "event": "worker_authorized",
             "created_at": datetime.now().astimezone().isoformat(
                 timespec="seconds"),
@@ -4406,7 +4451,11 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
             "dispatcher_instance_id": item.get(
                 "dispatcher_instance_id"),
             **ack,
-        })
+        }
+        if ack["schema"] == WORKER_START_CAPABILITY_SCHEMA:
+            authorization_record["worker_start_capability_sha256"] = (
+                _canonical_record_sha256(ack))
+        authorization_records.append(authorization_record)
         acknowledgements[sample] = ack
 
     append_jsonl_records_locked(dispatch_log, authorization_records)
@@ -4437,7 +4486,7 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
         pause_check("before_worker_ack_write")
     for sample, item in running.items():
         ack = acknowledgements[sample]
-        write_json_atomic(item["ack_path"], ack)
+        _write_or_verify_worker_start_ack(item["ack_path"], ack)
 
 
 def _audit_running_invocation_provenance(out_dir):
@@ -4530,6 +4579,28 @@ def prepare_task_plans(out_dir, samples, num_round_trips, seed):
     return manifest
 
 
+def _provider_guard_mode(manifest):
+    config = manifest.get("config") if isinstance(manifest, dict) else None
+    if not isinstance(config, dict):
+        # Frozen callers and narrow launch tests predate the config field and
+        # retain the active-set guard.  Formal manifests are independently
+        # schema-checked before this helper is reached.
+        return PROVIDER_GUARD_ACTIVE_SET_V1
+    mode = config.get("provider_guard_mode", PROVIDER_GUARD_ACTIVE_SET_V1)
+    if mode == PROVIDER_GUARD_ACTIVE_SET_V1:
+        return mode
+    if (mode == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1
+            and config.get("campaign_role") == "deepseek_full234"
+            and config.get("num_round_trips") == DEEPSEEK_FULL234_ROUND_TRIPS
+            and config.get("transport") == DEEPSEEK_TRANSPORT
+            and config.get("transport_revision")
+            == DEEPSEEK_TRANSPORT_REVISION
+            and config.get("run_metadata_storage")
+            == RUN_METADATA_STORAGE_EVENT_V1):
+        return mode
+    raise RuntimeError("provider guard mode is invalid for this campaign")
+
+
 def build_manifest(out_dir, samples, assignments, task_plans, args,
                    upstream_smoke_gate=None):
     commit, tree_state = _git_identity()
@@ -4560,6 +4631,25 @@ def build_manifest(out_dir, samples, assignments, task_plans, args,
             "openai_base_url", "opencode_transport", "minimax_transport"):
         if optional in runtime:
             config[optional] = runtime[optional]
+    prior_manifest_path = os.path.join(out_dir, "dispatch_manifest.json")
+    if os.path.isfile(prior_manifest_path):
+        prior_manifest = _read_json(prior_manifest_path)
+        prior_config = (
+            prior_manifest.get("config")
+            if isinstance(prior_manifest, dict) else None)
+        if (isinstance(prior_config, dict)
+                and "provider_guard_mode" in prior_config):
+            config["provider_guard_mode"] = prior_config[
+                "provider_guard_mode"]
+    elif (config.get("campaign_role") == "deepseek_full234"
+          and config.get("num_round_trips")
+          == DEEPSEEK_FULL234_ROUND_TRIPS
+          and config.get("transport") == DEEPSEEK_TRANSPORT
+          and config.get("transport_revision")
+          == DEEPSEEK_TRANSPORT_REVISION):
+        config["provider_guard_mode"] = (
+            PROVIDER_GUARD_WORKER_START_CAPABILITY_V1)
+    _provider_guard_mode({"config": config})
     manifest = {
         "schema": SCHEMA,
         "experiment_id": os.path.basename(os.path.abspath(out_dir)),
@@ -5364,6 +5454,11 @@ def _inspect_deepseek_campaign(
     errors = []
     preservation = 0
     preservation_not_applicable = 0
+    try:
+        provider_guard_mode = _provider_guard_mode(manifest)
+    except RuntimeError as exc:
+        provider_guard_mode = PROVIDER_GUARD_ACTIVE_SET_V1
+        errors.append(str(exc))
     if (not sample_scope or not sample_scope <= expected_samples):
         errors.append("DeepSeek audit sample scope is invalid")
     if not completion_samples <= sample_scope:
@@ -5466,6 +5561,8 @@ def _inspect_deepseek_campaign(
     recovered_preauthorization_worker_ids = recovery_incidents[
         "preauthorization_worker_launch_ids"
     ]
+    unpublished_worker_start_capability_ids = recovery_incidents.get(
+        "unpublished_worker_start_capability_ids", frozenset())
     expected_commit = (
         recovery_authorization.get("recovery_git_commit")
         if recovery_authorization else manifest.get("run_git_commit")
@@ -5521,6 +5618,65 @@ def _inspect_deepseek_campaign(
             if worker_id in scoped_worker_ids
         }
 
+    capability_sha_by_worker = {}
+    capabilities_by_worker = {}
+    if provider_guard_mode == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1:
+        manifest_digest = _canonical_record_sha256(manifest)
+        for worker_id, authorization in authorizations.items():
+            capability = {
+                key: authorization.get(key)
+                for key in _WORKER_START_CAPABILITY_FIELDS
+            }
+            capability_digest = _canonical_record_sha256(capability)
+            launch = launches.get(worker_id)
+            sample = authorization.get("sample")
+            plan = (manifest.get("task_plans") or {}).get(sample) or {}
+            _ready_path, start_path = _worker_barrier_paths(
+                out_dir, worker_id)
+            try:
+                published_capability = _read_json(start_path)
+            except (OSError, ValueError, RuntimeError):
+                published_capability = None
+            recovered_unpublished_capability = (
+                worker_id in unpublished_worker_start_capability_ids)
+            capability_was_recovered_before_publication = (
+                recovered_unpublished_capability
+                and not os.path.exists(start_path))
+            if (not isinstance(launch, dict)
+                    or capability.get("schema")
+                    != WORKER_START_CAPABILITY_SCHEMA
+                    or capability.get("worker_launch_id") != worker_id
+                    or capability.get("worker_pid") != launch.get("pid")
+                    or capability.get("sample") != launch.get("sample")
+                    or not isinstance(capability.get("invocation_id"), str)
+                    or not capability.get("invocation_id")
+                    or capability.get("task_plan_sha256")
+                    != plan.get("sha256")
+                    or capability.get("provider_guard_mode")
+                    != provider_guard_mode
+                    or capability.get("dispatcher_pid")
+                    != launch.get("dispatcher_pid")
+                    or capability.get("dispatcher_instance_id")
+                    != launch.get("dispatcher_instance_id")
+                    or capability.get("transport_revision")
+                    != expected_transport_revision
+                    or capability.get("dispatch_manifest_canonical_sha256")
+                    != manifest_digest
+                    or authorization.get("worker_start_capability_sha256")
+                    != capability_digest
+                    or (
+                        recovered_unpublished_capability
+                        and not capability_was_recovered_before_publication)
+                    or (
+                        not capability_was_recovered_before_publication
+                        and published_capability != capability
+                    )):
+                errors.append(
+                    f"worker start capability mismatch: {worker_id}")
+                continue
+            capability_sha_by_worker[worker_id] = capability_digest
+            capabilities_by_worker[worker_id] = capability
+
     metadata = read_run_metadata_snapshot(out_dir)
     audited_metadata = []
     metadata_by_worker = {}
@@ -5575,6 +5731,18 @@ def _inspect_deepseek_campaign(
                 errors.append(
                     "run_metadata key failover provenance mismatch: "
                     f"{(record_samples or ['unknown'])[0]}")
+
+    if provider_guard_mode == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1:
+        for worker_id, capability in capabilities_by_worker.items():
+            worker_metadata = metadata_by_worker.get(worker_id) or []
+            if (len(worker_metadata) != 1
+                    or worker_metadata[0].get("invocation_id")
+                    != capability.get("invocation_id")
+                    or worker_metadata[0].get("run_git_commit")
+                    != capability.get("run_git_commit")):
+                errors.append(
+                    "worker capability/metadata identity mismatch: "
+                    f"{worker_id}")
 
     # Terminal publication order is API -> sample outcome -> run metadata.
     # Read the three append-only ledgers in reverse order so a live inspection
@@ -5800,6 +5968,17 @@ def _inspect_deepseek_campaign(
                 or worker_metadata[0].get("worker_pid") != worker_pid
                 or worker_metadata[0].get("samples") != [sample]):
             errors.append(f"API worker provenance mismatch at row {index}")
+        if (provider_guard_mode
+                == PROVIDER_GUARD_WORKER_START_CAPABILITY_V1
+                and row.get("worker_start_capability_sha256")
+                != capability_sha_by_worker.get(worker_id)):
+            errors.append(f"API worker capability mismatch at row {index}")
+
+    for worker_id in unpublished_worker_start_capability_ids:
+        if api_rows_by_worker.get(worker_id):
+            errors.append(
+                "unpublished worker capability has API evidence: "
+                f"{worker_id}")
 
     for sample in config.get("samples") or []:
         if sample not in sample_scope:
@@ -7621,6 +7800,7 @@ def _launch_worker_batch(
         else inspection_manifest["run_git_commit"]
     )
     runtime = _campaign_runtime_config(args)
+    provider_guard_mode = _provider_guard_mode(inspection_manifest)
     snapshot_mode = normalize_snapshot_mode(
         _snapshot_mode_arg(args), default=SNAPSHOT_MODE_FAILURES)
     launch_specs = {}
@@ -7635,6 +7815,8 @@ def _launch_worker_batch(
             "ack_path": ack_path,
             "dispatcher_pid": os.getpid(),
             "dispatcher_instance_id": args._dispatcher_instance_id,
+            "runtime_git_commit": runtime_git_commit,
+            "provider_guard_mode": provider_guard_mode,
         }
     _publish_active_worker_set(
         out_dir, inspection_manifest,
@@ -7679,6 +7861,7 @@ def _launch_worker_batch(
             "ANCHORPATCH_WORKER_ACK_PATH": os.path.abspath(ack_path),
             "ANCHORPATCH_ACTIVE_WORKER_SET_PATH": os.path.abspath(
                 _active_worker_set_path(out_dir)),
+            "ANCHORPATCH_PROVIDER_GUARD_MODE": provider_guard_mode,
             "ANCHORPATCH_START_BARRIER_TIMEOUT": str(args.start_timeout),
             "ANCHORPATCH_WORKER_CONSOLE_LOG": item["console_log"],
             "ANCHORPATCH_EXPECTED_GIT_COMMIT": runtime_git_commit,
@@ -7790,6 +7973,8 @@ def _launch_worker_batch(
             "ack_path": ack_path,
             "dispatcher_pid": os.getpid(),
             "dispatcher_instance_id": args._dispatcher_instance_id,
+            "runtime_git_commit": runtime_git_commit,
+            "provider_guard_mode": provider_guard_mode,
             "exit_recorded": False,
         }
         process = None
@@ -7832,6 +8017,7 @@ def _launch_worker_batch(
             args.start_timeout,
             pause_check=lambda boundary:
                 _raise_if_operator_pause_requested(args, boundary),
+            manifest=inspection_manifest,
         )
         _raise_if_operator_pause_requested(args, "after_worker_authorization")
     return list(batch_running)

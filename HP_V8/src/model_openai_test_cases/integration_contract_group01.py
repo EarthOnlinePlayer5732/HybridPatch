@@ -508,6 +508,57 @@ class IntegrationContractGroup01Mixin:
         finish.assert_called_once_with(
             out_dir, "invocation", status="evaluator_incomplete")
 
+    def test_runner_barrier_stop_records_dispatcher_interruption_metadata(self):
+        for condition in (
+                "operator_directed_dispatcher_pause",
+                "dispatcher_process_lost"):
+            with self.subTest(condition=condition), \
+                    tempfile.TemporaryDirectory() as out_dir:
+                ready_path = os.path.join(out_dir, "worker.ready.json")
+                ack_path = os.path.join(out_dir, "worker.start.json")
+                run_meta.record_campaign_stop_condition(
+                    out_dir, condition, dispatcher_pid=4242,
+                    dispatcher_instance_id="dispatcher-a")
+                environment = {
+                    "ANCHORPATCH_WORKER_LAUNCH_ID": "worker-a",
+                    "ANCHORPATCH_WORKER_READY_PATH": ready_path,
+                    "ANCHORPATCH_WORKER_ACK_PATH": ack_path,
+                    "ANCHORPATCH_START_BARRIER_TIMEOUT": "1",
+                }
+                with mock.patch.dict(os.environ, environment, clear=False), \
+                        mock.patch.object(
+                            sys, "argv", [
+                                "experiment_runner.py", "--sample", "sample",
+                                "--methods", "hybridpatch", "fullrewrite",
+                                "--num_round_trips", "1", "--out_dir", out_dir,
+                                "--model", "offline-test-model",
+                            ]), \
+                        mock.patch.object(
+                            experiment_runner,
+                            "_require_formal_opencode_transport"), \
+                        mock.patch.object(
+                            experiment_runner,
+                            "_require_formal_dispatch_environment"), \
+                        mock.patch.object(
+                            experiment_runner, "append_run_metadata",
+                            return_value={"invocation_id": "invocation"}), \
+                        mock.patch.object(
+                            experiment_runner, "register_task_plan",
+                            return_value={"sha256": "a" * 64}), \
+                        mock.patch.object(
+                            experiment_runner, "run_relay") as relay, \
+                        mock.patch.object(
+                            experiment_runner, "finish_run_metadata") as finish:
+                    with self.assertRaises(run_meta.CampaignStoppedError):
+                        experiment_runner.main()
+
+                relay.assert_not_called()
+                finish.assert_called_once_with(
+                    out_dir, "invocation",
+                    status="interrupted_by_dispatcher")
+                self.assertTrue(os.path.isfile(ready_path))
+                self.assertFalse(os.path.exists(ack_path))
+
     def test_launch_poll_isolates_exhausted_worker_and_keeps_sibling_running(self):
         class FakeProcess:
             def __init__(self, pid, poll_sequence):
