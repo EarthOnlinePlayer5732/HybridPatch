@@ -1124,3 +1124,48 @@ completed receipt→registry、registry→pending clear、pending clear→projec
 分片、单 writer 或 SQLite WAL，并同步升级唯一键、合并顺序、recovery reader、inspector、
 postprocess 与旧 archive 兼容，属于单独的 evidence-format migration，不能与当前 failover/
 registry 修复混在一个未经端到端验证的补丁中。
+
+## 2026-07-29 审计后运行控制面收口
+
+本轮首先澄清 Key 全耗尽语义：没有健康 Key 时 campaign 只能停止补位并保留未完成状态，
+不能凭空继续调用 provider；补充或替换可用 Key 后，resume 才会把精确的
+`never_started`、`interrupted` 与 `infrastructure_incomplete` pending provenance 重新排队。
+已提交的 round-trip 前缀仍按 checkpoint 跳过，未完成 sample 可迁移到任一健康 Key，恢复
+不再错误要求回到原 Key，也不会把“未启动”和“已尝试但基础设施失败”混成同一来源。
+
+`SIGINT`、`SIGTERM` 与显式 operator pause 现在和完整性故障分开：首个 pause 信号写入唯一、
+manifest/active witness 绑定且 durable 的 `operator_pause` stop，停止新 launch，再回收在途
+worker；被 dispatcher stop barrier 中断的 worker 记录为 `interrupted_by_dispatcher`。普通
+resume 必须先消费精确的 recovery authorization，未知异常、teardown/lease 失败和 evidence
+不一致仍 fail closed，不再把用户暂停伪装成 `dispatcher_integrity_failure`。
+
+fresh exact DeepSeek `deepseek_full234`、RT10、transport `/6`、event metadata campaign 改用
+`worker_start_capability_v1`。dispatcher 在 cohort authorization 全部 `fsync` 后才发布 ACK；
+worker 将 PID、invocation、sample、task-plan、dispatcher identity、runtime commit、transport 和
+manifest SHA 固定在本地 capability，provider 热路径只检查 stop latch 与该 capability，不再
+每次读取共享 `active_worker_set.json`。API terminal row 绑定 capability SHA；混合原始/恢复
+commit 由唯一 worker metadata 验证。旧 manifest 和非精确 campaign 保持既有
+`active_worker_set_v1`，不做无证据 schema 升级。
+
+worker 退出审计也由“每次退出扫描整个 campaign”改为 append-only delta：仅检查本轮退出
+worker 新增的 dispatch、metadata、API、attempt、outcome、result/checkpoint 与 transport
+证据；每累计 20 个 terminal worker 再做一次完整审计，阶段末和最终仍完整审计。该优化只在
+同一 manifest 已通过 full preflight 后启用，legacy/direct caller 继续走保守全审计。
+
+metadata event mode 进一步拒绝 recovery registry 整个目录消失的状态：只要 event ledger 或
+pending 已存在，缺失 `_registry.json` 就不能自动重建为空集合，也不能退回 legacy reader。
+这覆盖进程崩溃恢复边界；仍不宣称覆盖未执行目录 durability flush 的突然断电语义。
+
+回归选择器不再按测试方法名中的 `crash`、`pending`、`resume` 等字符串猜测 tier，而由
+`regression_tier_manifest.py` 精确列出 108 个 recovery contract；selector 会拒绝未知 class、
+重复条目和已删除/重命名方法。一次性 source/AST digest 冻结测试已删除，facade identity、
+字节写入与 incident 顺序的行为契约保留。当前 manifest 对新增但漏标的测试仍默认归入
+component，这是已知 P2 维护风险；后续按语义拆分 numbered group 时再升级为全显式分类，
+本轮不额外复制 150 项 component 清单。
+
+共享 JSONL 单锁逐行 `flush+fsync`、metadata event 每次 full fold，以及 per-worker shard/
+SQLite WAL 迁移仍是独立的 evidence schema 工作。它们需要新的 out_dir、确定性主键/合并顺序、
+reader/inspector/postprocess 升级和 fresh full234 验证，未混入本轮兼容补丁。本轮没有调用
+provider API、没有启动正式实验、没有修改历史实验或冻结结果。最终零 API 回归为
+`310/310`，分层为 `52 fast + 150 component + 108 recovery`；recovery facade 行为测试
+`3/3`、tier selector 自测 `4/4`，相关生产模块 `py_compile` 全部通过。
