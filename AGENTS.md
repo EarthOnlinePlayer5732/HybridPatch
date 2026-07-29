@@ -66,6 +66,15 @@
 
 ## 实验运行安全
 
+- HP_V9 的**新实验**唯一入口是 `HP_V9/src/run_campaign.py`，语义见
+  `HP_V9/SIMPLE_RUNTIME.md`。`paired_campaign_dispatch.py`、
+  `campaign_recovery_runtime.py` 与 `authorize_ledger_lock_recovery.py` 仅用于读取历史实验；
+  不得包装或导入到新 active runtime。新路径只保证 sample-local relay/checkpoint，普通
+  API、evaluator、preservation 和 worker 异常只隔离该 sample，campaign 结束后再统一验证。
+- `tools/preflight_experiment.py` 仍服务 legacy dispatcher。HP_V9 simplified campaign 的回归、
+  evaluator smoke、计划审阅和 Key probe（若实验计划要求）必须作为启动命令之外的独立门禁；
+  `run_campaign.py` 启动本身不得运行回归、历史 archive 扫描或旧 dispatcher dry-run。
+
 - 新 API 实验开跑前，优先用 `tools/preflight_experiment.py` 一次生成零 API preflight receipt：复用未变代码的回归结果，并对正式 manifest 中的样本并行运行 runtime evaluator。dispatcher dry-run 仍每次执行，以核对本次 task plan、out_dir 和命令身份；该工具不执行 Key probe，也不启动正式 worker。
 - 零 API 缓存只复用输入指纹完全一致且成功的结果。代码、Python runtime 或样本内容变化时只重跑失效部分，失败结果不得缓存为通过。Key 小探针仍是独立的真实 provider 请求，成功 receipt 不能替代 Key probe。全部通过后再做最终命令复核并开跑。
 - 方法实验输出放所属 `HP_Vx/exp_*`；传输诊断放顶层 `transport/exp_*`；baseline 放顶层 `Baseline/exp_*`。从 HP 根引用后两者时使用 `../transport/...` / `../Baseline/...`。
@@ -74,11 +83,11 @@
 - runner 因本地异常退出时，先判断异常发生在 API 调用前还是调用后；必须检查 `api_calls.jsonl` / `api_raw`，不能仅凭缺少 checkpoint 推断“没有花费”。
 - 本地确定性错误（缺模块、路径错误、评估器异常）不得通过换 Key 连续重试。修复根因前不要重新启动同一样本。
 - 断点续跑只补未提交 RT，不删除、覆盖或重掷已提交行。不得同时运行两个指向同一 `out_dir` 的调度器。
-- 大规模 paired campaign 使用 dispatcher 的 per-Key work-conserving 队列：每个 Key 的
+- Legacy 大规模 paired campaign 使用 dispatcher 的 per-Key work-conserving 队列：每个 Key 的
   worker 数不得超过 `--slots_per_key`，但任一槽位释放后应立即从同一 Key 的 FIFO 队列
   补位，不等待其他 Key 或同一批 worker 全部结束。manifest 必须记录 dispatch policy、
   每 Key 队列和最大并发。
-- `domain.evaluate_context()` 抛出的样本级异常只有在 runner 已写入
+- Legacy dispatcher 中，`domain.evaluate_context()` 抛出的样本级异常只有在 runner 已写入
   `evaluator_incomplete` outcome、run metadata、正式 sidecar，且能证明失败步骤未提交、未补
   0 时才允许隔离该样本并继续队列。该状态在本 campaign 中是终态，resume 不重发；普通
   本地代码异常、evaluator 证据不完整、preservation 或共享完整性错误仍全局停止。

@@ -1,6 +1,30 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-30 - HP_V9 simplified sample-local runtime refactor
+
+- decision：新实验唯一入口改为 `HP_V9/src/run_campaign.py`；旧 paired dispatcher 与
+  recovery/authorization 只保留历史证据兼容，新路径不得导入。运行时保证 sample 内 relay、
+  per-call success journal 与 result/checkpoint；跨 sample 完整性移到结束后 verifier。
+- scientific boundary：从 legacy runner 抽取唯一 `relay_core.py`，旧 runner wrapper 和新
+  `run_sample.py` 共用。prompt、protocol `hybridpatch/8`、executor、gate、evaluator、row、
+  model parameters 与 transport `/6` 未复制或另行实现。
+- runtime I/O：只有 campaign/sample 两种 OS lock；dispatcher 单写 `dispatch.jsonl`，worker
+  单写自己的 `samples/<sample>`，verifier 单写 reports。无 active set、stop latch、metadata
+  WAL、共享 API ledger、在线 inspector 或 recovery transaction。
+- resume/failure：同命令验证 `run.json` 后继续未提交 RT；success journal replay，完整 pair
+  可推进落后 checkpoint。API/evaluator/preservation/未知异常均 sample-local；明确不可用 Key
+  在内存 quarantine，全 Key 失效有序返回 incomplete。
+- safety：本轮只执行零 API 单元、组件和并发语义测试；未读取或输出 Key 值，未启动 provider
+  POST，未恢复、删除或修改任何历史 `exp_*` 证据。架构与唯一命令见
+  `HP_V9/SIMPLE_RUNTIME.md`。
+- validation：simplified runtime `26/26`（含 30 个真实子进程的 disjoint sample writes）、
+  legacy transport/component/recovery `326/326`、shared-core behavioral identity `2/2`、
+  HybridPatch executor `72/72`、infrastructure stress `5/5`、snapshot/summary/analyze/
+  legacy recovery/tier selector `22/22`、splitters byte-exact PASS；`HP_V9/src` 与 `tools`
+  全量 `py_compile`、workflow YAML、active-runtime forbidden-component/line-limit 扫描与
+  `git diff --check` PASS。6 个 active runtime 文件共 2,427 行，单文件均不超过 800 行。
+
 ## 2026-07-30 - Before Fresh Retry: HP_V9 DeepSeek exact234 RT10 r3
 
 - experiment：`HP_V9/exp_20260730_dsv4f_234r10_v9_r3`；计划见

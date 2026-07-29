@@ -1,11 +1,12 @@
 # HP_V9 基础设施版本卡（方法协议仍为 hybridpatch/8）
 
-状态：**frozen zero-API readiness candidate**。来源为冻结提交
+状态：**active simplified-runtime zero-API candidate；scientific core frozen**。来源为冻结提交
 `7b8fe009a892039db4718ef0cfbb03d35d97d10c` 的 `HP_V8` tracked snapshot；
 `HP_V8` 从此保持只读。V9 不改变 HybridPatch/FullRewrite prompt、protocol、executor、
 evaluator、seeded task plan、RT10 或计分口径，只修改 fresh full234 的调度、证据 I/O、
-审计、暂停恢复、性能观测、零 API 压测与快速只读汇总。下面保留继承的 V8 方法版本卡，
-新增 V9 基础设施变更统一追加在文末。
+审计、暂停恢复、性能观测、零 API 压测与快速只读汇总。2026-07-30 起，新实验入口改为
+sample-local `run_campaign.py`；此前 paired/forensic 路线只读兼容历史证据。下面保留继承的
+V8 方法版本卡，新增 V9 基础设施变更统一追加在文末。
 
 ## 五问摘要
 
@@ -1269,3 +1270,28 @@ recovery`），30-worker control-plane stress `5/5`，V9 scientific-core identit
 HybridPatch executor `72/72`，splitters byte-exact PASS，postprocess `14` 项 PASS（Windows
 symlink 权限相关 `1` 项 skip），tier selector `4/4`，`HP_V9/src` 与 `tools` 共 145 个 Python
 文件 `py_compile` PASS，`git diff --check` PASS。验证未调用 provider。
+
+## 2026-07-30 简化正式实验运行路径
+
+HP_V9 新增 `src/run_campaign.py` 作为新实验唯一入口。旧 forensic dispatcher/recovery
+保留为历史证据只读工具，但新路径不导入它们。运行时一致性边界改为“sample 内强一致、
+sample 间故障隔离、campaign 结束后统一验证”。
+
+- `relay_core.py` 是唯一科学 relay 实现；legacy `experiment_runner.py` 与新
+  `run_sample.py` 均调用它。旧 runner 中重复的 edit/evaluate/row/RT loop 已删除。
+- `run_campaign.py` 只维护 pending/running/finished、健康 Key 与 slot；同一命令自动区分
+  fresh/resume，科学配置或 commit 不同会在 API 前拒绝。
+- `simple_api_recorder.py` 以 sample/method/RT/direction/call-kind 固定路径发布原子
+  `success.json`；完整 success 可 replay，无 success 的进程死亡允许重试。HTTP retry 完全
+  复用 `model_openai.py` transport `/6`，没有第二套 retry。
+- `simple_runtime_io.py` 只保留 campaign lock 与 sample lock。result/checkpoint/calls 都是
+  单 worker 写；dispatcher 唯一写 `dispatch.jsonl`；运行中无共享 API/attempt/outcome/
+  metadata ledger。
+- evaluator、preservation、未知 worker 和 retry exhaustion 都是 sample-local；明确不可用
+  Key 只在当前 dispatcher 内存中 quarantine。全部 Key 失效时有序输出 `incomplete`。
+- `verify_campaign.py` 自动生成 quick summary；`--full` 离线重放 linkage、checkpoint、
+  evaluator、preservation 和 paired endpoint，不调用 API、不修补 evidence。
+
+完整架构、唯一命令、resume、文件所有权、失败分类、禁止组件和设计理由见
+[`SIMPLE_RUNTIME.md`](./SIMPLE_RUNTIME.md)。本次重构只执行零 API 测试；未调用 Key probe、
+provider 或付费实验，未恢复或修改任何历史 `exp_*` 目录。

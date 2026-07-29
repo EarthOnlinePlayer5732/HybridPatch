@@ -146,6 +146,10 @@ python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch ful
 - 另有 MiniMax **官方非流式**传输 `minimax_official_nonstream/1`（`MINIMAX_TRANSPORT=official_nonstream` + `MINIMAX_API_KEY`，详见 `transport/docs/API_TRANSPORT_MINIMAX_OFFICIAL_V1.md`）：baseline 对齐语义（盲重试、完整 200 照单接受含 `finish=abort`）、5h 限额自动等待；与 OpenCode 路线按 revision 门禁互斥，禁止混目录；`MINIMAX_TRANSPORT` 不得写入 `.env`。
 - API 密钥只在顶层 `.env` / `.env.frkeys`。HP 内 `model_openai.py` 不会上溯发现它；用父进程环境或 `python -m dotenv -f ../.env run -- ...` 注入。多 Key 工具显式传 `--keys_file ../.env.frkeys`。
 - `experiment_runner.py` 单进程、每次一个/多个样本；并行靠多开进程（每样本独立 checkpoint 幂等续跑）。
+- HP_V9 新实验改用唯一入口 `src/run_campaign.py`：同一命令自动 fresh/resume，dispatcher
+  只写 `dispatch.jsonl`，worker 只写自己的 sample 目录，完整 API journal replay 与最终验证
+  见 `HP_V9/SIMPLE_RUNTIME.md`。旧 `experiment_runner.py` 仅保留 legacy wrapper，科学 relay
+  与新 worker 共用 `relay_core.py`；旧 paired/recovery 工具不进入新 active runtime。
 
 ## 重构后的迭代惯例
 

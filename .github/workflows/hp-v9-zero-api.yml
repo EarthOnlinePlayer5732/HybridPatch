@@ -63,11 +63,15 @@ jobs:
         working-directory: HP_V9
         run: python -B ./src/test_infrastructure_stress.py
 
-      - name: Scientific-core byte identity and quick-summary tests
+      - name: Scientific-core identity and quick-summary tests
         working-directory: HP_V9
         run: |
           python -B ./src/test_v9_core_identity.py
           python -B -m unittest -v test_quick_experiment_summary
+
+      - name: Simplified sample-local runtime acceptance
+        working-directory: HP_V9
+        run: python -B ./src/test_simple_runtime.py
 
       - name: Compile tracked HP_V9 Python
         run: |
