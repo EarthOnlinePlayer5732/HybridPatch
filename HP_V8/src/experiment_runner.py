@@ -40,6 +40,7 @@ from domains import get_domain
 
 from run_meta import (RunLogger, dump_step_docs, append_run_metadata,
                       finish_run_metadata, register_task_plan,
+                      CampaignStoppedError,
                       ApiCallRecorder, record_model_content_anomaly,
                       append_relay_rows_and_checkpoint, write_json_atomic,
                       append_jsonl_locked,
@@ -1665,7 +1666,26 @@ def main():
             )
     except Exception as exc:
         failure_class = getattr(exc, "_anchorpatch_failure_class", None)
-        if (failure_class == "evaluator_incomplete"
+        stop_conditions = (
+            read_campaign_stop_conditions(args.out_dir)
+            if isinstance(exc, CampaignStoppedError) else []
+        )
+        operator_pause_interruption = (
+            isinstance(exc, CampaignStoppedError)
+            and stop_conditions
+            and all(
+                row.get("condition")
+                == "operator_directed_dispatcher_pause"
+                for row in stop_conditions
+            )
+        )
+        if operator_pause_interruption:
+            # The dispatcher retains the active-set witness.  Publishing this
+            # exact terminal metadata status lets the offline, hash-bound
+            # operator-pause transaction close the worker without converting
+            # a cooperative stop into an unrelated worker_fatal_error.
+            finish_status = "interrupted_by_dispatcher"
+        elif (failure_class == "evaluator_incomplete"
                 and len(args.sample) == 1
                 and isinstance(exc, EvaluatorIncompleteError)):
             finish_status = "evaluator_incomplete"

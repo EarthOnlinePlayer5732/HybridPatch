@@ -4865,11 +4865,12 @@ def read_campaign_recovery_authorization(
             and bool(record.get("superseded_authorization_path"))
         )
         operator_pause_recovery = (
-            archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            record.get("dispatcher_operator_pause_recovery") is not True
+            and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
             and archived_stop.get("condition")
             == "operator_directed_dispatcher_pause"
             and archived_stop.get("stopped_git_commit")
-            == record.get("recovery_git_commit")
+            == record.get("prior_git_commit")
             and archived_stop.get("stopped_git_tree_state") == "clean"
             and archived_stop.get("git_status_porcelain") == ""
             and isinstance(record.get("superseded_authorization_path"), str)
@@ -4990,12 +4991,37 @@ def read_campaign_recovery_authorization(
         )
         dispatcher_process_lost_stop = (
             dispatcher_process_lost_recovery
+            and record.get("dispatcher_operator_pause_recovery") is not True
             and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
             and archived_stop.get("condition") == "dispatcher_process_lost"
             and archived_stop.get("dispatcher_pid")
             == record.get("dispatcher_pid")
             and archived_stop.get("dispatcher_instance_id")
             == record.get("dispatcher_instance_id")
+        )
+        dispatcher_operator_pause_stop = (
+            dispatcher_process_lost_recovery
+            and record.get("dispatcher_operator_pause_recovery") is True
+            and record.get("dispatcher_stop_condition")
+            == "operator_directed_dispatcher_pause"
+            and archived_stop.get("schema") == STOP_CONDITION_SCHEMA
+            and archived_stop.get("condition")
+            == "operator_directed_dispatcher_pause"
+            and archived_stop.get("dispatcher_pid")
+            == record.get("dispatcher_pid")
+            and archived_stop.get("dispatcher_instance_id")
+            == record.get("dispatcher_instance_id")
+            and archived_stop.get("stopped_git_commit")
+            == record.get("prior_git_commit")
+            and archived_stop.get("stopped_git_tree_state") == "clean"
+            and archived_stop.get("git_status_porcelain") == ""
+            and isinstance(archived_stop.get("active_worker_launch_ids"), list)
+            and archived_stop.get("dispatch_manifest_sha256")
+            == record.get("dispatch_manifest_sha256")
+            and archived_stop.get("active_worker_set_sha256")
+            == record.get("archived_active_worker_set_sha256")
+            and archived_stop.get("publication_mode")
+            in {"canonical", "emergency_fallback"}
         )
         stop_valid = (
             (
@@ -5011,6 +5037,7 @@ def read_campaign_recovery_authorization(
             or deepseek_server_retry_recovery
             or deepseek_transport_disconnect_retry_recovery
             or dispatcher_process_lost_stop
+            or dispatcher_operator_pause_stop
         )
     if not stop_valid:
         raise RuntimeError("campaign recovery stop is not authorized")
@@ -5019,7 +5046,10 @@ def read_campaign_recovery_authorization(
         allow_active_dispatcher_stop
         and bool(active_stop_records)
         and all(
-            item.get("condition") == "dispatcher_process_lost"
+            item.get("condition") in {
+                "dispatcher_process_lost",
+                "operator_directed_dispatcher_pause",
+            }
             for item in active_stop_records
         )
     )
@@ -6399,7 +6429,27 @@ def read_campaign_recovery_authorization(
             and archived_stop.get("worker_pid")
             == archived_stop_worker.get("worker_pid")
         )
-        if not (registered_prelaunch_only_stop or ordinary_worker_stop):
+        dispatcher_operator_pause_worker_stop = (
+            record.get("dispatcher_operator_pause_recovery") is True
+            and archived_stop.get("condition")
+            == "operator_directed_dispatcher_pause"
+            and archived_stop.get("worker_launch_id") is None
+            and archived_stop.get("worker_pid") == dispatcher_pid
+            and archived_stop.get("active_worker_launch_ids")
+            == sorted(current_workers)
+            and archived_stop.get("active_worker_count")
+            == len(current_workers)
+            and archived_stop.get("dispatch_manifest_sha256")
+            == record.get("dispatch_manifest_sha256")
+            and archived_stop.get("active_worker_set_sha256")
+            == record.get("archived_active_worker_set_sha256")
+            and archived_stop.get("publication_mode")
+            in {"canonical", "emergency_fallback"}
+        )
+        if not (
+                registered_prelaunch_only_stop
+                or ordinary_worker_stop
+                or dispatcher_operator_pause_worker_stop):
             raise RuntimeError(
                 "dispatcher parent-loss canonical stop worker mismatch")
 
@@ -6497,7 +6547,11 @@ def read_campaign_recovery_authorization(
                 or record.get("committed_results_modified") is not False
                 or record.get("checkpoint_rows_modified") is not False
                 or record.get("provider_post_replay_scope")
-                != "uncommitted_steps_only"):
+                != (
+                    "none_required"
+                    if record.get("dispatcher_operator_pause_recovery") is True
+                    else "uncommitted_steps_only"
+                )):
             raise RuntimeError(
                 "dispatcher parent-loss recovery identity changed")
 
@@ -6547,6 +6601,12 @@ def read_campaign_recovery_authorization(
                 != expected_archived_workers):
             raise RuntimeError(
                 "dispatcher parent-loss active worker archive mismatch")
+        if (record.get("dispatcher_operator_pause_recovery") is True
+                and archived_stop.get(
+                    "active_worker_set_canonical_sha256")
+                != _canonical_record_sha256(archived_active)):
+            raise RuntimeError(
+                "operator pause active worker archive witness mismatch")
         try:
             archived_metadata = _read_run_metadata_strict(
                 archived_metadata_path)
@@ -6874,6 +6934,20 @@ def read_campaign_recovery_authorization(
         current_attempts = _validate_incident_entries(
             "api_attempt_ledger.jsonl",
             record.get("incident_attempt_rows"))
+        current_pre_provider_api = _validate_incident_entries(
+            "api_calls.jsonl",
+            record.get("operator_pre_provider_api_rows", []))
+        if (record.get("dispatcher_operator_pause_recovery") is True
+                and (current_api or current_attempts)):
+            raise RuntimeError(
+                "operator pause recovery cannot authorize provider replay "
+                "incidents"
+            )
+        if (record.get("dispatcher_operator_pause_recovery") is not True
+                and current_pre_provider_api):
+            raise RuntimeError(
+                "non-operator recovery cannot contain operator pre-provider "
+                "API evidence")
         prior_api_entries = {
             (
                 item.get("row_number"),
@@ -7001,11 +7075,62 @@ def read_campaign_recovery_authorization(
             if (row.get("worker_launch_id") in interrupted_worker_ids
                     and row.get("request_id") not in committed_call_ids):
                 expected_new_api_numbers.add(number)
-        if {
+        if ({
                 entry["row_number"] for entry, _row in new_api
-        } != expected_new_api_numbers:
+        } | {
+                entry["row_number"]
+                for entry, _row in current_pre_provider_api.values()
+        }) != expected_new_api_numbers:
             raise RuntimeError(
                 "dispatcher parent-loss uncommitted API scope mismatch")
+        for entry, row in current_pre_provider_api.values():
+            worker = current_workers.get(row.get("worker_launch_id")) or {}
+            rt_index = row.get("rt_index")
+            method = row.get("method")
+            call_kind = row.get("call_kind")
+            allowed_call_kinds = (
+                {"hybridpatch_primary", "hybridpatch_repair"}
+                if method == "hybridpatch"
+                else {"fullrewrite_primary"}
+            )
+            if (entry.get("incident_kind")
+                    != "operator_pause_pre_provider_api"
+                    or row.get("schema") != API_CALL_SCHEMA
+                    or row.get("sample") != worker.get("sample")
+                    or row.get("worker_pid") != worker.get("worker_pid")
+                    or row.get("model") != "deepseek-v4-flash"
+                    or method not in manifest_methods
+                    or not isinstance(rt_index, int)
+                    or isinstance(rt_index, bool)
+                    or not 1 <= rt_index <= 10
+                    or row.get("direction") not in {"forward", "backward"}
+                    or call_kind not in allowed_call_kinds
+                    or row.get("transport") != "openai_sdk_stream"
+                    or row.get("transport_revision")
+                    != manifest_config.get("transport_revision")
+                    or row.get("provider_called") is not False
+                    or row.get("response_replayed") is not False
+                    or row.get("request_id") in committed_call_ids
+                    or row.get("classification") != "runner_exception"
+                    or row.get("error_type") != "CampaignStoppedError"
+                    or row.get("runner_exception") != (
+                        "CampaignStoppedError: campaign stop latch is set: "
+                        "operator_directed_dispatcher_pause")
+                    or row.get("provider_request_id") is not None
+                    or row.get("http_status") is not None
+                    or row.get("stream_complete") is not False
+                    or row.get("transport_attempts") != []
+                    or row.get("http_attempts_used") is not None
+                    or row.get("raw_response_saved_path") is not None
+                    or row.get("raw_sse_saved_path") is not None
+                    or row.get("raw_content_length") != 0
+                    or row.get("content_sha256") != _sha256_text("")
+                    or row.get("transport_sidecar_sha256") is not None
+                    or row.get("transport_sidecar_size_bytes") is not None
+                    or row.get("transport_sidecar_record_count") is not None
+                    or row.get("count_as_method_failure") is not True):
+                raise RuntimeError(
+                    "operator pause pre-provider API evidence is invalid")
         for entry, row in new_api:
             worker = current_workers.get(row.get("worker_launch_id")) or {}
             rt_index = row.get("rt_index")
@@ -7156,6 +7281,12 @@ def read_campaign_recovery_authorization(
         if not isinstance(sidecar_entries, list):
             raise RuntimeError(
                 "dispatcher parent-loss transport incident evidence is invalid")
+        if (record.get("dispatcher_operator_pause_recovery") is True
+                and sidecar_entries):
+            raise RuntimeError(
+                "operator pause recovery cannot authorize transport replay "
+                "incidents"
+            )
         prior_sidecars = {
             (item.get("path"), item.get("sha256")): item
             for item in (

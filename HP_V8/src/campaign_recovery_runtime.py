@@ -323,7 +323,8 @@ def _latest_outcomes_by_worker(out_dir):
 
 def _reconcile_deepseek_parent_loss_workers(
         out_dir, manifest, stop_records, *, apply=True,
-        allow_stopless_registered_prelaunch=False):
+        allow_stopless_registered_prelaunch=False,
+        stop_condition="dispatcher_process_lost"):
     """Close exactly the worker cohort orphaned by one dispatcher instance."""
     config = manifest.get("config") or {}
     if (config.get("campaign_role") != "deepseek_full234"
@@ -395,6 +396,19 @@ def _reconcile_deepseek_parent_loss_workers(
         raise RuntimeError("dispatcher parent-loss stop evidence is missing")
     for record in stop_records:
         worker_id = record.get("worker_launch_id")
+        dispatcher_level_stop = (
+            record.get("worker_launch_id") is None
+            and (
+                record.get("worker_pid") is None
+                or (
+                    stop_condition
+                    == "operator_directed_dispatcher_pause"
+                    and record.get("worker_pid") == dispatcher_pid
+                )
+            )
+            and record.get("active_worker_launch_ids") == sorted(
+                active_workers)
+        )
         registered_prelaunch_only = (
             record.get("registered_prelaunch_only") is True
             and record.get("worker_launch_id") is None
@@ -406,12 +420,14 @@ def _reconcile_deepseek_parent_loss_workers(
             record.get("registered_prelaunch_only") is not True
             and worker_id in active_workers
         )
-        if (record.get("condition") != "dispatcher_process_lost"
+        if (record.get("condition") != stop_condition
                 or record.get("dispatcher_pid") != dispatcher_pid
                 or record.get("dispatcher_instance_id")
                 != dispatcher_instance_id
                 or not (
-                    registered_prelaunch_only or ordinary_worker_stop)):
+                    dispatcher_level_stop
+                    or registered_prelaunch_only
+                    or ordinary_worker_stop)):
             raise RuntimeError(
                 "dispatcher parent-loss stop cohort identity mismatch")
 
@@ -790,7 +806,7 @@ def _reconcile_deepseek_parent_loss_workers(
             "sample": item["sample"],
             "invocation_id": item["invocation_id"],
             "exit_code_observed": False,
-            "reason": "dispatcher_process_lost",
+            "reason": stop_condition,
         }
         for item in interrupted
     ]
@@ -991,6 +1007,33 @@ def _apply_deepseek_parent_loss_recovery_plan(
     _write_active_worker_set(out_dir, manifest, [])
 
 
+def _is_operator_pause_pre_provider_api_row(row):
+    """Recognize the exact guard-stop row that proves no provider POST began."""
+    return (
+        row.get("provider_called") is False
+        and row.get("response_replayed") is False
+        and row.get("classification") == "runner_exception"
+        and row.get("error_type") == "CampaignStoppedError"
+        and row.get("runner_exception") == (
+            "CampaignStoppedError: campaign stop latch is set: "
+            "operator_directed_dispatcher_pause")
+        and row.get("provider_request_id") is None
+        and row.get("http_status") is None
+        and row.get("stream_complete") is False
+        and row.get("transport_attempts") == []
+        and row.get("http_attempts_used") is None
+        and row.get("raw_response_saved_path") is None
+        and row.get("raw_sse_saved_path") is None
+        and row.get("raw_content_length") == 0
+        and row.get("content_sha256")
+        == hashlib.sha256(b"").hexdigest()
+        and row.get("transport_sidecar_sha256") is None
+        and row.get("transport_sidecar_size_bytes") is None
+        and row.get("transport_sidecar_record_count") is None
+        and row.get("count_as_method_failure") is True
+    )
+
+
 def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
     """Hash-bind calls that may be replayed after a parent-loss interruption."""
     interrupted = recovery_scope["interrupted_workers"]
@@ -1016,6 +1059,7 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
     api_path = os.path.join(out_dir, "api_calls.jsonl")
     api_rows = _read_jsonl(api_path) if os.path.isfile(api_path) else []
     api_incidents = []
+    pre_provider_api_rows = []
     for number, row in enumerate(api_rows, 1):
         worker_id = row.get("worker_launch_id")
         if worker_id not in interrupted_by_id:
@@ -1034,8 +1078,14 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
                 or row.get("transport") != DEEPSEEK_TRANSPORT
                 or row.get("transport_revision")
                 != config.get("transport_revision")
-                or row.get("provider_called") is not True
                 or row.get("response_replayed") is not False):
+            raise RuntimeError(
+                "dispatcher parent-loss uncommitted API evidence is invalid")
+        if _is_operator_pause_pre_provider_api_row(row):
+            pre_provider_api_rows.append(_incident_entry(
+                number, row, "operator_pause_pre_provider_api"))
+            continue
+        if row.get("provider_called") is not True:
             raise RuntimeError(
                 "dispatcher parent-loss uncommitted API evidence is invalid")
         if (row.get("classification") is not None
@@ -1215,6 +1265,7 @@ def _deepseek_parent_loss_incidents(out_dir, manifest, recovery_scope):
                 })
     return {
         "api": api_incidents,
+        "pre_provider_api": pre_provider_api_rows,
         "attempts": attempt_incidents,
         "transport_sidecars": sorted(
             sidecar_incidents, key=lambda item: item["path"]),
@@ -1272,5 +1323,3 @@ def _unlink_with_sharing_retry(path):
                     or time.monotonic() >= deadline):
                 raise
             time.sleep(0.05)
-
-

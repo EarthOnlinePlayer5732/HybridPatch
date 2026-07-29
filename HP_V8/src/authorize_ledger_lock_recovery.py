@@ -427,14 +427,30 @@ def _reprepare_dispatcher_parent_loss_pending_short_path(
     active = (
         _read_json(active_path) if os.path.isfile(active_path) else None
     )
+    expected_active_workers = {
+        item.get("worker_launch_id"): {"sample": item.get("sample")}
+        for item in recovery_plan.get("workers") or []
+        if isinstance(item, dict)
+    }
+    active_is_reconciled = (
+        active.get("dispatcher_pid") is None
+        and active.get("dispatcher_instance_id") is None
+        and active.get("workers") == {}
+    ) if isinstance(active, dict) else False
+    active_is_original_cohort = (
+        active.get("dispatcher_pid") == recovery_plan.get("dispatcher_pid")
+        and active.get("dispatcher_instance_id")
+        == recovery_plan.get("dispatcher_instance_id")
+        and active.get("workers") == expected_active_workers
+        and len(expected_active_workers)
+        == len(recovery_plan.get("workers") or [])
+    ) if isinstance(active, dict) else False
     if (not isinstance(active, dict)
             or active.get("schema")
             != "anchorpatch.active_worker_set/1"
             or active.get("run_git_commit")
             != manifest.get("run_git_commit")
-            or active.get("dispatcher_pid") is not None
-            or active.get("dispatcher_instance_id") is not None
-            or active.get("workers") != {}):
+            or not (active_is_reconciled or active_is_original_cohort)):
         raise RuntimeError(
             "dispatcher parent-loss pending active set is invalid")
     short_pending = (
@@ -3868,12 +3884,34 @@ def _commit_dispatcher_parent_loss_recovery(
 
 def _authorize_dispatcher_process_lost(
         out_dir, manifest, stop_path, auth_path, prior_authorization,
-        validated_prior_authorization_sha256=None):
+        validated_prior_authorization_sha256=None, *,
+        stop_condition="dispatcher_process_lost",
+        authorization_basis=(
+            "explicit_user_resume_after_dispatcher_process_loss"),
+        operator_pause_recovery=False):
     """Authorize an exact DeepSeek checkpoint resume after parent loss."""
     pending_path = os.path.join(
         out_dir, _DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
     if os.path.isfile(pending_path):
         pending = _read_json(pending_path)
+        pending_record = (
+            pending.get("authorization_record")
+            if isinstance(pending, dict) else None
+        )
+        pending_is_operator_pause = (
+            isinstance(pending_record, dict)
+            and pending_record.get("dispatcher_operator_pause_recovery")
+            is True
+        )
+        if pending_is_operator_pause != bool(operator_pause_recovery):
+            required_mode = (
+                "--operator_dispatcher_pause"
+                if pending_is_operator_pause
+                else "--dispatcher_process_lost"
+            )
+            raise RuntimeError(
+                "dispatcher recovery pending transaction requires "
+                + required_mode)
         pending = _reprepare_dispatcher_parent_loss_pending_short_path(
             out_dir, manifest, pending_path, pending, auth_path,
             stop_path)
@@ -3943,16 +3981,60 @@ def _authorize_dispatcher_process_lost(
             )
 
     stop_records = read_campaign_stop_conditions(out_dir)
-    if not stop_records:
+    if not stop_records and stop_condition == "dispatcher_process_lost":
         _record_stopless_registered_prelaunch_parent_loss(
             out_dir, manifest, stop_path)
         stop_records = read_campaign_stop_conditions(out_dir)
     if (not stop_records
             or any(
-                row.get("condition") != "dispatcher_process_lost"
+                row.get("condition") != stop_condition
                 for row in stop_records)):
         raise RuntimeError(
-            "campaign is not stopped by one lost dispatcher parent")
+            "campaign is not stopped by the expected dispatcher boundary")
+
+    preflight_recovery_scope = None
+    preflight_incidents = None
+    if operator_pause_recovery:
+        active_path = os.path.join(out_dir, "active_worker_set.json")
+        canonical_stop = _read_json(stop_path)
+        active_record = _read_json(active_path)
+        if (canonical_stop.get("worker_launch_id") is not None
+                or canonical_stop.get("dispatch_manifest_sha256")
+                != manifest_digest
+                or canonical_stop.get("active_worker_set_sha256")
+                != _sha256_file(active_path)
+                or canonical_stop.get(
+                    "active_worker_set_canonical_sha256")
+                != _canonical_record_sha256(active_record)
+                or canonical_stop.get("publication_mode")
+                not in {"canonical", "emergency_fallback"}):
+            raise RuntimeError(
+                "operator pause manifest or active-worker witness has drifted")
+        # DeepSeek /6 has no durable response journal.  A provider request
+        # that was open, or a complete API response not yet linked to a
+        # committed RT, cannot be resumed without risking a second POST.
+        # Refuse before creating history/pending artifacts so the paused
+        # campaign remains byte-for-byte available for a future replay tool.
+        preflight_recovery_scope = _reconcile_deepseek_parent_loss_workers(
+            out_dir, manifest, stop_records, apply=False,
+            stop_condition=stop_condition)
+        preflight_incidents = _deepseek_parent_loss_incidents(
+            out_dir, manifest, preflight_recovery_scope)
+        if any(preflight_incidents.get(name) for name in (
+                "api", "attempts", "transport_sidecars")):
+            raise RuntimeError(
+                "operator pause recovery is blocked by ambiguous or "
+                "uncommitted provider activity; DeepSeek durable replay is "
+                "required before resume"
+            )
+        if prior_authorization is not None and any(
+                prior_authorization.get(name) for name in (
+                    "incident_api_rows", "incident_attempt_rows",
+                    "incident_transport_sidecars")):
+            raise RuntimeError(
+                "operator pause recovery cannot supersede prior provider "
+                "replay incidents"
+            )
 
     authorization_id = "dpl-" + uuid.uuid4().hex[:12]
     history_dir = os.path.join(
@@ -3994,10 +4076,19 @@ def _authorize_dispatcher_process_lost(
         _copy_file_durable(
             metadata_path, archived_metadata, allow_missing=True)
 
-    recovery_scope = _reconcile_deepseek_parent_loss_workers(
-        out_dir, manifest, stop_records, apply=False)
-    incidents = _deepseek_parent_loss_incidents(
-        out_dir, manifest, recovery_scope)
+    recovery_scope = (
+        preflight_recovery_scope
+        if preflight_recovery_scope is not None else
+        _reconcile_deepseek_parent_loss_workers(
+            out_dir, manifest, stop_records, apply=False,
+            stop_condition=stop_condition)
+    )
+    incidents = (
+        preflight_incidents
+        if preflight_incidents is not None else
+        _deepseek_parent_loss_incidents(
+            out_dir, manifest, recovery_scope)
+    )
     resume_workers = (
         recovery_scope["interrupted_workers"]
         + recovery_scope["preauthorization_workers"]
@@ -4150,9 +4241,10 @@ def _authorize_dispatcher_process_lost(
         "recovery_kind": DISPATCHER_PROCESS_LOST_RECOVERY_KIND,
         "created_at": datetime.now().astimezone().isoformat(
             timespec="seconds"),
-        "authorization_basis": (
-            "explicit_user_resume_after_dispatcher_process_loss"),
+        "authorization_basis": authorization_basis,
         "dispatcher_process_lost_recovery": True,
+        "dispatcher_stop_condition": stop_condition,
+        "dispatcher_operator_pause_recovery": operator_pause_recovery,
         "dispatcher_pid": recovery_scope["dispatcher_pid"],
         "dispatcher_instance_id": (
             recovery_scope["dispatcher_instance_id"]),
@@ -4193,6 +4285,10 @@ def _authorize_dispatcher_process_lost(
         "incident_api_rows": api_incidents,
         "incident_attempt_rows": attempt_incidents,
         "incident_transport_sidecars": transport_sidecar_incidents,
+        "operator_pre_provider_api_rows": (
+            list(incidents.get("pre_provider_api") or [])
+            if operator_pause_recovery else []
+        ),
         "provider_access_retry_authorizations": list(
             (prior_authorization or {}).get(
                 "provider_access_retry_authorizations") or []),
@@ -4203,14 +4299,16 @@ def _authorize_dispatcher_process_lost(
         ) - terminal_current_samples),
         "committed_results_modified": False,
         "checkpoint_rows_modified": False,
-        "provider_post_replay_scope": "uncommitted_steps_only",
+        "provider_post_replay_scope": (
+            "none_required" if operator_pause_recovery
+            else "uncommitted_steps_only"
+        ),
     })
     if code_transition is None:
         record.pop("dispatcher_parent_loss_code_transition", None)
     else:
         record["authorization_basis"] = (
-            "explicit_user_resume_after_dispatcher_process_loss_and_"
-            "recovery_tool_fix"
+            authorization_basis + "_and_recovery_tool_fix"
         )
         record["dispatcher_parent_loss_code_transition"] = code_transition
     if archived_authorization is None:
@@ -4557,6 +4655,57 @@ def authorize(
                         validated_prior_authorization_sha256)
             finally:
                 portalocker.unlock(lease)
+    parent_loss_pending_path = os.path.join(
+        out_dir, DISPATCHER_PARENT_LOSS_PENDING_FILENAME)
+    if operator_pause and (
+            os.path.exists(stop_path)
+            or os.path.isfile(parent_loss_pending_path)):
+        if operator_interrupted_samples:
+            raise RuntimeError(
+                "dispatcher-recorded operator pause derives its worker "
+                "cohort from the durable active set; explicit sample scope "
+                "is not allowed"
+            )
+        lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
+        with open(lease_path, "a+", encoding="utf-8") as lease:
+            try:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            except portalocker.exceptions.LockException as exc:
+                raise RuntimeError(
+                    "operator pause recovery requires the dispatcher lease "
+                    "to be free"
+                ) from exc
+            try:
+                with _campaign_stop_publication_lock(out_dir):
+                    prior_authorization = (
+                        _read_json(auth_path)
+                        if os.path.exists(auth_path) else None
+                    )
+                    if (prior_authorization is not None
+                            and prior_authorization.get("schema")
+                            != CAMPAIGN_RECOVERY_AUTHORIZATION_SCHEMA_V2):
+                        raise RuntimeError(
+                            "cannot supersede a non-V2 recovery authorization")
+                    manifest = _read_json(manifest_path)
+                    if os.path.exists(stop_path):
+                        stop = _read_json(stop_path)
+                        if (stop.get("condition")
+                                != "operator_directed_dispatcher_pause"):
+                            raise RuntimeError(
+                                "operator pause recovery boundary is invalid")
+                    return _authorize_dispatcher_process_lost(
+                        out_dir, manifest, stop_path, auth_path,
+                        prior_authorization,
+                        stop_condition=(
+                            "operator_directed_dispatcher_pause"),
+                        authorization_basis=(
+                            "explicit_user_resume_after_operator_directed_"
+                            "dispatcher_pause"),
+                        operator_pause_recovery=True,
+                    )
+            finally:
+                portalocker.unlock(lease)
     if deepseek_transport_disconnect_retry:
         if (operator_pause or operator_interrupted_samples
                 or provider_access_retry):
@@ -4765,9 +4914,19 @@ def authorize(
             out_dir, manifest, stop, stop_path, auth_path,
             prior_authorization)
     if operator_pause:
-        if os.path.exists(stop_path):
-            raise RuntimeError(
-                "operator pause recovery requires no pre-existing stop latch")
+        if (prior_authorization is not None
+                and prior_authorization.get(
+                    "dispatcher_operator_pause_recovery") is True
+                and not os.path.exists(stop_path)
+                and not os.path.isfile(parent_loss_pending_path)):
+            verified = read_campaign_recovery_authorization(out_dir)
+            return {
+                "authorization_id": verified["authorization_id"],
+                "authorization_sha256": verified["authorization_sha256"],
+                "resume_samples": verified[
+                    "dispatcher_parent_loss_resume_samples"],
+                "already_authorized": True,
+            }
         reconciled_workers = _reconcile_terminal_active_workers(
             out_dir, manifest,
             operator_interrupted_samples=operator_interrupted_samples,

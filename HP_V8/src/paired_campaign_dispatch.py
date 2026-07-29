@@ -20,8 +20,10 @@ import math
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -59,6 +61,7 @@ from run_meta import (
     read_run_metadata_snapshot,
     read_quiescent_run_metadata_snapshot,
     record_campaign_stop_condition,
+    record_emergency_campaign_stop_condition,
     normalize_snapshot_mode,
     snapshot_docs_sample_dirs,
     write_json_atomic,
@@ -86,6 +89,16 @@ DEEPSEEK_BASE_URL = "https://opencode.ai/zen/go/v1"
 DEEPSEEK_REASONING_EFFORT = "high"
 DEEPSEEK_MAX_TOKENS = 20000
 DEEPSEEK_FULL234_ROUND_TRIPS = 10
+AUDITED_OPERATOR_PAUSE_RUNTIME = {
+    "model": DEEPSEEK_MODEL,
+    "max_tokens": DEEPSEEK_MAX_TOKENS,
+    "provider": "opencode_zen",
+    "transport": DEEPSEEK_TRANSPORT,
+    "transport_revision": DEEPSEEK_TRANSPORT_REVISION,
+    "transport_resume_policy": None,
+    "openai_base_url": DEEPSEEK_BASE_URL,
+    "reasoning_effort": DEEPSEEK_REASONING_EFFORT,
+}
 API_CALL_SCHEMA = "anchorpatch.api_call/4"
 API_ATTEMPT_SCHEMA = "anchorpatch.api_attempt/4"
 API_RESPONSE_JOURNAL_SCHEMA = "anchorpatch.api_response_journal/4"
@@ -156,6 +169,11 @@ PENDING_PROVENANCE_FIELD = "_pending_provenance"
 PENDING_NEVER_STARTED = "never_started"
 PENDING_INFRASTRUCTURE_INCOMPLETE = "infrastructure_incomplete"
 PENDING_INTERRUPTED = "interrupted"
+OPERATOR_PAUSE_CONDITION = "operator_directed_dispatcher_pause"
+_OPERATOR_PAUSE_EXIT_CODES = {
+    "SIGINT": 130,
+    "SIGTERM": 143,
+}
 METHOD_PHASE_COMPLETE_SCHEMA = "anchorpatch.method_phase_complete/1"
 CONFIRMATION_KNOWN_USAGE_LIMIT_USD = 130.0
 CONFIRMATION_EXPERIMENT_ID = (
@@ -172,6 +190,117 @@ MIXED_CONFIRMATION_EXPERIMENT_ID = (
 MIXED_CONFIRMATION_CANDIDATE_COUNT = 190
 MIXED_CONFIRMATION_SAMPLE_COUNT = 100
 MIXED_CONFIRMATION_RESERVE_COUNT = 90
+
+
+class OperatorPauseRequested(RuntimeError):
+    """Internal control-flow exception for a user-directed dispatcher pause."""
+
+    def __init__(self, *, signal_name=None, signum=None, boundary=None):
+        self.signal_name = signal_name or "operator_pause"
+        self.signum = signum
+        self.boundary = boundary
+        self.exit_code = _OPERATOR_PAUSE_EXIT_CODES.get(self.signal_name, 130)
+        message = "operator pause requested"
+        if self.signal_name:
+            message += f" by {self.signal_name}"
+        if boundary:
+            message += f" at {boundary}"
+        super().__init__(message)
+
+
+class _OperatorPauseState:
+    def __init__(self):
+        self.event = threading.Event()
+        self.signum = None
+        self.signal_name = None
+
+    def request(self, signum):
+        if self.event.is_set():
+            return
+        self.signum = signum
+        try:
+            self.signal_name = signal.Signals(signum).name
+        except ValueError:
+            self.signal_name = f"signal_{signum}"
+        self.event.set()
+
+    def raise_if_requested(self, boundary):
+        if self.event.is_set():
+            raise OperatorPauseRequested(
+                signal_name=self.signal_name,
+                signum=self.signum,
+                boundary=boundary,
+            )
+
+
+def _operator_pause_state(args):
+    return getattr(args, "_operator_pause_state", None)
+
+
+def _raise_if_operator_pause_requested(args, boundary):
+    state = _operator_pause_state(args)
+    if state is not None:
+        state.raise_if_requested(boundary)
+
+
+def _supports_audited_operator_pause(args):
+    """Return whether the offline recovery reader supports this campaign."""
+    return (
+        getattr(args, "campaign_role", None) == "deepseek_full234"
+        and getattr(args, "num_round_trips", None)
+        == DEEPSEEK_FULL234_ROUND_TRIPS
+        and getattr(args, "slots_per_key", DEEPSEEK_FULL_SLOTS_PER_KEY)
+        == DEEPSEEK_FULL_SLOTS_PER_KEY
+        and _campaign_runtime_config(args) == AUDITED_OPERATOR_PAUSE_RUNTIME
+    )
+
+
+def _worker_popen_kwargs():
+    if os.name == "nt":
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", None)
+        if creationflags is None:
+            raise RuntimeError(
+                "Windows worker isolation requires CREATE_NEW_PROCESS_GROUP")
+        return {
+            "creationflags": creationflags,
+        }
+    return {"start_new_session": True}
+
+
+@contextlib.contextmanager
+def _operator_pause_signal_scope(args):
+    state = _OperatorPauseState()
+    previous_state = getattr(args, "_operator_pause_state", None)
+    args._operator_pause_state = state
+    signal_numbers = [signal.SIGINT]
+    if hasattr(signal, "SIGTERM"):
+        signal_numbers.append(signal.SIGTERM)
+    previous_handlers = {}
+
+    def _handler(signum, _frame):
+        state.request(signum)
+
+    try:
+        for signum in signal_numbers:
+            try:
+                previous_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, _handler)
+            except (OSError, RuntimeError, ValueError):
+                previous_handlers.pop(signum, None)
+        yield state
+    finally:
+        for signum, handler in previous_handlers.items():
+            try:
+                signal.signal(signum, handler)
+            except (OSError, RuntimeError, ValueError):
+                pass
+        if previous_state is None:
+            try:
+                delattr(args, "_operator_pause_state")
+            except AttributeError:
+                pass
+        else:
+            args._operator_pause_state = previous_state
 
 
 def _campaign_runtime_config(args):
@@ -3839,6 +3968,14 @@ def _active_worker_set_path(out_dir):
     return os.path.join(out_dir, "active_worker_set.json")
 
 
+def _sha256_path(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _write_active_worker_set(out_dir, manifest, workers):
     workers = list(workers)
     dispatcher_identities = {
@@ -3874,6 +4011,213 @@ def _write_active_worker_set(out_dir, manifest, workers):
     }
     write_json_atomic(_active_worker_set_path(out_dir), record)
     return record
+
+
+def _active_worker_launch_ids_from_records(workers):
+    ids = []
+    for item in workers:
+        worker_id = item.get("worker_launch_id") if isinstance(item, dict) else None
+        if isinstance(worker_id, str) and worker_id:
+            ids.append(worker_id)
+    return sorted(set(ids))
+
+
+def _remember_active_worker_set(args, workers, record, path):
+    workers = list(workers)
+    ids = _active_worker_launch_ids_from_records(workers)
+    args._operator_pause_active_worker_launch_ids = ids
+    args._operator_pause_active_worker_count = len(ids)
+    if not os.path.isfile(path):
+        if (_supports_audited_operator_pause(args)
+                and _operator_pause_state(args) is not None):
+            raise RuntimeError(
+                "active worker set was not durably published")
+        return
+    args._operator_pause_active_worker_set_sha256 = _sha256_path(path)
+    args._operator_pause_active_worker_set_canonical_sha256 = (
+        _canonical_record_sha256(record)
+    )
+
+
+def _publish_active_worker_set(out_dir, manifest, workers, args=None):
+    workers = list(workers)
+    record = _write_active_worker_set(out_dir, manifest, workers)
+    if args is not None:
+        _remember_active_worker_set(
+            args, workers, record, _active_worker_set_path(out_dir))
+    return record
+
+
+def _operator_pause_active_worker_ids(args, running):
+    cached = getattr(args, "_operator_pause_active_worker_launch_ids", None)
+    if cached is not None:
+        return list(cached)
+    return _active_worker_launch_ids_from_records(running.values())
+
+
+def _record_operator_pause_condition(
+        out_dir, args, exc, inspection_manifest, running):
+    active_ids = _operator_pause_active_worker_ids(args, running)
+    dispatcher_instance_id = getattr(args, "_dispatcher_instance_id", None)
+    manifest_sha256, active_set_sha256, active_set_canonical_sha256 = (
+        _operator_pause_evidence_digests(args))
+    details = {
+        "reason": f"dispatcher received {exc.signal_name}",
+        "signal_name": exc.signal_name,
+        "signal_number": exc.signum,
+        "exit_code": exc.exit_code,
+        "boundary": exc.boundary,
+        "stopped_git_commit": inspection_manifest["run_git_commit"],
+        "stopped_git_tree_state": inspection_manifest.get(
+            "git_tree_state", "clean"),
+        "git_status_porcelain": "",
+        "dispatcher_pid": os.getpid(),
+        "dispatcher_instance_id": dispatcher_instance_id,
+        "active_worker_launch_ids": active_ids,
+        "active_worker_count": len(active_ids),
+        "dispatch_manifest_sha256": manifest_sha256,
+        "active_worker_set_sha256": active_set_sha256,
+        "active_worker_set_canonical_sha256": active_set_canonical_sha256,
+        "publication_mode": "canonical",
+    }
+    record = record_campaign_stop_condition(
+        out_dir, OPERATOR_PAUSE_CONDITION, **details)
+    _validate_operator_pause_stop_record(
+        record, exc, dispatcher_instance_id, active_ids, manifest_sha256,
+        active_set_sha256, active_set_canonical_sha256)
+    return record
+
+
+def _record_operator_pause_emergency_condition(
+        out_dir, args, exc, inspection_manifest, running,
+        canonical_publication_error):
+    active_ids = _operator_pause_active_worker_ids(args, running)
+    dispatcher_instance_id = getattr(args, "_dispatcher_instance_id", None)
+    manifest_sha256, active_set_sha256, active_set_canonical_sha256 = (
+        _operator_pause_evidence_digests(args))
+    details = {
+        "reason": f"dispatcher received {exc.signal_name}",
+        "signal_name": exc.signal_name,
+        "signal_number": exc.signum,
+        "exit_code": exc.exit_code,
+        "boundary": exc.boundary,
+        "stopped_git_commit": inspection_manifest["run_git_commit"],
+        "stopped_git_tree_state": inspection_manifest.get(
+            "git_tree_state", "clean"),
+        "git_status_porcelain": "",
+        "dispatcher_pid": os.getpid(),
+        "dispatcher_instance_id": dispatcher_instance_id,
+        "active_worker_launch_ids": active_ids,
+        "active_worker_count": len(active_ids),
+        "dispatch_manifest_sha256": manifest_sha256,
+        "active_worker_set_sha256": active_set_sha256,
+        "active_worker_set_canonical_sha256": active_set_canonical_sha256,
+        "publication_mode": "emergency_fallback",
+        "canonical_publication_error": str(canonical_publication_error),
+    }
+    record = record_emergency_campaign_stop_condition(
+        out_dir, OPERATOR_PAUSE_CONDITION, **details)
+    _validate_operator_pause_stop_record(
+        record, exc, dispatcher_instance_id, active_ids, manifest_sha256,
+        active_set_sha256, active_set_canonical_sha256)
+    durable_records = read_campaign_stop_conditions(out_dir)
+    record_digest = _canonical_record_sha256(record)
+    canonical_path = os.path.join(out_dir, "campaign_stop.json")
+    canonical_record = (
+        _read_json(canonical_path) if os.path.isfile(canonical_path) else None
+    )
+    if (not isinstance(canonical_record, dict)
+            or _canonical_record_sha256(canonical_record) != record_digest
+            or not durable_records
+            or any(
+                _canonical_record_sha256(item) != record_digest
+                for item in durable_records
+            )):
+        raise RuntimeError(
+            "operator pause emergency stop did not become the unique durable "
+            "campaign boundary")
+    return record
+
+
+def _operator_pause_evidence_digests(args):
+    if os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID"):
+        raise RuntimeError(
+            "dispatcher operator pause cannot inherit worker identity")
+    values = (
+        getattr(args, "_operator_pause_dispatch_manifest_sha256", None),
+        getattr(args, "_operator_pause_active_worker_set_sha256", None),
+        getattr(
+            args, "_operator_pause_active_worker_set_canonical_sha256", None),
+    )
+    if any(
+            not isinstance(value, str)
+            or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in values):
+        raise RuntimeError(
+            "operator pause evidence digests are not initialized")
+    return values
+
+
+def _validate_operator_pause_stop_record(
+        record, exc, dispatcher_instance_id, active_ids, manifest_sha256,
+        active_set_sha256, active_set_canonical_sha256):
+    if record.get("condition") != OPERATOR_PAUSE_CONDITION:
+        raise RuntimeError(
+            "operator pause cannot supersede existing campaign stop: "
+            + str(record.get("condition") or "unknown")
+        )
+    if (record.get("signal_name") != exc.signal_name
+            or record.get("signal_number") != exc.signum
+            or record.get("exit_code") != exc.exit_code
+            or record.get("boundary") != exc.boundary
+            or record.get("dispatcher_pid") != os.getpid()
+            or record.get("dispatcher_instance_id")
+            != dispatcher_instance_id
+            or record.get("worker_launch_id") is not None
+            or record.get("active_worker_launch_ids") != active_ids
+            or record.get("active_worker_count") != len(active_ids)
+            or record.get("dispatch_manifest_sha256") != manifest_sha256
+            or record.get("active_worker_set_sha256") != active_set_sha256
+            or record.get("active_worker_set_canonical_sha256")
+            != active_set_canonical_sha256):
+        raise RuntimeError(
+            "operator pause stop identity does not match this dispatcher")
+    return record
+
+
+def _assert_no_active_campaign_stop_before_launch(out_dir):
+    stop_records = read_campaign_stop_conditions(out_dir)
+    if stop_records:
+        conditions = sorted({
+            str(record.get("condition") or "unknown")
+            for record in stop_records
+        })
+        raise RuntimeError(
+            "active campaign stop requires offline recovery authorization "
+            "before dispatcher launch: " + ", ".join(conditions)
+        )
+    active_path = _active_worker_set_path(out_dir)
+    if not os.path.isfile(active_path):
+        return
+    active = _read_json(active_path)
+    workers = active.get("workers") if isinstance(active, dict) else None
+    if (active.get("schema") != "anchorpatch.active_worker_set/1"
+            or not isinstance(active.get("run_git_commit"), str)
+            or not active.get("run_git_commit")
+            or not isinstance(workers, dict)
+            or (
+                not workers
+                and (
+                    active.get("dispatcher_pid") is not None
+                    or active.get("dispatcher_instance_id") is not None
+                )
+            )):
+        raise RuntimeError(
+            "active worker witness is invalid; offline recovery is required")
+    if workers:
+        raise RuntimeError(
+            "active worker witness requires offline recovery authorization "
+            "before dispatcher launch")
 
 
 def _worker_lease_is_held(out_dir, sample):
@@ -3915,11 +4259,13 @@ def _assert_worker_leases_free(out_dir, samples):
 
 
 def _authorize_workers(out_dir, running, task_plans, dispatch_log,
-                       timeout_seconds):
+                       timeout_seconds, *, pause_check=None):
     """Release workers only after lease/PID/metadata/plan identity closes."""
     deadline = time.monotonic() + timeout_seconds
     ready_by_sample = {}
     while len(ready_by_sample) != len(running):
+        if pause_check is not None:
+            pause_check("worker_authorization_wait")
         stop_records = read_campaign_stop_conditions(out_dir)
         if stop_records:
             raise RuntimeError(
@@ -4022,6 +4368,8 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
 
     acknowledgements = {}
     authorization_records = []
+    if pause_check is not None:
+        pause_check("before_worker_authorization_records")
     for sample, item in running.items():
         ready = ready_by_sample[sample]
         ack = {
@@ -4053,6 +4401,8 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
     # every worker's authorization event has been durably appended.  This
     # prevents an early worker from calling the provider if a later fsync
     # fails.
+    if pause_check is not None:
+        pause_check("before_worker_ack_publication")
     stop_records = read_campaign_stop_conditions(out_dir)
     if stop_records:
         raise RuntimeError(
@@ -4069,6 +4419,8 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
             raise RuntimeError(
                 f"worker lease not held before cohort ACK: {sample}"
             )
+    if pause_check is not None:
+        pause_check("before_worker_ack_write")
     for sample, item in running.items():
         ack = acknowledgements[sample]
         write_json_atomic(item["ack_path"], ack)
@@ -6992,7 +7344,8 @@ def _append_worker_exit(sample, item, returncode, dispatch_log, *,
 
 
 def _stop_and_reconcile_workers(
-        out_dir, running, dispatch_log=None, *, lease_scope=None):
+        out_dir, running, dispatch_log=None, *, lease_scope=None,
+        record_worker_exits=True, close_running_metadata=True):
     """Best-effort stop, then close metadata only after leases are free."""
     samples_to_verify = sorted(
         set(lease_scope or ()) | set(running)
@@ -7012,7 +7365,7 @@ def _stop_and_reconcile_workers(
     except BaseException as exc:
         result["lease_error"] = str(exc)
         return result
-    if dispatch_log:
+    if dispatch_log and record_worker_exits:
         for sample, item in running.items():
             returncode = item["process"].poll()
             if returncode is not None:
@@ -7023,6 +7376,9 @@ def _stop_and_reconcile_workers(
                     result.setdefault("exit_record_errors", []).append(
                         f"{sample}: {exc}"
                     )
+    if not close_running_metadata:
+        result["metadata_closure_deferred"] = True
+        return result
     try:
         audited = _audit_running_invocation_provenance(out_dir)
         result["audited_invocations"] = audited
@@ -7157,6 +7513,7 @@ def _launch_worker_batch(
         args, out_dir, inspection_manifest, task_plans, keys, assignments,
         resume_authorizations, dispatch_log, running):
     """Launch and authorize one refill batch while existing workers continue."""
+    _raise_if_operator_pause_requested(args, "before_worker_batch")
     if (not isinstance(
             getattr(args, "_dispatcher_instance_id", None), str)
             or not args._dispatcher_instance_id):
@@ -7191,11 +7548,12 @@ def _launch_worker_batch(
             "dispatcher_pid": os.getpid(),
             "dispatcher_instance_id": args._dispatcher_instance_id,
         }
-    _write_active_worker_set(
+    _publish_active_worker_set(
         out_dir, inspection_manifest,
-        [*running.values(), *launch_specs.values()])
+        [*running.values(), *launch_specs.values()], args=args)
     batch_running = {}
     for item in assignments:
+        _raise_if_operator_pause_requested(args, "before_worker_launch_intent")
         sample = item["sample"]
         label = item["key_label"]
         launch_key_fields = _worker_key_launch_fields(item)
@@ -7325,6 +7683,7 @@ def _launch_worker_batch(
                 "dispatcher_instance_id": args._dispatcher_instance_id,
             },
         )
+        _raise_if_operator_pause_requested(args, "before_worker_popen")
         log_path = os.path.join(out_dir, item["console_log"])
         log_handle = open(log_path, "a", encoding="utf-8")
         worker_state = {
@@ -7350,6 +7709,7 @@ def _launch_worker_batch(
             process = subprocess.Popen(
                 command, cwd=_ROOT, env=environment,
                 stdout=log_handle, stderr=subprocess.STDOUT,
+                **_worker_popen_kwargs(),
             )
             worker_state["process"] = process
             running[sample] = worker_state
@@ -7376,12 +7736,16 @@ def _launch_worker_batch(
                 "dispatcher_instance_id": args._dispatcher_instance_id,
             },
         )
+        _raise_if_operator_pause_requested(args, "after_worker_launch")
 
     if batch_running:
         _authorize_workers(
             out_dir, batch_running, task_plans, dispatch_log,
             args.start_timeout,
+            pause_check=lambda boundary:
+                _raise_if_operator_pause_requested(args, boundary),
         )
+        _raise_if_operator_pause_requested(args, "after_worker_authorization")
     return list(batch_running)
 
 
@@ -7844,6 +8208,7 @@ def _run_worker_queue(
     last_inspection = {
         "errors": [], "api_calls": 0, "preservation_violations": 0}
     while running or any(pending_by_key.values()) or handoff_fifo:
+        _raise_if_operator_pause_requested(args, "worker_queue_refill")
         # Recheck the durable stop latch at the refill boundary.  The check
         # after each process poll protects already-running workers, while this
         # one closes the narrow window between a clean post-exit inspection
@@ -7870,6 +8235,8 @@ def _run_worker_queue(
                 evaluate_confirmation_known_usage_gate(
                     out_dir, inspection_manifest, refill_index,
                     phase="pre_refill")
+            _raise_if_operator_pause_requested(
+                args, "before_worker_queue_refill_launch")
             launched = _launch_worker_batch(
                 args, out_dir, inspection_manifest, task_plans, keys, batch,
                 resume_authorizations, dispatch_log, running)
@@ -8015,8 +8382,8 @@ def _run_worker_queue(
             completed_samples.add(sample)
             completed_in_poll.add(sample)
         if exited:
-            _write_active_worker_set(
-                out_dir, inspection_manifest, running.values())
+            _publish_active_worker_set(
+                out_dir, inspection_manifest, running.values(), args=args)
         stop_records = read_campaign_stop_conditions(out_dir)
         if stop_records:
             conditions = sorted({
@@ -8030,12 +8397,16 @@ def _run_worker_queue(
         if exited:
             # Keep the existing fail-closed full inspection until a dedicated
             # worker-local/delta audit verifies every released slot.
+            _raise_if_operator_pause_requested(
+                args, "before_worker_exit_campaign_audit")
             last_inspection = inspect_campaign(
                 out_dir, inspection_manifest,
                 active_samples=set(running),
                 required_complete_samples=completed_in_poll,
                 method_phase=method_phase,
             )
+            _raise_if_operator_pause_requested(
+                args, "after_worker_exit_campaign_audit")
             if last_inspection["errors"]:
                 raise RuntimeError("; ".join(last_inspection["errors"]))
             append_jsonl_locked(
@@ -8056,7 +8427,8 @@ def _run_worker_queue(
                 flush=True,
             )
             last_report = time.time()
-    _write_active_worker_set(out_dir, inspection_manifest, [])
+        _raise_if_operator_pause_requested(args, "after_worker_queue_poll")
+    _publish_active_worker_set(out_dir, inspection_manifest, [], args=args)
     append_jsonl_locked(
         dispatch_log,
         {
@@ -8312,7 +8684,13 @@ def _run_remaining134_campaign(
     return 0
 
 
-def _launch_under_lease(args, out_dir):
+def _launch_under_lease_impl(args, out_dir):
+    # A recovery authorizer must archive the active latch before a dispatcher
+    # is allowed to mutate metadata, task plans, the manifest, or active-set
+    # evidence.  In particular, ordinary --resume must not destroy the cohort
+    # witness left by an operator pause.
+    _assert_no_active_campaign_stop_before_launch(out_dir)
+    _raise_if_operator_pause_requested(args, "dispatcher_initialization")
     args._dispatcher_instance_id = (
         f"dispatcher-{os.getpid()}-{uuid.uuid4().hex}"
     )
@@ -8402,6 +8780,7 @@ def _launch_under_lease(args, out_dir):
             item["methods"] = list(REMAINING134_METHOD_PHASES)
 
     args.snapshot_mode = _resolve_paired_snapshot_mode(out_dir, args)
+    _raise_if_operator_pause_requested(args, "before_task_plan_preparation")
     task_plans = prepare_task_plans(
         out_dir, args.samples, args.num_round_trips, args.seed)
     manifest = build_manifest(
@@ -8409,6 +8788,18 @@ def _launch_under_lease(args, out_dir):
         upstream_smoke_gate=upstream_smoke_gate)
     manifest_path, inspection_manifest = write_or_verify_manifest(
         out_dir, manifest, resume=args.resume)
+    if _supports_audited_operator_pause(args):
+        args._operator_pause_dispatch_manifest_sha256 = _sha256_path(
+            manifest_path)
+    else:
+        for attr in (
+                "_operator_pause_dispatch_manifest_sha256",
+                "_operator_pause_active_worker_set_sha256",
+                "_operator_pause_active_worker_set_canonical_sha256",
+                "_operator_pause_active_worker_launch_ids"):
+            if hasattr(args, attr):
+                delattr(args, attr)
+    _raise_if_operator_pause_requested(args, "after_manifest_preparation")
     print(f"MANIFEST {manifest_path}", flush=True)
     for item in assignments:
         print(
@@ -8535,6 +8926,7 @@ def _launch_under_lease(args, out_dir):
     audited_stale = []
     stale = []
     try:
+        _raise_if_operator_pause_requested(args, "before_resume_reconciliation")
         # Never revoke a prior worker's authorization before proving its
         # process lease is free. A live orphan must remain globally visible
         # and block resume rather than being converted into authorization
@@ -8582,7 +8974,8 @@ def _launch_under_lease(args, out_dir):
                         "reason": args.resume_reason,
                     },
                 )
-        _write_active_worker_set(out_dir, inspection_manifest, [])
+        _publish_active_worker_set(
+            out_dir, inspection_manifest, [], args=args)
         if args.campaign_role == "remaining134":
             return _run_remaining134_campaign(
                 args, out_dir, inspection_manifest, task_plans, keys,
@@ -8725,6 +9118,87 @@ def _launch_under_lease(args, out_dir):
             flush=True,
         )
         return 0
+    except OperatorPauseRequested as exc:
+        active_worker_ids = _operator_pause_active_worker_ids(args, running)
+        if active_worker_ids:
+            try:
+                # Publish the latch before process teardown.  Workers that are
+                # between provider guards must observe a durable stop even if
+                # dispatcher-side termination or lease reconciliation later
+                # fails.
+                stop_record = _record_operator_pause_condition(
+                    out_dir, args, exc, inspection_manifest, running)
+            except BaseException as stop_error:
+                canonical_stop_error_text = str(stop_error)
+                try:
+                    stop_record = _record_operator_pause_emergency_condition(
+                        out_dir, args, exc, inspection_manifest, running,
+                        stop_error)
+                except BaseException as emergency_stop_error:
+                    stop_record = None
+                    stop_error_text = (
+                        canonical_stop_error_text
+                        + "; emergency fallback failed: "
+                        + str(emergency_stop_error)
+                    )
+                    stop_publication = "failed"
+                else:
+                    stop_error_text = None
+                    stop_publication = "emergency_fallback"
+            else:
+                stop_error_text = None
+                canonical_stop_error_text = None
+                stop_publication = stop_record.get(
+                    "publication_mode", "canonical")
+        else:
+            # Between cohorts there is no provider-capable process to revoke.
+            # Returning without a campaign-wide latch keeps the next ordinary
+            # checkpoint resume available while the dispatch log records the
+            # operator cancellation.
+            stop_record = None
+            stop_error_text = None
+            canonical_stop_error_text = None
+            stop_publication = "not_required"
+        reconciliation = _stop_and_reconcile_workers(
+            out_dir, running, dispatch_log, lease_scope=args.samples,
+            record_worker_exits=False, close_running_metadata=False)
+        reconciliation["active_set_retained"] = True
+        if stop_error_text is not None:
+            reconciliation["operator_pause_stop_error"] = stop_error_text
+        if canonical_stop_error_text is not None:
+            reconciliation["operator_pause_canonical_stop_error"] = (
+                canonical_stop_error_text)
+        pause_valid = (
+            (not active_worker_ids or stop_record is not None)
+            and stop_error_text is None
+            and reconciliation.get("termination_error") is None
+            and reconciliation.get("lease_error") is None
+        )
+        append_jsonl_locked(dispatch_log, {
+            "event": "operator_pause" if pause_valid
+            else "operator_pause_failed",
+            "condition": OPERATOR_PAUSE_CONDITION,
+            "signal_name": exc.signal_name,
+            "signal_number": exc.signum,
+            "exit_code": exc.exit_code,
+            "boundary": exc.boundary,
+            "campaign_stop_created": stop_record is not None,
+            "campaign_stop_publication": stop_publication,
+            "active_worker_launch_ids": active_worker_ids,
+            "worker_reconciliation": reconciliation,
+        })
+        if not pause_valid:
+            print(
+                "RESULT FAIL operator pause could not establish a durable "
+                "stopped cohort",
+                file=sys.stderr, flush=True,
+            )
+            return 1
+        print(
+            f"RESULT PAUSED operator_pause signal={exc.signal_name}",
+            file=sys.stderr, flush=True,
+        )
+        return exc.exit_code
     except BaseException as exc:
         try:
             record_campaign_stop_condition(
@@ -8770,20 +9244,48 @@ def _launch_under_lease(args, out_dir):
                 pass
 
 
+def _launch_under_lease(args, out_dir):
+    """Run one dispatcher while treating pre-worker signals as cancellation.
+
+    Once the runtime try-block has been entered, `_launch_under_lease_impl`
+    publishes a durable operator-pause latch and reconciles its worker cohort.
+    A signal during local preflight has no worker/provider state to recover, so
+    it returns the conventional signal exit code without inventing a campaign
+    stop record.
+    """
+    try:
+        return _launch_under_lease_impl(args, out_dir)
+    except OperatorPauseRequested as exc:
+        print(
+            f"RESULT PAUSED prelaunch signal={exc.signal_name}",
+            file=sys.stderr, flush=True,
+        )
+        return exc.exit_code
+
+
 def launch(args):
+    if os.environ.get("ANCHORPATCH_WORKER_LAUNCH_ID"):
+        raise RuntimeError(
+            "paired dispatcher cannot inherit ANCHORPATCH_WORKER_LAUNCH_ID")
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
     lease_path = os.path.join(out_dir, ".paired_dispatch.lock")
     lease = open(lease_path, "a+", encoding="utf-8")
     try:
-        try:
-            portalocker.lock(
-                lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
-        except portalocker.exceptions.LockException as exc:
-            raise RuntimeError(
-                f"another paired dispatcher owns {out_dir}"
-            ) from exc
-        return _launch_under_lease(args, out_dir)
+        signal_scope = (
+            _operator_pause_signal_scope(args)
+            if _supports_audited_operator_pause(args)
+            else contextlib.nullcontext()
+        )
+        with signal_scope:
+            try:
+                portalocker.lock(
+                    lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
+            except portalocker.exceptions.LockException as exc:
+                raise RuntimeError(
+                    f"another paired dispatcher owns {out_dir}"
+                ) from exc
+            return _launch_under_lease(args, out_dir)
     finally:
         try:
             portalocker.unlock(lease)
