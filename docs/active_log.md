@@ -1,6 +1,25 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-30 - Before Fresh Retry: HP_V9 DeepSeek exact234 RT10 r3
+
+- experiment：`HP_V9/exp_20260730_dsv4f_234r10_v9_r3`；计划见
+  `docs/experiment_plans/exp_20260730_dsv4f_234r10_v9_r3.md`。用户已明确要求修复后直接重启，
+  本次使用 fresh out_dir，不恢复、拼接或修改 r2。
+- unique change：只包含 commit `717e470525c89366415ae9397147dcb75c9eda87` 的 scoped
+  terminal/quiescence、活跃 API snapshot 与 task-plan late-publication 三项控制面修复；
+  HP/FR 科学核心、exact234、seed42、distractor-on、RT10、Go endpoint、stream `/6`、high
+  reasoning、3 Key x 10 均不变。
+- observed prelaunch：旧 dispatcher/worker=0；r3 out_dir 与仓库外 ops 目录均不存在；
+  `KEY_1 KEY_2 KEY_3` 在外部 keys file 中存在且非空；F 盘约 130 GiB 可用。Key 值未输出。
+- launch gate：独立只读计划审阅、fresh zero-API receipt、3/3 最小 Key probe、clean committed
+  identity 与首批 worker/manifest 检查全部 PASS 后才允许正式 POST。当前条目未调用 API或
+  启动 worker。
+- plan review：独立只读 verdict 为 `GO WITH FIXES`；已明确 `717e470...` 是控制修复提交，
+  最终运行提交可为仅含 plan/Before 的 docs-only child；manifest 必须核对 HP-first/FR-first
+  `117/117`、Go `/v1` base 与完整 `/chat/completions` target。磁盘停止阈值固定为 F 盘可用
+  `<50 GiB`。receipt/probe 的实际 SHA 只写 r3 evidence/ops，避免启动前再次弄脏 tracked tree。
+
 ## 2026-07-30 - After Failure / Before Fresh Retry: HP_V9 scoped-exit audit semantics
 
 - failed run：`HP_V9/exp_20260729_dsv4f_234r10_v9_r2` 在首个 worker 正常退出后触发
