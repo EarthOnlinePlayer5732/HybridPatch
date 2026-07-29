@@ -21,8 +21,8 @@ PYTHONUTF8=1 python -B ./src/test_analyze.py
 ```
 
 This tier covers recorder, ledger, runner, dispatcher, inspector, evaluator,
-and campaign behavior, excluding tests whose names explicitly identify crash,
-pending transaction, parent-loss, interrupt, or recovery boundaries.
+and campaign behavior, excluding the crash/recovery contracts listed in the
+explicit class/method manifest.
 
 ## Crash and recovery
 
@@ -30,10 +30,10 @@ pending transaction, parent-loss, interrupt, or recovery boundaries.
 PYTHONUTF8=1 python -B ./src/run_regression_tier.py --tier recovery
 ```
 
-This tier retains the original test IDs and selects the named crash/recovery
-contracts.  The selection markers live in `src/run_regression_tier.py`; the
-selector's own test proves that fast, component, and recovery remain disjoint
-and together cover all compatibility tests.
+This tier retains the original test IDs and selects the exact contracts in
+`src/regression_tier_manifest.py`.  The selector validates that every declared
+class and method exists; its own test proves that fast, component, and recovery
+remain disjoint and together cover the canonical compatibility suite.
 
 ## Complete compatibility suite
 

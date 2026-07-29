@@ -22,9 +22,33 @@ class RegressionTierTests(unittest.TestCase):
         self.assertFalse(component & recovery)
         self.assertEqual(fast | component | recovery, set(all_ids))
         self.assertEqual(len(all_ids), len(set(all_ids)))
-        self.assertEqual(len(all_ids), 261)
+        loader = unittest.defaultTestLoader
+        canonical = tuple(
+            test.id()
+            for case_class in (
+                *run_regression_tier.FAST_CLASSES,
+                *run_regression_tier.SYSTEM_CLASSES,
+            )
+            for test in run_regression_tier._iter_cases(
+                loader.loadTestsFromTestCase(case_class))
+        )
+        self.assertEqual(all_ids, canonical)
         self.assertTrue(all(
             test_id.startswith("test_model_openai.") for test_id in all_ids))
+
+    def test_recovery_manifest_is_explicit_and_references_real_methods(self):
+        self.assertEqual(
+            set(run_regression_tier.RECOVERY_METHODS_BY_CLASS),
+            set(run_regression_tier.SYSTEM_CLASSES),
+        )
+        loader = unittest.defaultTestLoader
+        for case_class in run_regression_tier.SYSTEM_CLASSES:
+            with self.subTest(case_class=case_class.__name__):
+                declared = run_regression_tier.RECOVERY_METHODS_BY_CLASS[
+                    case_class]
+                available = set(loader.getTestCaseNames(case_class))
+                self.assertTrue(declared)
+                self.assertLessEqual(declared, available)
 
     def test_representative_failure_domains_are_stable(self):
         tiers = {

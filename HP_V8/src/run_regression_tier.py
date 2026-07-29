@@ -9,6 +9,7 @@ import sys
 import unittest
 
 import test_model_openai
+from regression_tier_manifest import RECOVERY_METHODS_BY_CLASS_NAME
 
 
 FAST_CLASSES = (
@@ -22,33 +23,33 @@ SYSTEM_CLASSES = (
     test_model_openai.DeepSeekOpenCodeCampaignTests,
 )
 
-RECOVERY_NAME_MARKERS = (
-    "atomic_replace",
-    "audited_resume",
-    "crash",
-    "emergency_",
-    "fsync_failure",
-    "hard_crash",
-    "interrupt",
-    "operator_pause",
-    "orphan",
-    "parent_loss",
-    "pending",
-    "reconcile",
-    "recovered",
-    "recovery",
-    "resume",
-    "sharing_violation",
-    "snapshot_failure",
-    "watchdog",
-    "write_failure",
-)
-
 TIERS = ("fast", "component", "recovery", "all")
 
 
-def _is_recovery_test(method_name):
-    return any(marker in method_name for marker in RECOVERY_NAME_MARKERS)
+def _validated_recovery_methods_by_class():
+    expected_names = {case_class.__name__ for case_class in SYSTEM_CLASSES}
+    if set(RECOVERY_METHODS_BY_CLASS_NAME) != expected_names:
+        raise RuntimeError(
+            "recovery tier manifest class set differs from SYSTEM_CLASSES")
+    validated = {}
+    loader = unittest.defaultTestLoader
+    for case_class in SYSTEM_CLASSES:
+        declared = tuple(
+            RECOVERY_METHODS_BY_CLASS_NAME[case_class.__name__])
+        if len(declared) != len(set(declared)):
+            raise RuntimeError(
+                f"recovery tier manifest duplicates {case_class.__name__}")
+        available = set(loader.getTestCaseNames(case_class))
+        unknown = set(declared) - available
+        if unknown:
+            raise RuntimeError(
+                "recovery tier manifest names missing tests for "
+                f"{case_class.__name__}: {sorted(unknown)}")
+        validated[case_class] = frozenset(declared)
+    return validated
+
+
+RECOVERY_METHODS_BY_CLASS = _validated_recovery_methods_by_class()
 
 
 def _iter_cases(test):
@@ -70,7 +71,8 @@ def build_tier_suite(tier):
     if tier in {"component", "recovery", "all"}:
         for case_class in SYSTEM_CLASSES:
             for method_name in loader.getTestCaseNames(case_class):
-                is_recovery = _is_recovery_test(method_name)
+                is_recovery = (
+                    method_name in RECOVERY_METHODS_BY_CLASS[case_class])
                 if (tier == "all"
                         or tier == "recovery" and is_recovery
                         or tier == "component" and not is_recovery):
