@@ -1,6 +1,6 @@
 # HP_V9 基础设施版本卡（方法协议仍为 hybridpatch/8）
 
-状态：**active infrastructure implementation**。来源为冻结提交
+状态：**frozen zero-API readiness candidate**。来源为冻结提交
 `7b8fe009a892039db4718ef0cfbb03d35d97d10c` 的 `HP_V8` tracked snapshot；
 `HP_V8` 从此保持只读。V9 不改变 HybridPatch/FullRewrite prompt、protocol、executor、
 evaluator、seeded task plan、RT10 或计分口径，只修改 fresh full234 的调度、证据 I/O、
@@ -1170,3 +1170,65 @@ reader/inspector/postprocess 升级和 fresh full234 验证，未混入本轮兼
 provider API、没有启动正式实验、没有修改历史实验或冻结结果。最终零 API 回归为
 `310/310`，分层为 `52 fast + 150 component + 108 recovery`；recovery facade 行为测试
 `3/3`、tier selector 自测 `4/4`，相关生产模块 `py_compile` 全部通过。
+
+## 2026-07-29 HP_V9 fresh-full234 基础设施冻结
+
+V9 从 `7b8fe009a892039db4718ef0cfbb03d35d97d10c` 的 tracked `HP_V8` 创建；
+初始快照提交为 `213d5d3667f089ba7f9f07c748549266cac26164`，基础设施实现提交为
+`c2c17dabfda761db82da250f2e5c42fb056770fe`。`HP_V8` 未修改。V9 只用于新的 out_dir，不允许拿 V9 代码直接续跑 V8
+campaign。方法协议仍为 `hybridpatch/8`，不是新的方法版本。
+
+科学核心由 `test_v9_core_identity.py` 固定检查：全部 `prompts/**`、全部
+`src/domains/**/*.py`、`experiment_runner.py`、`model_openai.py`、HybridPatch
+schema/index/prompt/executor/gate、splitters、context/evaluator/relay/result helpers、
+`analyze.py`、`verify_anchorpatch.py` 与 `requirements.txt`，均与冻结 V8 提交逐字节一致。
+因此 V9 不改变 prompt、协议、执行器、评价器、seeded task plan、RT10、score 语义或
+HybridPatch/FullRewrite 对照口径。
+
+V9 控制面变更如下：
+
+1. round-trip commit 不再占用全局 `.run_metadata.lock`。不同 sample 通过
+   `.campaign_commit_ordering.lock` 的 shared side 并行提交各自 result/checkpoint；普通与
+   emergency stop 使用 exclusive side。stop-first 必须得到零 result/checkpoint；
+   commit-first 必须先完成 rows `fsync` 与 checkpoint 原子替换，再允许 stop durable。
+2. scoped worker-exit audit 直接消费 dispatcher 已维护的五份 append-only ledger snapshot，
+   不再从磁盘重复读取 dispatch、metadata events、outcomes 与 API rows；每 20 个 terminal
+   worker、preflight、incomplete terminal 和 complete terminal 仍执行完整审计。
+3. 同一 authorization poll 对 metadata event ledger 最多 full-fold 一次，并建立
+   `invocation_id` 索引验证整批 ready workers，不再按 worker 重复折叠。
+4. 超过默认 250 ms 的 shared JSONL wait/append、metadata lock wait/hold、commit ordering
+   wait/hold、metadata fold 与 incremental/full audit 会尽力写入每进程独立的
+   `control_telemetry/pid-<pid>.jsonl`。该 telemetry 无共享锁、无 durability 声明，任何
+   写入失败都不能改变实验状态。
+5. `quick_experiment_summary.py` 只读 committed result rows，把 campaign row completeness
+   与 exact backward RS@RT10 paired endpoint 分开输出，并固定标记
+   `provisional_unverified`；它不替代 inspector、honesty replay、artifact seal 或 finalize。
+6. full234 scope 与 preflight 测试改用自包含的 234-sample 合成 inventory，因此 GitHub
+   Actions 不依赖本机 Delegate52 junction；生产 `_load_full234_scope()` 仍对真实 234 个
+   `sample.json` 排序并哈希。当前本机 `HP_V9/data` 与 V8 一样只指向共享只读数据，检测到
+   234 个 sample。
+7. `.github/workflows/hp-v9-zero-api.yml` 在 `windows-latest`、Git Bash、Python 3.11 下运行
+   fast/component/recovery、30-worker stress、核心字节一致性、quick summary、`py_compile`
+   和 `git diff --check`。workflow 不接收模型 Key，也不调用 provider。
+
+冻结前本地零 API 验证：
+
+- canonical infrastructure compatibility：`315/315`；
+- tiers：`52 fast + 155 component + 108 recovery = 315`，selector `4/4`；
+- 30-worker control-plane stress：`5/5`（30 进程共享 JSONL、30 路 metadata
+  register/finish、30 路 concurrent commit 对 exclusive stop、telemetry threshold/failure）；
+- commit/stop focused races：normal stop-first、emergency stop-first、commit-first、两个
+  independent commits、metadata lock 与 result commit 解耦均通过；
+- snapshot/analyze/recovery facade/quick/core identity：`19/19`；
+- HybridPatch V8 scientific-core executor tests：`72/72`；
+- HP_V9 `src/**/*.py` 全量 `py_compile`、workflow YAML parse、`git diff --check`：通过。
+
+这些结果证明零 API 模拟下的控制面闭环，不等于已经证明 234 samples × 2 methods × RT10
+长时间 provider 并发稳定。共享 `api_calls.jsonl`、attempt、outcome、dispatch 等全局 JSONL
+仍保留逐次 EX lock、`flush+fsync`，metadata event 写入仍会在锁内 fold 历史 events；本轮用
+30-worker 压测和慢路径 telemetry 验证/观测它们，没有在正式运行前继续引入 per-worker
+shard 或 SQLite WAL 的新 evidence schema。若 fresh full234 的 telemetry 实际触发持续锁等待，
+应停止并以该证据规划下一 infrastructure revision，不在这个冻结点上边跑边改。
+
+本轮未调用 provider API、未启动或恢复正式实验、未修改任何历史实验或证据文件，也未声称
+付费 full234 已通过。
