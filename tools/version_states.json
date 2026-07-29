@@ -1,13 +1,43 @@
 {
-  "active_version": "HP_V8",
-  "next_version": "HP_V9",
+  "active_version": "HP_V9",
+  "next_version": "HP_V10",
   "schema": "hybridpatch.version_states/1",
+  "transitions": [
+    {
+      "confirm_no_running_experiments": true,
+      "confirm_uncatalogued_raw_preserved": true,
+      "created_at": "2026-07-29T22:16:46+08:00",
+      "from_version": "HP_V8",
+      "reason": "operator abandoned retained V8 raw as non-claim evidence before fresh V9 full234",
+      "retained_abandonment_receipt": "tools/retained_abandonments/HP_V8.json",
+      "retained_abandonment_receipt_payload_sha256": "1ce70c68448711c4a843b6c09ac8e4470aaab8996df3c9725de1b14312f7cd49",
+      "schema": "hybridpatch.version_active_transition/1",
+      "to_version": "HP_V9",
+      "transition": "active_handoff_with_uncatalogued_raw_preserved",
+      "uncatalogued_raw_experiment_count": 12,
+      "uncatalogued_raw_experiment_directories": [
+        "exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2",
+        "exp_20260726_hybridv8_deepseekv4flash_opencode_capacity15_rt2_retry1",
+        "exp_20260726_hybridv8_deepseekv4flash_opencode_go_capacity15_rt2",
+        "exp_20260726_hybridv8_deepseekv4flash_opencode_go_full234_rt2_c10",
+        "exp_20260726_hybridv8_deepseekv4flash_opencode_go_full234_rt2_c10_503free",
+        "exp_20260726_hybridv8_deepseekv4flash_opencode_go_full234_rt2_c10_503free_retry1",
+        "exp_20260727_dsv4f_hpfr_full234_rt10_stream_c10",
+        "exp_20260728_dsv4f_hpfr_full234_rt10_stream_c10_v5",
+        "exp_dsv4f_hpfr_full234_rt2_c10_r2",
+        "exp_dsv4f_hpfr_full234_rt2_c10_r3",
+        "exp_dsv4f_stream_c10_error_diag_20260727",
+        "exp_dsv4f_stream_c15_error_diag_20260727"
+      ]
+    }
+  ],
   "versions": {
     "HP_V3": "frozen",
     "HP_V4": "frozen",
     "HP_V5": "frozen",
     "HP_V6": "frozen",
     "HP_V7": "frozen",
-    "HP_V8": "active"
+    "HP_V8": "frozen",
+    "HP_V9": "active"
   }
 }
