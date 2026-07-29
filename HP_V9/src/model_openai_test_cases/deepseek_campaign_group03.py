@@ -547,26 +547,34 @@ class DeepSeekOpenCodeCampaignGroup03Mixin:
             "provider_access_resume_samples": frozenset(),
             "worker_launch_ids": frozenset({"worker-a"}),
         }
-        with mock.patch.object(
-                paired_dispatch, "campaign_recovery_incident_evidence",
-                return_value=recovery), mock.patch.object(
-                    paired_dispatch, "_latest_sample_outcomes",
-                    return_value={}), mock.patch.object(
-                        paired_dispatch,
-                        "_verified_deepseek_resume_missing_samples",
-                        return_value={"sample"}), mock.patch.object(
+
+        def allow_recovered(
+                _out_dir, _assignments, *, provenance_out=None):
+            provenance_out["sample"] = paired_dispatch.PENDING_NEVER_STARTED
+            return {"sample"}
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            with mock.patch.object(
+                    paired_dispatch, "campaign_recovery_incident_evidence",
+                    return_value=recovery), mock.patch.object(
+                        paired_dispatch, "_latest_sample_outcomes",
+                        return_value={}), mock.patch.object(
                             paired_dispatch,
-                            "_verify_queued_pending_samples") as pristine:
-            selected, authorizations = (
-                paired_dispatch._select_invocation_assignments(
-                    "unused",
-                    [assignment],
-                    resume=True,
-                    target_round_trips=10,
-                    allow_pristine_pending=True,
-                    allow_deepseek_resume=True,
+                            "_verified_deepseek_resume_missing_samples_"
+                            "with_provenance",
+                            side_effect=allow_recovered), mock.patch.object(
+                                paired_dispatch,
+                                "_verify_queued_pending_samples") as pristine:
+                selected, authorizations = (
+                    paired_dispatch._select_invocation_assignments(
+                        out_dir,
+                        [assignment],
+                        resume=True,
+                        target_round_trips=10,
+                        allow_pristine_pending=True,
+                        allow_deepseek_resume=True,
+                    )
                 )
-            )
         self.assertEqual(
             selected,
             [paired_dispatch._mark_pending_provenance_assignment(

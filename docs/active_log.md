@@ -13,6 +13,10 @@
 - fix：只有 snapshot 完全没有该 invocation 时延迟到下一 100ms poll 并重新 fold；只要
   invocation 已观察到，PID/launch/sample/plan/Key/resume mismatch 仍立即 fail-closed。
   定向 late-publication regression 与 30-worker stress 必须 PASS。
+- preflight fixture：完整零 API 回归曾因一个测试把字面量 `unused` 当作 out_dir，在
+  `HP_V9/unused` 留下 lock 文件并触发 clean-tree gate。该测试现使用系统临时目录并 mock
+  当前 provenance helper；完整 `316/316` 与 30-worker stress `5/5` PASS，版本根不再产生
+  `unused` artifact。生产 runtime、evidence schema 与实验设计均未改变。
 - retry：使用 fresh `exp_20260729_dsv4f_234r10_v9_r2` 与新 plan；父 out_dir 原地保留，
   不 resume、不拼接。研究设计与 `/6` 正式配置不变，重新完成 preflight、probe、clean
   identity 后才启动。
