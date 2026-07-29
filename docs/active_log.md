@@ -1,6 +1,22 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-29 - Before Retry: HP_V9 worker-start metadata publication race
+
+- failed start：`exp_20260729_dsv4f_234r10_v9` 在首批 30 worker start barrier 触发
+  `dispatcher_integrity_failure: worker metadata handshake mismatch: crystal4`；全部 worker
+  已回收。`api_calls.jsonl`、attempt ledger、result JSONL 均未创建，故 provider POST=0，
+  不是方法、Key、transport、evaluator 或 preservation failure。
+- root cause：`_authorize_workers()` 在逐 worker 遍历中首次看到 ready 文件时 fold 一次
+  metadata；同一遍历后部的 worker 可在该 fold 之后发布 ready + metadata，代码却用旧
+  snapshot 立即把“invocation 尚未观察到”误判为 identity mismatch。
+- fix：只有 snapshot 完全没有该 invocation 时延迟到下一 100ms poll 并重新 fold；只要
+  invocation 已观察到，PID/launch/sample/plan/Key/resume mismatch 仍立即 fail-closed。
+  定向 late-publication regression 与 30-worker stress 必须 PASS。
+- retry：使用 fresh `exp_20260729_dsv4f_234r10_v9_r2` 与新 plan；父 out_dir 原地保留，
+  不 resume、不拼接。研究设计与 `/6` 正式配置不变，重新完成 preflight、probe、clean
+  identity 后才启动。
+
 ## 2026-07-29 - Before Experiment: HP_V9 DeepSeek exact234 RT10 stream `/6`
 
 - experiment：`exp_20260729_dsv4f_234r10_v9`；计划见

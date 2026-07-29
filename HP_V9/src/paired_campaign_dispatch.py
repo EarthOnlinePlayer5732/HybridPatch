@@ -4374,9 +4374,17 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                 for record in read_run_metadata_snapshot(out_dir):
                     metadata_by_invocation.setdefault(
                         record.get("invocation_id"), []).append(record)
+            invocation_records = metadata_by_invocation.get(invocation_id, [])
+            if not invocation_records:
+                # A ready file and its metadata events are published by the
+                # same worker, but other workers can become ready after this
+                # authorization poll folded the shared event ledger.  Defer
+                # only a genuinely not-yet-observed invocation to the next
+                # poll; never treat that publication race as an integrity
+                # mismatch.  The next poll performs one fresh cohort fold.
+                continue
             matches = [
-                record for record in metadata_by_invocation.get(
-                    invocation_id, [])
+                record for record in invocation_records
                 if record.get("invocation_id") == invocation_id
                 and record.get("status") == "running"
                 and record.get("worker_launch_id") == item["worker_launch_id"]
