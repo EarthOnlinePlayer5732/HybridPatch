@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "tools" / "experiment_records_catalog.json"
 FINALIZER = ROOT / "tools" / "finalize_experiment.py"
 VERSION_STATES = ROOT / "tools" / "version_states.json"
+RETAINED_ABANDONMENT_DIRECTORY = ROOT / "tools" / "retained_abandonments"
 EXPERIMENT_PLANS = ROOT / "docs" / "experiment_plans"
 OWNER_RE = re.compile(r"^HP_V(\d+)$")
 PLACEHOLDER = "REVIEW_REQUIRED"
@@ -58,6 +59,8 @@ CATALOG_EVIDENCE_ROLES = {
     "source_only",
     "sensitivity",
 }
+RETAINED_ABANDONMENT_SCHEMA = "hybridpatch.retained_abandonment/1"
+RETAINED_ABANDONMENT_REASON = "operator_abandoned_non_claim_evidence"
 
 
 def parse_args() -> argparse.Namespace:
@@ -76,6 +79,48 @@ def parse_args() -> argparse.Namespace:
     )
     freeze.add_argument("--owner", required=True)
     freeze.add_argument(
+        "--confirm-no-running-experiments",
+        action="store_true",
+        help="Required acknowledgement that all workers for this version have stopped.",
+    )
+
+    transition = subparsers.add_parser(
+        "transition-active",
+        help=(
+            "Auditably hand off the active HP_V8+ version to a new HP_Vx "
+            "while preserving uncatalogued historical raw experiment dirs."
+        ),
+    )
+    transition.add_argument("--from-owner", required=True)
+    transition.add_argument("--to-owner", required=True)
+    transition.add_argument(
+        "--confirm-no-running-experiments",
+        action="store_true",
+        help="Required acknowledgement that all workers for the old version have stopped.",
+    )
+    transition.add_argument(
+        "--confirm-uncatalogued-raw-preserved",
+        action="store_true",
+        help=(
+            "Required acknowledgement that listed uncatalogued exp_* dirs are "
+            "historical raw evidence and will remain preserved in place."
+        ),
+    )
+    transition.add_argument(
+        "--reason",
+        required=True,
+        help="Human reason recorded in tools/version_states.json.",
+    )
+
+    retain = subparsers.add_parser(
+        "prepare-retained-abandonment",
+        help=(
+            "Inventory unrecorded retained raw experiments without modifying "
+            "them, for an explicit non-claim version freeze."
+        ),
+    )
+    retain.add_argument("--owner", required=True)
+    retain.add_argument(
         "--confirm-no-running-experiments",
         action="store_true",
         help="Required acknowledgement that all workers for this version have stopped.",
@@ -243,7 +288,258 @@ def load_states() -> dict[str, Any]:
     return value
 
 
-def activate_owner(owner: str) -> None:
+def canonical_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def repository_git_identity() -> tuple[str, str]:
+    commit_result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=normal"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    commit = (commit_result.stdout or "").strip()
+    if (commit_result.returncode != 0
+            or not re.fullmatch(r"[0-9a-f]{40}", commit)):
+        raise RuntimeError("cannot resolve repository Git commit")
+    if status_result.returncode != 0:
+        raise RuntimeError("cannot resolve repository Git tree state")
+    tree_state = "dirty" if (status_result.stdout or "").strip() else "clean"
+    return commit, tree_state
+
+
+def retained_abandonment_path(owner: str) -> Path:
+    owner_number(owner)
+    return RETAINED_ABANDONMENT_DIRECTORY / f"{owner}.json"
+
+
+def catalogued_experiment_ids(owner: str) -> set[str]:
+    catalog = load_json(CATALOG)
+    return {
+        str(entry.get("experiment_id"))
+        for record_set in catalog.get("record_sets") or []
+        if record_set.get("owner") == owner
+        for entry in record_set.get("experiments") or []
+    }
+
+
+def unrecorded_experiment_paths(owner: str) -> list[Path]:
+    owner_path = ROOT / owner
+    catalogued = catalogued_experiment_ids(owner)
+    return sorted(
+        (
+            path for path in owner_path.glob("exp_*")
+            if path.is_dir() and path.name not in catalogued
+        ),
+        key=lambda path: path.name,
+    )
+
+
+def _top_level_entry_identity(experiment: Path) -> dict[str, Any]:
+    entries: list[dict[str, Any]] = []
+    for path in sorted(experiment.iterdir(), key=lambda item: item.name):
+        stat = path.lstat()
+        if path.is_symlink():
+            kind = "symlink"
+        elif path.is_dir():
+            kind = "directory"
+        elif path.is_file():
+            kind = "file"
+        else:
+            kind = "other"
+        entries.append({
+            "name": path.name,
+            "kind": kind,
+            "size_bytes": stat.st_size if kind in {"file", "symlink"} else None,
+        })
+    return {
+        "top_level_entry_count": len(entries),
+        "top_level_entries_sha256": canonical_sha256(entries),
+    }
+
+
+def retained_experiment_identity(owner: str, experiment: Path) -> dict[str, Any]:
+    if experiment.parent.resolve() != (ROOT / owner).resolve():
+        raise RuntimeError("retained experiment is outside its owner directory")
+    if (not experiment.is_dir() or experiment.is_symlink()
+            or not experiment.name.startswith("exp_")):
+        raise RuntimeError(
+            f"retained experiment directory is missing or invalid: {experiment.name}"
+        )
+    manifest = experiment / "dispatch_manifest.json"
+    if manifest.is_symlink():
+        raise RuntimeError(
+            f"retained experiment manifest must not be a symlink: {experiment.name}"
+        )
+    manifest_exists = manifest.is_file()
+    identity = {
+        "experiment_id": experiment.name,
+        "archive_ref": f"{owner}/{experiment.name}",
+        "exists": True,
+        "dispatch_manifest_exists": manifest_exists,
+        "dispatch_manifest_sha256": (
+            sha256_file(manifest) if manifest_exists else None),
+        "dispatch_manifest_size_bytes": (
+            manifest.stat().st_size if manifest_exists else None),
+        **_top_level_entry_identity(experiment),
+    }
+    identity["identity_sha256"] = canonical_sha256(identity)
+    return identity
+
+
+def _retained_abandonment_payload_sha256(receipt: dict[str, Any]) -> str:
+    payload = dict(receipt)
+    payload.pop("receipt_payload_sha256", None)
+    return canonical_sha256(payload)
+
+
+def _retained_abandonment_receipt_is_tracked_clean(path: Path) -> bool:
+    try:
+        relative = path.resolve().relative_to(ROOT.resolve()).as_posix()
+    except ValueError:
+        return False
+    tracked = subprocess.run(
+        ["git", "ls-files", "--error-unmatch", "--", relative],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all", "--", relative],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    return (
+        tracked.returncode == 0
+        and status.returncode == 0
+        and not (status.stdout or "").strip()
+    )
+
+
+def prepare_retained_abandonment(
+    owner: str,
+    *,
+    confirm_no_running_experiments: bool,
+) -> Path:
+    if not confirm_no_running_experiments:
+        raise RuntimeError("--confirm-no-running-experiments is required")
+    states = load_states()
+    if states.get("active_version") != owner:
+        raise RuntimeError(f"{owner} is not the current active version")
+    commit, tree_state = repository_git_identity()
+    if tree_state != "clean":
+        raise RuntimeError(
+            "retained-abandonment receipt requires a clean Git worktree"
+        )
+    experiments = unrecorded_experiment_paths(owner)
+    if not experiments:
+        raise RuntimeError("there are no unrecorded experiments to retain")
+    identities = [
+        retained_experiment_identity(owner, experiment)
+        for experiment in experiments
+    ]
+    experiment_ids = [item["experiment_id"] for item in identities]
+    receipt: dict[str, Any] = {
+        "schema": RETAINED_ABANDONMENT_SCHEMA,
+        "owner": owner,
+        "reason": RETAINED_ABANDONMENT_REASON,
+        "claim_eligible": False,
+        "raw_experiments_modified": False,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "source_git_commit": commit,
+        "source_git_tree_state": tree_state,
+        "retained_experiment_count": len(identities),
+        "retained_experiment_ids": experiment_ids,
+        "retained_experiment_ids_sha256": canonical_sha256(experiment_ids),
+        "experiments": identities,
+    }
+    receipt["receipt_payload_sha256"] = (
+        _retained_abandonment_payload_sha256(receipt))
+    path = retained_abandonment_path(owner)
+    write_atomic(path, stable_json(receipt))
+    print(f"[process] retained-abandonment receipt: {repo_ref(path)}")
+    print(
+        "[process] commit this receipt before freeze; raw experiments were not modified"
+    )
+    return path
+
+
+def validate_retained_abandonment(
+    owner: str,
+    experiments: list[Path],
+    *,
+    require_tracked_clean: bool,
+) -> dict[str, Any]:
+    path = retained_abandonment_path(owner)
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(
+            "unrecorded experiments require a retained-abandonment receipt"
+        )
+    if require_tracked_clean and not _retained_abandonment_receipt_is_tracked_clean(
+            path):
+        raise RuntimeError(
+            "retained-abandonment receipt must be Git-tracked and clean"
+        )
+    receipt = load_json(path)
+    payload_sha = receipt.get("receipt_payload_sha256")
+    if (receipt.get("schema") != RETAINED_ABANDONMENT_SCHEMA
+            or receipt.get("owner") != owner
+            or receipt.get("reason") != RETAINED_ABANDONMENT_REASON
+            or receipt.get("claim_eligible") is not False
+            or receipt.get("raw_experiments_modified") is not False
+            or receipt.get("source_git_tree_state") != "clean"
+            or not re.fullmatch(
+                r"[0-9a-f]{40}", str(receipt.get("source_git_commit") or ""))
+            or not isinstance(receipt.get("created_at"), str)
+            or not receipt.get("created_at")
+            or not re.fullmatch(r"[0-9a-f]{64}", str(payload_sha or ""))
+            or payload_sha != _retained_abandonment_payload_sha256(receipt)):
+        raise RuntimeError("retained-abandonment receipt identity is invalid")
+    current = [
+        retained_experiment_identity(owner, experiment)
+        for experiment in sorted(experiments, key=lambda item: item.name)
+    ]
+    current_ids = [item["experiment_id"] for item in current]
+    if (receipt.get("retained_experiment_count") != len(current)
+            or receipt.get("retained_experiment_ids") != current_ids
+            or receipt.get("retained_experiment_ids_sha256")
+            != canonical_sha256(current_ids)
+            or receipt.get("experiments") != current):
+        raise RuntimeError(
+            "retained-abandonment receipt does not match the exact current "
+            "unrecorded experiment set/identity"
+        )
+    return receipt
+
+
+def _require_active_prerequisites(owner: str) -> int:
     number = owner_number(owner)
     if number < 8:
         raise RuntimeError("HP_V3-HP_V7 are frozen and cannot be activated")
@@ -277,7 +573,40 @@ def activate_owner(owner: str) -> None:
             "implement and zero-API test V8 run metadata before activation; "
             f"missing runtime fields: {missing_runtime_fields}"
         )
+    return number
 
+
+def _unfinished_process_state_paths(owner_path: Path) -> list[str]:
+    prepared = []
+    for state_path in owner_path.glob("exp_*/analysis/process_state.json"):
+        state = load_json(state_path)
+        if state.get("stage") != "finalized":
+            prepared.append(repo_ref(state_path))
+    return prepared
+
+
+def _catalogued_experiment_ids(owner: str) -> set[str]:
+    catalog = load_json(CATALOG)
+    return {
+        str(entry.get("experiment_id"))
+        for record_set in catalog.get("record_sets") or []
+        if record_set.get("owner") == owner
+        for entry in record_set.get("experiments") or []
+    }
+
+
+def _unrecorded_experiment_dirs(owner: str) -> list[str]:
+    owner_path = ROOT / owner
+    catalogued = _catalogued_experiment_ids(owner)
+    return sorted(
+        path.name
+        for path in owner_path.glob("exp_*")
+        if path.is_dir() and path.name not in catalogued
+    )
+
+
+def activate_owner(owner: str) -> None:
+    number = _require_active_prerequisites(owner)
     states = load_states()
     active = states.get("active_version")
     if active not in (None, owner):
@@ -303,28 +632,13 @@ def freeze_owner(owner: str, *, confirm_no_running_experiments: bool) -> None:
     if states.get("active_version") != owner:
         raise RuntimeError(f"{owner} is not the current active version")
     owner_path = ROOT / owner
-    prepared = []
-    for state_path in owner_path.glob("exp_*/analysis/process_state.json"):
-        state = load_json(state_path)
-        if state.get("stage") != "finalized":
-            prepared.append(repo_ref(state_path))
+    prepared = _unfinished_process_state_paths(owner_path)
     if prepared:
         raise RuntimeError(
             "cannot freeze with unfinished post-processing states: "
             f"{prepared}"
         )
-    catalog = load_json(CATALOG)
-    catalogued = {
-        str(entry.get("experiment_id"))
-        for record_set in catalog.get("record_sets") or []
-        if record_set.get("owner") == owner
-        for entry in record_set.get("experiments") or []
-    }
-    unrecorded = sorted(
-        path.name
-        for path in owner_path.glob("exp_*")
-        if path.is_dir() and path.name not in catalogued
-    )
+    unrecorded = _unrecorded_experiment_dirs(owner)
     if unrecorded:
         raise RuntimeError(
             "cannot freeze with unrecorded experiment directories: "
@@ -337,6 +651,85 @@ def freeze_owner(owner: str, *, confirm_no_running_experiments: bool) -> None:
     states["next_version"] = f"HP_V{number + 1}"
     write_atomic(VERSION_STATES, stable_json(states))
     print(f"[process] frozen version: {owner}")
+
+
+def transition_active_owner(
+    from_owner: str,
+    to_owner: str,
+    *,
+    confirm_no_running_experiments: bool,
+    confirm_uncatalogued_raw_preserved: bool,
+    reason: str,
+) -> None:
+    if not confirm_no_running_experiments:
+        raise RuntimeError("--confirm-no-running-experiments is required")
+    if not confirm_uncatalogued_raw_preserved:
+        raise RuntimeError("--confirm-uncatalogued-raw-preserved is required")
+    reason = reason.strip()
+    if not reason:
+        raise RuntimeError("--reason must be non-empty")
+    from_number = owner_number(from_owner)
+    to_number = _require_active_prerequisites(to_owner)
+    if from_number < 8:
+        raise RuntimeError("historical frozen versions are not managed by this command")
+    if to_number != from_number + 1:
+        raise RuntimeError(
+            "active transition must move to the next HP version: "
+            f"{from_owner} -> {to_owner}"
+        )
+    states = load_states()
+    if states.get("active_version") != from_owner:
+        raise RuntimeError(f"{from_owner} is not the current active version")
+    versions = dict(states.get("versions") or {})
+    if versions.get(to_owner) not in (None, "active"):
+        raise RuntimeError(f"{to_owner} already has state {versions.get(to_owner)!r}")
+    prepared = _unfinished_process_state_paths(ROOT / from_owner)
+    if prepared:
+        raise RuntimeError(
+            "cannot transition with unfinished post-processing states: "
+            f"{prepared}"
+        )
+    unrecorded_paths = unrecorded_experiment_paths(from_owner)
+    if not unrecorded_paths:
+        raise RuntimeError(
+            "transition-active is only for preserving explicit uncatalogued "
+            "historical raw directories; use freeze then activate instead"
+        )
+    receipt = validate_retained_abandonment(
+        from_owner,
+        unrecorded_paths,
+        require_tracked_clean=True,
+    )
+    unrecorded = [path.name for path in unrecorded_paths]
+    transition_record = {
+        "schema": "hybridpatch.version_active_transition/1",
+        "from_version": from_owner,
+        "to_version": to_owner,
+        "transition": "active_handoff_with_uncatalogued_raw_preserved",
+        "reason": reason,
+        "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "uncatalogued_raw_experiment_directories": unrecorded,
+        "uncatalogued_raw_experiment_count": len(unrecorded),
+        "retained_abandonment_receipt": repo_ref(
+            retained_abandonment_path(from_owner)
+        ),
+        "retained_abandonment_receipt_payload_sha256": receipt[
+            "receipt_payload_sha256"
+        ],
+        "confirm_no_running_experiments": True,
+        "confirm_uncatalogued_raw_preserved": True,
+    }
+    versions[from_owner] = "frozen"
+    versions[to_owner] = "active"
+    states["versions"] = versions
+    states["active_version"] = to_owner
+    states["next_version"] = f"HP_V{to_number + 1}"
+    states.setdefault("transitions", []).append(transition_record)
+    write_atomic(VERSION_STATES, stable_json(states))
+    print(
+        f"[process] active transition: {from_owner} -> {to_owner} "
+        f"(preserved_uncatalogued_raw={len(unrecorded)})"
+    )
 
 
 def resolve_experiment(raw: Path) -> tuple[str, Path, Path]:
@@ -1687,6 +2080,21 @@ def main() -> int:
         freeze_owner(
             args.owner,
             confirm_no_running_experiments=args.confirm_no_running_experiments,
+        )
+    elif args.command == "prepare-retained-abandonment":
+        prepare_retained_abandonment(
+            args.owner,
+            confirm_no_running_experiments=args.confirm_no_running_experiments,
+        )
+    elif args.command == "transition-active":
+        transition_active_owner(
+            args.from_owner,
+            args.to_owner,
+            confirm_no_running_experiments=args.confirm_no_running_experiments,
+            confirm_uncatalogued_raw_preserved=(
+                args.confirm_uncatalogued_raw_preserved
+            ),
+            reason=args.reason,
         )
     elif args.command == "prepare":
         prepare_experiment(

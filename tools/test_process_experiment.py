@@ -907,5 +907,144 @@ class ProcessExperimentTests(unittest.TestCase):
             self.assertIsNone(state["private_record_bundle_sha256"])
 
 
+class RetainedAbandonmentTransitionTests(unittest.TestCase):
+    def _workspace(self, root: Path) -> tuple[Path, Path, Path]:
+        tools = root / "tools"
+        tools.mkdir()
+        catalog = tools / "experiment_records_catalog.json"
+        catalog.write_text('{"record_sets": []}\n', encoding="utf-8")
+        states = tools / "version_states.json"
+        states.write_text(
+            process.stable_json({
+                "schema": "hybridpatch.version_states/1",
+                "active_version": "HP_V8",
+                "next_version": "HP_V9",
+                "versions": {"HP_V8": "active"},
+            }),
+            encoding="utf-8",
+        )
+        old = root / "HP_V8"
+        experiment = old / "exp_retained"
+        experiment.mkdir(parents=True)
+        (experiment / "dispatch_manifest.json").write_text(
+            '{"experiment_id":"exp_retained"}\n', encoding="utf-8"
+        )
+        new = root / "HP_V9"
+        (new / "src").mkdir(parents=True)
+        (new / "VERSION.md").write_text("v9\n", encoding="utf-8")
+        for name in ("verify_anchorpatch.py", "analyze.py"):
+            (new / "src" / name).write_text("# fixture\n", encoding="utf-8")
+        runtime = "run_git_commit git_tree_state started_at finished_at\n"
+        for name in ("run_meta.py", "experiment_runner.py"):
+            (new / "src" / name).write_text(runtime, encoding="utf-8")
+        return catalog, states, experiment
+
+    def _patch_workspace(self, root: Path, catalog: Path, states: Path):
+        return (
+            mock.patch.object(process, "ROOT", root),
+            mock.patch.object(process, "CATALOG", catalog),
+            mock.patch.object(process, "VERSION_STATES", states),
+            mock.patch.object(
+                process,
+                "RETAINED_ABANDONMENT_DIRECTORY",
+                root / "tools" / "retained_abandonments",
+            ),
+        )
+
+    def test_prepare_receipt_and_transition_preserve_raw(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog, states, experiment = self._workspace(root)
+            before = (experiment / "dispatch_manifest.json").read_bytes()
+            patches = self._patch_workspace(root, catalog, states)
+            with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+                process,
+                "repository_git_identity",
+                return_value=("a" * 40, "clean"),
+            ):
+                receipt_path = process.prepare_retained_abandonment(
+                    "HP_V8", confirm_no_running_experiments=True
+                )
+                self.assertTrue(receipt_path.is_file())
+                with mock.patch.object(
+                    process,
+                    "_retained_abandonment_receipt_is_tracked_clean",
+                    return_value=True,
+                ):
+                    process.transition_active_owner(
+                        "HP_V8",
+                        "HP_V9",
+                        confirm_no_running_experiments=True,
+                        confirm_uncatalogued_raw_preserved=True,
+                        reason="fixture retained non-claim evidence",
+                    )
+            updated = json.loads(states.read_text(encoding="utf-8"))
+            self.assertEqual(updated["active_version"], "HP_V9")
+            self.assertEqual(updated["versions"]["HP_V8"], "frozen")
+            self.assertEqual(updated["versions"]["HP_V9"], "active")
+            self.assertEqual(
+                (experiment / "dispatch_manifest.json").read_bytes(), before
+            )
+            transition = updated["transitions"][-1]
+            self.assertRegex(
+                transition["retained_abandonment_receipt_payload_sha256"],
+                r"^[0-9a-f]{64}$",
+            )
+
+    def test_transition_rejects_receipt_set_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog, states, _experiment = self._workspace(root)
+            patches = self._patch_workspace(root, catalog, states)
+            with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+                process,
+                "repository_git_identity",
+                return_value=("a" * 40, "clean"),
+            ):
+                process.prepare_retained_abandonment(
+                    "HP_V8", confirm_no_running_experiments=True
+                )
+                added = root / "HP_V8" / "exp_added_later"
+                added.mkdir()
+                with mock.patch.object(
+                    process,
+                    "_retained_abandonment_receipt_is_tracked_clean",
+                    return_value=True,
+                ), self.assertRaisesRegex(RuntimeError, "exact current"):
+                    process.transition_active_owner(
+                        "HP_V8",
+                        "HP_V9",
+                        confirm_no_running_experiments=True,
+                        confirm_uncatalogued_raw_preserved=True,
+                        reason="fixture",
+                    )
+
+    def test_transition_requires_tracked_clean_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            catalog, states, _experiment = self._workspace(root)
+            patches = self._patch_workspace(root, catalog, states)
+            with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+                process,
+                "repository_git_identity",
+                return_value=("a" * 40, "clean"),
+            ):
+                process.prepare_retained_abandonment(
+                    "HP_V8", confirm_no_running_experiments=True
+                )
+                with mock.patch.object(
+                    process,
+                    "_retained_abandonment_receipt_is_tracked_clean",
+                    return_value=False,
+                ), self.assertRaisesRegex(RuntimeError, "Git-tracked and clean"):
+                    process.transition_active_owner(
+                        "HP_V8",
+                        "HP_V9",
+                        confirm_no_running_experiments=True,
+                        confirm_uncatalogued_raw_preserved=True,
+                        reason="fixture",
+                    )
+
+
 if __name__ == "__main__":
     unittest.main()

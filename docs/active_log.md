@@ -1,6 +1,24 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-29 - Before Experiment: HP_V9 DeepSeek exact234 RT10 stream `/6`
+
+- experiment：`exp_20260729_dsv4f_234r10_v9`；计划见
+  `docs/experiment_plans/exp_20260729_dsv4f_234r10_v9.md`。用户明确要求冻结 V9 后立即
+  开始正式 full234，不再加入新的基础设施重构。
+- scope：exact234、`hybridpatch/8` 对 FullRewrite、seed42、distractor-on、RT10；3 个
+  Key label × 10 slots，work-conserving FIFO。样本均已有历史曝光，不作 unseen claim。
+- identity：科学核心与冻结 V8 字节一致；仅 fresh V9 控制面与
+  `opencode_openai_compatible/6` compact stream evidence 改变。正式配置固定 Go URL、
+  `deepseek-v4-flash`、`stream=true`、`include_usage=true`、high reasoning、20,000 max
+  completion tokens、failure-only snapshots。
+- safety：使用短新目录 `HP_V9/exp_20260729_dsv4f_234r10_v9`，不 resume、拼接或修改
+  任一 V8 实验。启动前依次完成独立计划审阅、zero-API preflight、3-Key 最小探针、
+  clean tree/进程/磁盘/命令复核；监控不得自行重启或改 evidence。
+- version-state note：仓库 freeze 命令因 12 个保留但尚未 catalog 的 V8 raw/失败诊断目录
+  拒绝自动冻结。它们继续原地只读保留；V9 active-state 必须在计划审阅中明确复核，不能
+  通过删除、搬移或改写这些历史目录来绕过。
+
 ## 2026-07-29 - Before Zero-API Validation: DeepSeek `/6` compact transport
 
 - trigger：正式 `/5` 长 reasoning campaign 的逐 chunk critical

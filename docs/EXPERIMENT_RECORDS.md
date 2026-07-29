@@ -158,6 +158,29 @@ python ./tools/process_experiment.py freeze \
 
 若仍有 `prepared_for_human_review` 的实验，freeze 会拒绝。
 
+若 active 版本保留了明确放弃 claim、不得事后伪造 preregistration 的未 catalog
+`exp_*` raw 目录，不得通过删除、移动、改 raw 或手改 catalog 绕过 freeze。先在 clean
+tree 生成并提交精确 retained-abandonment receipt，再执行一次原子 active handoff：
+
+```bash
+python ./tools/process_experiment.py prepare-retained-abandonment \
+  --owner HP_V8 \
+  --confirm-no-running-experiments
+
+# 提交 tools/retained_abandonments/HP_V8.json 后：
+python ./tools/process_experiment.py transition-active \
+  --from-owner HP_V8 \
+  --to-owner HP_V9 \
+  --confirm-no-running-experiments \
+  --confirm-uncatalogued-raw-preserved \
+  --reason "operator abandoned retained raw as non-claim evidence"
+```
+
+receipt 绑定未 catalog 目录的 exact set、各目录顶层结构摘要与
+`dispatch_manifest.json` SHA；transition 要求 receipt 已 Git-tracked 且 clean。目录集合、
+manifest 或顶层 identity 漂移时拒绝。该事务只改变版本机器状态，不删除、不移动、不改写
+任何 raw、checkpoint 或 API evidence，也不把 retained raw 伪装为正式 catalog record。
+
 整个流程不会调用 API，也不会自动上传原始产物。`finalize_experiment.py` 仍保留
 为底层维护/历史 record 重建入口；新 V8+ 实验应优先使用
 `process_experiment.py prepare/finalize`。
