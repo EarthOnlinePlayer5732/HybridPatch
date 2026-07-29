@@ -1,0 +1,99 @@
+{
+  "schema": "anchorpatch.archived_transport_fixture/1",
+  "source_campaign": "exp_20260711_opencode_transport_v2_smoke5",
+  "note": "Content text and provider IDs are omitted; event counts, terminal state and usage are transcribed from the immutable archived transport logs.",
+  "cases": [
+    {
+      "name": "foodmenu6_hp_rt02_forward_disconnect_mid_thinking",
+      "source": "api_raw/hybridpatch/foodmenu6/rt02_forward_call000003_18623c77.transport.jsonl",
+      "source_size_bytes": 35687412,
+      "attempt_index": 1,
+      "events": {
+        "message_start": 1,
+        "content_block_start_thinking": 1,
+        "thinking_delta": 590,
+        "content_block_stop": 0,
+        "message_delta": 0,
+        "message_stop": 0
+      },
+      "usage": null,
+      "stop_reason": null,
+      "archived_error_type": "transport_disconnect",
+      "expected_v3": "incomplete_stream",
+      "expected_budget_class": "response_slot"
+    },
+    {
+      "name": "translation4_hp_rt01_forward_text_max_tokens",
+      "source": "api_raw/hybridpatch/translation4/rt01_forward_call000001_a51ae1a5.transport.jsonl",
+      "source_size_bytes": 320396341,
+      "attempt_index": 1,
+      "events": {
+        "message_start": 1,
+        "content_block_start_thinking": 1,
+        "thinking_delta": 1832,
+        "signature_delta": 1,
+        "content_block_start_text": 1,
+        "text_delta": 58,
+        "content_block_stop": 2,
+        "message_delta": 1,
+        "message_stop": 1
+      },
+      "content": [
+        {"type": "thinking", "original_char_count": 338477},
+        {"type": "text", "original_char_count": 12272}
+      ],
+      "usage": {
+        "input_tokens": 11344,
+        "cache_read_input_tokens": 114,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 131072
+      },
+      "stop_reason": "max_tokens",
+      "expected_v3": "text_truncated"
+    },
+    {
+      "name": "translation4_fr_rt01_forward_attempt1_eof_thinking",
+      "source": "api_raw/fullrewrite/translation4/rt01_forward_call000001_a372d156.transport.jsonl",
+      "source_size_bytes": 2006400,
+      "attempt_index": 1,
+      "events": {
+        "message_start": 1,
+        "content_block_start_thinking": 1,
+        "thinking_delta": 1390,
+        "content_block_stop": 0,
+        "message_delta": 0,
+        "message_stop": 0
+      },
+      "usage": null,
+      "stop_reason": null,
+      "archived_error_type": "incomplete_stream",
+      "expected_v3": "incomplete_stream",
+      "expected_budget_class": "response_slot"
+    },
+    {
+      "name": "translation4_fr_rt01_forward_attempt2_thinking_max_tokens",
+      "source": "api_raw/fullrewrite/translation4/rt01_forward_call000001_a372d156.transport.jsonl",
+      "source_size_bytes": 2006400,
+      "attempt_index": 2,
+      "events": {
+        "message_start": 1,
+        "content_block_start_thinking": 1,
+        "thinking_delta": 1920,
+        "content_block_stop": 1,
+        "message_delta": 1,
+        "message_stop": 1
+      },
+      "content": [
+        {"type": "thinking", "original_char_count": 360923}
+      ],
+      "usage": {
+        "input_tokens": 5295,
+        "cache_read_input_tokens": 114,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 131072
+      },
+      "stop_reason": "max_tokens",
+      "expected_v3": "thinking_budget_exhausted"
+    }
+  ]
+}
