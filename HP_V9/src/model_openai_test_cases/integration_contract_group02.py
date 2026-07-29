@@ -2238,48 +2238,49 @@ class IntegrationContractGroup02Mixin:
         paired_dispatch._validate_campaign_grid(args)
 
     def test_full234_scope_is_exact_and_uses_thirteen_rolling_key_queues(self):
-        samples, scope = paired_dispatch._load_full234_scope()
-        self.assertEqual(len(samples), 234)
-        self.assertEqual(samples, sorted(samples))
-        self.assertEqual(scope["sample_count"], 234)
-        self.assertEqual(len(scope["sample_json_sha256"]), 64)
+        with synthetic_full234_scope():
+            samples, scope = paired_dispatch._load_full234_scope()
+            self.assertEqual(len(samples), 234)
+            self.assertEqual(samples, sorted(samples))
+            self.assertEqual(scope["sample_count"], 234)
+            self.assertEqual(len(scope["sample_json_sha256"]), 64)
 
-        args = mock.Mock(
-            campaign_role="full234", smoke_dir=None, samples=None,
-            num_round_trips=10, seed=42, slots_per_key=4,
-        )
-        resolved = paired_dispatch._resolve_full234_scope(args)
-        self.assertEqual(resolved, scope)
-        self.assertEqual(args.samples, samples)
-        paired_dispatch._validate_campaign_grid(args)
+            args = mock.Mock(
+                campaign_role="full234", smoke_dir=None, samples=None,
+                num_round_trips=10, seed=42, slots_per_key=4,
+            )
+            resolved = paired_dispatch._resolve_full234_scope(args)
+            self.assertEqual(resolved, scope)
+            self.assertEqual(args.samples, samples)
+            paired_dispatch._validate_campaign_grid(args)
 
-        labels = [f"KEY_{index:02d}" for index in range(1, 14)]
-        assignments = paired_dispatch.build_key_assignments(
-            samples, labels, 4, alternate_within_key=True,
-            allow_queue=True)
-        self.assertEqual(
-            sum(item["methods"][0] == "hybridpatch"
-                for item in assignments),
-            117,
-        )
-        self.assertEqual(
-            sum(item["methods"][0] == "fullrewrite"
-                for item in assignments),
-            117,
-        )
-        with mock.patch.object(
-                paired_dispatch, "_git_identity",
-                return_value=("1" * 40, "clean")), \
-                mock.patch.object(
-                    paired_dispatch, "code_fingerprint",
-                    return_value={"unit": "test"}):
-            manifest = paired_dispatch.build_manifest(
-                "out", samples, assignments, {}, args)
-        self.assertEqual(manifest["full234_scope"], scope)
-        self.assertEqual(len(manifest["assignment_queues"]), 13)
-        self.assertTrue(all(
-            queue["worker_count"] == 18
-            for queue in manifest["assignment_queues"]))
-        self.assertEqual(manifest["config"]["max_worker_count"], 52)
-        self.assertEqual(manifest["config"]["queued_worker_count"], 182)
-        self.assertNotIn("assignment_waves", manifest)
+            labels = [f"KEY_{index:02d}" for index in range(1, 14)]
+            assignments = paired_dispatch.build_key_assignments(
+                samples, labels, 4, alternate_within_key=True,
+                allow_queue=True)
+            self.assertEqual(
+                sum(item["methods"][0] == "hybridpatch"
+                    for item in assignments),
+                117,
+            )
+            self.assertEqual(
+                sum(item["methods"][0] == "fullrewrite"
+                    for item in assignments),
+                117,
+            )
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")), \
+                    mock.patch.object(
+                        paired_dispatch, "code_fingerprint",
+                        return_value={"unit": "test"}):
+                manifest = paired_dispatch.build_manifest(
+                    "out", samples, assignments, {}, args)
+            self.assertEqual(manifest["full234_scope"], scope)
+            self.assertEqual(len(manifest["assignment_queues"]), 13)
+            self.assertTrue(all(
+                queue["worker_count"] == 18
+                for queue in manifest["assignment_queues"]))
+            self.assertEqual(manifest["config"]["max_worker_count"], 52)
+            self.assertEqual(manifest["config"]["queued_worker_count"], 182)
+            self.assertNotIn("assignment_waves", manifest)

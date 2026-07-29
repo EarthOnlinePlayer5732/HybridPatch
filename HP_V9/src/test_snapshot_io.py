@@ -1,6 +1,6 @@
 """Snapshot and auxiliary I/O failure-domain tests.
 
-Run from HP_V8 root:
+Run from HP_V9 root:
   PYTHONUTF8=1 python -B ./src/test_snapshot_io.py
 """
 

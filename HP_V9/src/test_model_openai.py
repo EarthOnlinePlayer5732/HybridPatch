@@ -1,4 +1,4 @@
-"""Compatibility entry point for the HP_V8 infrastructure regression suite."""
+"""Compatibility entry point for the HP_V9 infrastructure regression suite."""
 
 import unittest
 

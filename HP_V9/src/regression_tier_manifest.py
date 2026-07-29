@@ -1,4 +1,4 @@
-"""Explicit recovery-tier membership for the HP_V8 compatibility suite.
+"""Explicit recovery-tier membership for the HP_V9 compatibility suite.
 
 This is deliberately data, not a name heuristic.  Adding or renaming a
 recovery contract requires an explicit update here; the tier selector validates

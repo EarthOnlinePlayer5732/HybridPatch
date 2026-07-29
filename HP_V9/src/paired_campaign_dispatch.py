@@ -1,4 +1,4 @@
-"""Integrity-fail-fast paired MiniMax campaign launcher for HP_V8.
+"""Integrity-fail-fast paired MiniMax campaign launcher for HP_V9.
 
 The dispatcher never prints key values.  It pre-generates and hashes every
 task plan, records a deterministic sample/key-label/method-order manifest,
@@ -46,6 +46,7 @@ from run_meta import (
     SNAPSHOT_MODE_OFF,
     _canonical_record_sha256,
     _deepseek_dispatcher_stopped_sidecar_evidence,
+    _fold_run_metadata_events,
     _git_identity,
     _validate_deepseek_compact_records,
     _validate_deepseek_linear_records,
@@ -66,6 +67,7 @@ from run_meta import (
     snapshot_docs_sample_dirs,
     write_json_atomic,
 )
+from control_telemetry import record_slow_control_operation
 from utils_env import load_sample
 from utils_relay_plan import (
     build_relay_task_plan,
@@ -4337,6 +4339,7 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                 "campaign stop latch set before worker authorization: "
                 f"{stop_records[0].get('condition')}"
             )
+        metadata_by_invocation = None
         for sample, item in running.items():
             if sample in ready_by_sample:
                 continue
@@ -4366,9 +4369,14 @@ def _authorize_workers(out_dir, running, task_plans, dispatch_log,
                 raise RuntimeError(f"worker ready invocation missing: {sample}")
             if not _worker_lease_is_held(out_dir, sample):
                 raise RuntimeError(f"worker lease not held at authorization: {sample}")
-            metadata = read_run_metadata_snapshot(out_dir)
+            if metadata_by_invocation is None:
+                metadata_by_invocation = {}
+                for record in read_run_metadata_snapshot(out_dir):
+                    metadata_by_invocation.setdefault(
+                        record.get("invocation_id"), []).append(record)
             matches = [
-                record for record in metadata
+                record for record in metadata_by_invocation.get(
+                    invocation_id, [])
                 if record.get("invocation_id") == invocation_id
                 and record.get("status") == "running"
                 and record.get("worker_launch_id") == item["worker_launch_id"]
@@ -4800,7 +4808,8 @@ def write_or_verify_manifest(out_dir, manifest, *, resume=False):
     return path, manifest
 
 
-def _read_relay_publication_snapshot(out_dir, samples, methods):
+def _read_relay_publication_snapshot(
+        out_dir, samples, methods, *, api_snapshot=None):
     """Read a causally consistent live prefix of relay results and API rows.
 
     A worker publishes each API row before committing the result/checkpoint
@@ -4814,7 +4823,10 @@ def _read_relay_publication_snapshot(out_dir, samples, methods):
             result_path = os.path.join(
                 out_dir, method, f"{sample}.jsonl")
             committed_rows[(sample, method)] = _read_jsonl(result_path)
-    api_rows = _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+    api_rows = (
+        _read_jsonl(os.path.join(out_dir, "api_calls.jsonl"))
+        if api_snapshot is None else list(api_snapshot)
+    )
     return committed_rows, api_rows
 
 
@@ -5429,13 +5441,25 @@ def _inspect_deepseek_campaign(
         out_dir, manifest, *, require_complete=False,
         require_terminal_provenance=None, active_samples=None,
         required_complete_samples=None, audit_samples=None,
-        terminal_audit_samples=None):
+        terminal_audit_samples=None, preloaded_ledgers=None):
     """Audit a DeepSeek prefix, including frozen /3-/4-/5 and current /6."""
     if require_terminal_provenance is None:
         require_terminal_provenance = require_complete
     config = manifest.get("config") or {}
     expected_samples = set(config.get("samples") or [])
     scoped_audit = audit_samples is not None
+    if preloaded_ledgers is not None:
+        if (not scoped_audit
+                or set(preloaded_ledgers)
+                != set(_DEEPSEEK_INCREMENTAL_LEDGER_FILES)
+                or any(
+                    not isinstance(preloaded_ledgers.get(name), list)
+                    or any(not isinstance(row, dict)
+                           for row in preloaded_ledgers[name])
+                    for name in _DEEPSEEK_INCREMENTAL_LEDGER_FILES
+                )):
+            raise RuntimeError(
+                "preloaded DeepSeek ledgers require a complete scoped snapshot")
     sample_scope = (
         set(audit_samples or []) if scoped_audit else set(expected_samples)
     )
@@ -5579,7 +5603,11 @@ def _inspect_deepseek_campaign(
         elif _sha256(plan_path) != plan.get("sha256"):
             errors.append(f"task-plan hash drift: {sample}")
 
-    dispatch_rows = _read_jsonl(os.path.join(out_dir, "dispatch_log.jsonl"))
+    dispatch_rows = (
+        _read_jsonl(os.path.join(out_dir, "dispatch_log.jsonl"))
+        if preloaded_ledgers is None
+        else list(preloaded_ledgers["dispatch_log.jsonl"])
+    )
     launches = {}
     authorizations = {}
     exits = {}
@@ -5677,7 +5705,18 @@ def _inspect_deepseek_campaign(
             capability_sha_by_worker[worker_id] = capability_digest
             capabilities_by_worker[worker_id] = capability
 
-    metadata = read_run_metadata_snapshot(out_dir)
+    if preloaded_ledgers is None:
+        metadata = read_run_metadata_snapshot(out_dir)
+    else:
+        fold_started = time.monotonic()
+        metadata = _fold_run_metadata_events(
+            preloaded_ledgers["run_metadata_events.jsonl"])
+        record_slow_control_operation(
+            out_dir, "incremental_metadata_fold",
+            time.monotonic() - fold_started,
+            event_count=len(
+                preloaded_ledgers["run_metadata_events.jsonl"]),
+            projection_count=len(metadata))
     audited_metadata = []
     metadata_by_worker = {}
     latest_by_sample = {}
@@ -5748,7 +5787,11 @@ def _inspect_deepseek_campaign(
     # Read the three append-only ledgers in reverse order so a live inspection
     # always observes a causal prefix rather than a newer outcome paired with
     # an older API snapshot.
-    outcome_snapshot = read_sample_outcomes(out_dir)
+    outcome_snapshot = (
+        read_sample_outcomes(out_dir)
+        if preloaded_ledgers is None
+        else list(preloaded_ledgers["sample_outcomes.jsonl"])
+    )
     if scoped_audit:
         outcome_snapshot = [
             row for row in outcome_snapshot
@@ -5761,6 +5804,9 @@ def _inspect_deepseek_campaign(
             if sample in sample_scope
         ],
         config.get("method_set") or [],
+        api_snapshot=(
+            None if preloaded_ledgers is None
+            else preloaded_ledgers["api_calls.jsonl"]),
     )
     if scoped_audit:
         api_rows = [
@@ -6159,7 +6205,8 @@ def _inspect_deepseek_campaign(
 def inspect_campaign(out_dir, manifest, *, require_complete=False,
                      require_terminal_provenance=None, active_samples=None,
                      required_complete_samples=None, method_phase=None,
-                     audit_samples=None, terminal_audit_samples=None):
+                     audit_samples=None, terminal_audit_samples=None,
+                     preloaded_ledgers=None):
     if require_terminal_provenance is None:
         require_terminal_provenance = require_complete
     config = manifest["config"]
@@ -6188,6 +6235,7 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             required_complete_samples=required_complete_samples,
             audit_samples=audit_samples,
             terminal_audit_samples=terminal_audit_samples,
+            preloaded_ledgers=preloaded_ledgers,
         )
         if quiescent_metadata_error is not None:
             result["errors"] = list(result.get("errors") or []) + [
@@ -6201,6 +6249,9 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
     if audit_samples is not None:
         raise RuntimeError(
             "sample-scoped campaign inspection is only supported for DeepSeek")
+    if preloaded_ledgers is not None:
+        raise RuntimeError(
+            "preloaded campaign ledgers are only supported for DeepSeek")
     declared_phases = config.get("method_phases")
     if method_phase is None and declared_phases is not None:
         if declared_phases != list(REMAINING134_METHOD_PHASES):
@@ -8565,6 +8616,7 @@ def _audit_deepseek_exit_delta(
         launches,
     ))
     audit_samples = set(exited_samples) | new_api_samples
+    inspect_started = time.monotonic()
     local = inspect_campaign(
         out_dir,
         manifest,
@@ -8573,6 +8625,14 @@ def _audit_deepseek_exit_delta(
         required_complete_samples=set(required_complete_samples),
         audit_samples=audit_samples,
         terminal_audit_samples=set(exited_samples),
+        preloaded_ledgers=next_rows,
+    )
+    record_slow_control_operation(
+        out_dir, "incremental_exit_audit",
+        time.monotonic() - inspect_started,
+        audit_sample_count=len(audit_samples),
+        terminal_sample_count=len(exited_samples),
+        api_row_count=next_cursors["api_calls.jsonl"]["row_count"],
     )
     errors.extend(local.get("errors") or [])
     if errors:
@@ -8897,11 +8957,20 @@ def _run_worker_queue(
                 candidate_state["terminal_since_full"] += len(exited)
                 if (candidate_state["terminal_since_full"]
                         >= DEEPSEEK_EXIT_FULL_AUDIT_INTERVAL):
+                    full_audit_started = time.monotonic()
                     full_inspection = inspect_campaign(
                         out_dir,
                         inspection_manifest,
                         active_samples=set(running),
                         required_complete_samples=set(completed_samples),
+                    )
+                    record_slow_control_operation(
+                        out_dir, "periodic_full_campaign_audit",
+                        time.monotonic() - full_audit_started,
+                        terminal_worker_interval=(
+                            candidate_state["terminal_since_full"]),
+                        completed_sample_count=len(completed_samples),
+                        active_sample_count=len(running),
                     )
                     if full_inspection["errors"]:
                         raise RuntimeError(
@@ -9493,9 +9562,16 @@ def _launch_under_lease_impl(args, out_dir):
                 assignments, dispatch_log, running,
                 audited_stale=audited_stale, closed_stale=stale,
             )
+        preflight_started = time.monotonic()
         preflight = inspect_campaign(
             out_dir, inspection_manifest,
             active_samples=set(args.samples),
+        )
+        record_slow_control_operation(
+            out_dir, "campaign_preflight_full_audit",
+            time.monotonic() - preflight_started,
+            sample_count=len(args.samples),
+            campaign_role=args.campaign_role,
         )
         if preflight["errors"]:
             raise RuntimeError(
@@ -9583,10 +9659,17 @@ def _launch_under_lease_impl(args, out_dir):
         if (incomplete_samples or evaluator_incomplete_samples
                 or not_started_no_healthy_key_samples
                 or resume_pending_no_healthy_key_samples):
+            terminal_audit_started = time.monotonic()
             inspection = inspect_campaign(
                 out_dir, inspection_manifest,
                 required_complete_samples=completed_samples,
                 require_terminal_provenance=True)
+            record_slow_control_operation(
+                out_dir, "campaign_terminal_full_audit",
+                time.monotonic() - terminal_audit_started,
+                campaign_complete=False,
+                completed_sample_count=len(completed_samples),
+            )
             if inspection["errors"]:
                 raise RuntimeError("; ".join(inspection["errors"]))
             append_jsonl_locked(
@@ -9618,8 +9701,15 @@ def _launch_under_lease_impl(args, out_dir):
                 file=sys.stderr, flush=True,
             )
             return 2
+        terminal_audit_started = time.monotonic()
         inspection = inspect_campaign(
             out_dir, inspection_manifest, require_complete=True)
+        record_slow_control_operation(
+            out_dir, "campaign_terminal_full_audit",
+            time.monotonic() - terminal_audit_started,
+            campaign_complete=True,
+            completed_sample_count=len(completed_samples),
+        )
         if inspection["errors"]:
             raise RuntimeError("; ".join(inspection["errors"]))
         append_jsonl_locked(

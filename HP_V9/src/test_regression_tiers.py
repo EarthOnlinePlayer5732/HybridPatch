@@ -1,4 +1,4 @@
-"""Tests for the non-invasive HP_V8 regression tier selector."""
+"""Tests for the non-invasive HP_V9 regression tier selector."""
 
 import contextlib
 import io

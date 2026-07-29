@@ -40,6 +40,8 @@ from datetime import datetime
 
 import portalocker
 
+from control_telemetry import record_slow_control_operation
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -48,6 +50,8 @@ _FINGERPRINT_FILES = [
     "patch_schema.py", "splitters.py", "experiment_runner.py",
     "hybrid_schema.py", "hybrid_index.py", "hybrid_prompt.py",
     "hybrid_executor.py", "hybrid_gate.py", "model_openai.py", "run_meta.py",
+    "control_telemetry.py", "paired_campaign_dispatch.py",
+    "authorize_ledger_lock_recovery.py", "campaign_recovery_runtime.py",
     "../requirements.txt",
 ]
 
@@ -262,17 +266,31 @@ def append_jsonl_records_locked(path, records):
     if not lines:
         return
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with portalocker.Lock(
-        path,
-        mode="a",
-        timeout=60,
-        check_interval=0.05,
-        flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
-        encoding="utf-8",
-    ) as f:
-        f.write("".join(lines))
-        f.flush()
-        os.fsync(f.fileno())
+    started = time.monotonic()
+    acquired = None
+    try:
+        with portalocker.Lock(
+            path,
+            mode="a",
+            timeout=60,
+            check_interval=0.05,
+            flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+            encoding="utf-8",
+        ) as f:
+            acquired = time.monotonic()
+            f.write("".join(lines))
+            f.flush()
+            os.fsync(f.fileno())
+    finally:
+        finished = time.monotonic()
+        out_dir = os.path.dirname(os.path.abspath(path)) or "."
+        if acquired is not None:
+            record_slow_control_operation(
+                out_dir, "shared_jsonl_lock_wait", acquired - started,
+                ledger=os.path.basename(path), row_count=len(lines))
+        record_slow_control_operation(
+            out_dir, "shared_jsonl_append", finished - started,
+            ledger=os.path.basename(path), row_count=len(lines))
 
 
 def _canonical_record_sha256(record):
@@ -353,6 +371,51 @@ def read_campaign_stop_conditions(out_dir):
     return _read_campaign_stop_unlocked(out_dir)
 
 
+@contextmanager
+def _campaign_commit_ordering_lock(out_dir, *, exclusive):
+    """Order campaign stop publication against independent sample commits.
+
+    Relay commits hold a shared lock, so different sample files may commit in
+    parallel.  Stop publication holds the exclusive lock, waits for in-flight
+    commits to become durable, publishes the latch, and thereby blocks every
+    later commit at its in-lock stop check.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    lock_path = os.path.join(out_dir, ".campaign_commit_ordering.lock")
+    flags = portalocker.LOCK_EX if exclusive else portalocker.LOCK_SH
+    started = time.monotonic()
+    acquired = None
+    hold_started = None
+    try:
+        with portalocker.Lock(
+            lock_path,
+            mode="a+",
+            timeout=60,
+            check_interval=0.05,
+            flags=flags | portalocker.LOCK_NB,
+            encoding="utf-8",
+        ):
+            acquired = time.monotonic()
+            hold_started = acquired
+            yield lock_path
+    finally:
+        finished = time.monotonic()
+        if acquired is not None:
+            record_slow_control_operation(
+                out_dir,
+                "commit_ordering_lock_wait_exclusive"
+                if exclusive else "commit_ordering_lock_wait_shared",
+                acquired - started,
+            )
+        if hold_started is not None:
+            record_slow_control_operation(
+                out_dir,
+                "commit_ordering_lock_hold_exclusive"
+                if exclusive else "commit_ordering_lock_hold_shared",
+                finished - hold_started,
+            )
+
+
 def record_campaign_stop_condition(out_dir, condition, **details):
     """Durably set the first-writer-wins campaign stop latch."""
     if not isinstance(condition, str) or not condition:
@@ -376,12 +439,13 @@ def record_campaign_stop_condition(out_dir, condition, **details):
     record.update(details)
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "campaign_stop.json")
-    with _campaign_metadata_lock(out_dir):
-        existing = _read_campaign_stop_unlocked(out_dir)
-        if existing:
-            return existing[0]
-        write_json_atomic(path, record)
-        return record
+    with _campaign_commit_ordering_lock(out_dir, exclusive=True):
+        with _campaign_metadata_lock(out_dir):
+            existing = _read_campaign_stop_unlocked(out_dir)
+            if existing:
+                return existing[0]
+            write_json_atomic(path, record)
+            return record
 
 
 @contextmanager
@@ -407,7 +471,17 @@ def _serialize_campaign_stop_publication(function):
     return wrapped
 
 
+def _serialize_campaign_commit_stop_ordering(function):
+    @functools.wraps(function)
+    def wrapped(out_dir, *args, **kwargs):
+        with _campaign_commit_ordering_lock(
+                os.path.abspath(out_dir), exclusive=True):
+            return function(out_dir, *args, **kwargs)
+    return wrapped
+
+
 @_serialize_campaign_stop_publication
+@_serialize_campaign_commit_stop_ordering
 def record_emergency_campaign_stop_condition(
         out_dir, condition, **details):
     """Publish parent-loss evidence without the shared metadata lock."""
@@ -923,12 +997,14 @@ def append_relay_rows_and_checkpoint(
     if len(set(pending_keys)) != len(pending_keys):
         raise RuntimeError(f"refusing relay commit with duplicate pending keys: {pending_keys}")
 
-    # The campaign stop latch and relay commit share one ordering lock.  A
-    # stop that wins the lock prevents both result rows and checkpoint; a
-    # commit that wins is fully durable before the stop can be published.
-    # This closes the post-provider race between sibling workers.
+    # The campaign stop latch and relay commit share one ordering lock.  Relay
+    # commits use the shared side because each sample owns distinct result and
+    # checkpoint files; stop publication uses the exclusive side.  A stop that
+    # wins prevents both rows and checkpoint, while a commit that wins becomes
+    # fully durable before the stop can be published.
     guard = (
-        _campaign_metadata_lock(campaign_out_dir)
+        _campaign_commit_ordering_lock(
+            campaign_out_dir, exclusive=False)
         if campaign_out_dir else contextlib.nullcontext()
     )
     with guard:
@@ -7848,15 +7924,29 @@ def _campaign_metadata_lock(out_dir):
     # ``portalocker.Lock`` uses non-blocking attempts plus a bounded retry
     # interval, so genuine metadata writers serialize instead of surfacing a
     # local infrastructure error to the model-call recorder.
-    with portalocker.Lock(
-        lock_path,
-        mode="a+",
-        timeout=60,
-        check_interval=0.05,
-        flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
-        encoding="utf-8",
-    ):
-        yield os.path.join(out_dir, "run_metadata.jsonl")
+    started = time.monotonic()
+    acquired = None
+    hold_started = None
+    try:
+        with portalocker.Lock(
+            lock_path,
+            mode="a+",
+            timeout=60,
+            check_interval=0.05,
+            flags=portalocker.LOCK_EX | portalocker.LOCK_NB,
+            encoding="utf-8",
+        ):
+            acquired = time.monotonic()
+            hold_started = acquired
+            yield os.path.join(out_dir, "run_metadata.jsonl")
+    finally:
+        finished = time.monotonic()
+        if acquired is not None:
+            record_slow_control_operation(
+                out_dir, "metadata_lock_wait", acquired - started)
+        if hold_started is not None:
+            record_slow_control_operation(
+                out_dir, "metadata_lock_hold", finished - hold_started)
 
 
 def _existing_experiment_payload(out_dir):
@@ -9006,7 +9096,12 @@ def _read_run_metadata_snapshot_unlocked(out_dir, metadata_path):
     mode = _run_metadata_storage_mode_unlocked(out_dir, metadata_path)
     if os.path.isfile(events_path):
         events = _read_run_metadata_events_strict(events_path)
+        fold_started = time.monotonic()
         projection = _fold_run_metadata_events(events)
+        record_slow_control_operation(
+            out_dir, "metadata_full_fold",
+            time.monotonic() - fold_started,
+            event_count=len(events), projection_count=len(projection))
         recovery_receipts = _read_run_metadata_event_recovery_receipts(
             out_dir, events_path)
         _validate_run_metadata_projection_cache(

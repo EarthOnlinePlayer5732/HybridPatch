@@ -163,7 +163,9 @@ def preflight(samples, keys, out_dir, plans_from, skip_probe=False,
     # 1. domain evaluator import check (zero API; heavy deps surface here)
     types = {}
     for s in samples:
-        meta = json.load(open(os.path.join(SAMPLES_ROOT, s, "sample.json"), encoding="utf-8"))
+        with open(os.path.join(
+                SAMPLES_ROOT, s, "sample.json"), encoding="utf-8") as handle:
+            meta = json.load(handle)
         types.setdefault(meta["sample_type"], []).append(s)
     print(f"[preflight] {len(samples)} samples across {len(types)} domains")
     from domains import get_domain

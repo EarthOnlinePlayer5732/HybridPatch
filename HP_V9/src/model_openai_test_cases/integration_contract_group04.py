@@ -1,5 +1,8 @@
 """Mixin slice for test_model_openai.IntegrationContractGroup04Mixin."""
 
+import json
+import time
+
 from .support import *
 
 
@@ -454,6 +457,254 @@ class IntegrationContractGroup04Mixin:
                     "condition"],
                 "sibling_integrity_failure")
 
+    def test_independent_relay_commits_share_only_the_stop_ordering_lock(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            entered = set()
+            entered_lock = threading.Lock()
+            both_entered = threading.Event()
+            release = threading.Event()
+            errors = []
+            original_write = run_meta.write_json_atomic
+
+            def blocked_checkpoint_write(path, payload):
+                if path.endswith(".ckpt.json"):
+                    with entered_lock:
+                        entered.add(os.path.basename(path))
+                        if len(entered) == 2:
+                            both_entered.set()
+                    if not release.wait(5):
+                        raise RuntimeError(
+                            "unit-test concurrent commit barrier timed out")
+                return original_write(path, payload)
+
+            def commit(sample):
+                try:
+                    method_dir = os.path.join(out_dir, "hybridpatch")
+                    run_meta.append_relay_rows_and_checkpoint(
+                        os.path.join(method_dir, f"{sample}.jsonl"),
+                        os.path.join(method_dir, f"{sample}.ckpt.json"),
+                        [
+                            {"round_trip_num": 1,
+                             "round_trip_direction": "forward"},
+                            {"round_trip_num": 1,
+                             "round_trip_direction": "backward"},
+                        ],
+                        {"completed_round_trips": 1},
+                        campaign_out_dir=out_dir,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with mock.patch.object(
+                    run_meta, "write_json_atomic",
+                    side_effect=blocked_checkpoint_write):
+                workers = [
+                    threading.Thread(
+                        target=commit, args=(sample,), daemon=True)
+                    for sample in ("sample-a", "sample-b")
+                ]
+                for worker in workers:
+                    worker.start()
+                self.assertTrue(both_entered.wait(5))
+                release.set()
+                for worker in workers:
+                    worker.join(5)
+
+            self.assertEqual(errors, [])
+            self.assertTrue(all(not worker.is_alive() for worker in workers))
+            self.assertEqual(
+                entered,
+                {"sample-a.ckpt.json", "sample-b.ckpt.json"},
+            )
+            for sample in ("sample-a", "sample-b"):
+                self.assertTrue(os.path.isfile(os.path.join(
+                    out_dir, "hybridpatch", f"{sample}.ckpt.json")))
+
+    def test_relay_commit_does_not_wait_for_metadata_lock(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            result_path = os.path.join(
+                out_dir, "hybridpatch", "sample.jsonl")
+            checkpoint_path = os.path.join(
+                out_dir, "hybridpatch", "sample.ckpt.json")
+            errors = []
+
+            def commit_worker():
+                try:
+                    run_meta.append_relay_rows_and_checkpoint(
+                        result_path,
+                        checkpoint_path,
+                        [
+                            {"round_trip_num": 1,
+                             "round_trip_direction": "forward"},
+                            {"round_trip_num": 1,
+                             "round_trip_direction": "backward"},
+                        ],
+                        {"completed_round_trips": 1},
+                        campaign_out_dir=out_dir,
+                    )
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with run_meta._campaign_metadata_lock(out_dir):
+                worker = threading.Thread(
+                    target=commit_worker, daemon=True)
+                worker.start()
+                worker.join(5)
+                self.assertFalse(worker.is_alive())
+
+            self.assertEqual(errors, [])
+            self.assertEqual(
+                len(run_meta._read_jsonl_records_with_retry(result_path)), 2)
+            self.assertTrue(os.path.isfile(checkpoint_path))
+
+    def test_relay_commit_finishes_checkpoint_before_stop_is_published(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            result_path = os.path.join(
+                out_dir, "hybridpatch", "sample.jsonl")
+            checkpoint_path = os.path.join(
+                out_dir, "hybridpatch", "sample.ckpt.json")
+            checkpoint_entered = threading.Event()
+            release_checkpoint = threading.Event()
+            commit_errors = []
+            stop_errors = []
+            original_write = run_meta.write_json_atomic
+
+            def blocked_checkpoint_write(path, payload):
+                if path == checkpoint_path:
+                    checkpoint_entered.set()
+                    if not release_checkpoint.wait(5):
+                        raise RuntimeError(
+                            "unit-test checkpoint barrier timed out")
+                return original_write(path, payload)
+
+            def commit_worker():
+                try:
+                    run_meta.append_relay_rows_and_checkpoint(
+                        result_path,
+                        checkpoint_path,
+                        [
+                            {"round_trip_num": 1,
+                             "round_trip_direction": "forward"},
+                            {"round_trip_num": 1,
+                             "round_trip_direction": "backward"},
+                        ],
+                        {"completed_round_trips": 1},
+                        campaign_out_dir=out_dir,
+                    )
+                except BaseException as exc:
+                    commit_errors.append(exc)
+
+            def stop_worker():
+                try:
+                    run_meta.record_campaign_stop_condition(
+                        out_dir, "commit_first_test_stop")
+                except BaseException as exc:
+                    stop_errors.append(exc)
+
+            with mock.patch.object(
+                    run_meta, "write_json_atomic",
+                    side_effect=blocked_checkpoint_write):
+                committer = threading.Thread(
+                    target=commit_worker, daemon=True)
+                committer.start()
+                self.assertTrue(checkpoint_entered.wait(5))
+                stopper = threading.Thread(target=stop_worker, daemon=True)
+                stopper.start()
+                time.sleep(0.05)
+                self.assertTrue(stopper.is_alive())
+                self.assertFalse(os.path.exists(os.path.join(
+                    out_dir, "campaign_stop.json")))
+                release_checkpoint.set()
+                committer.join(5)
+                stopper.join(5)
+
+            self.assertFalse(committer.is_alive())
+            self.assertFalse(stopper.is_alive())
+            self.assertEqual(commit_errors, [])
+            self.assertEqual(stop_errors, [])
+            self.assertEqual(
+                len(run_meta._read_jsonl_records_with_retry(result_path)), 2)
+            with open(checkpoint_path, encoding="utf-8") as handle:
+                self.assertEqual(
+                    json.load(handle)["completed_round_trips"], 1)
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir)[0][
+                    "condition"],
+                "commit_first_test_stop",
+            )
+
+    def test_emergency_stop_wins_ordering_lock_with_zero_relay_commit(self):
+        with tempfile.TemporaryDirectory() as out_dir:
+            result_path = os.path.join(
+                out_dir, "hybridpatch", "sample.jsonl")
+            checkpoint_path = os.path.join(
+                out_dir, "hybridpatch", "sample.ckpt.json")
+            stop_has_ordering_lock = threading.Event()
+            release_stop = threading.Event()
+            stop_errors = []
+            commit_errors = []
+            original_link = run_meta.os.link
+
+            def blocked_stop_link(source, destination):
+                if "campaign_stop_emergency" in source:
+                    stop_has_ordering_lock.set()
+                    if not release_stop.wait(5):
+                        raise RuntimeError(
+                            "unit-test emergency stop barrier timed out")
+                return original_link(source, destination)
+
+            def stop_worker():
+                try:
+                    run_meta.record_emergency_campaign_stop_condition(
+                        out_dir, "dispatcher_process_lost")
+                except BaseException as exc:
+                    stop_errors.append(exc)
+
+            def commit_worker():
+                try:
+                    run_meta.append_relay_rows_and_checkpoint(
+                        result_path,
+                        checkpoint_path,
+                        [
+                            {"round_trip_num": 1,
+                             "round_trip_direction": "forward"},
+                            {"round_trip_num": 1,
+                             "round_trip_direction": "backward"},
+                        ],
+                        {"completed_round_trips": 1},
+                        campaign_out_dir=out_dir,
+                    )
+                except BaseException as exc:
+                    commit_errors.append(exc)
+
+            with mock.patch.object(
+                    run_meta.os, "link",
+                    side_effect=blocked_stop_link):
+                stopper = threading.Thread(target=stop_worker, daemon=True)
+                stopper.start()
+                self.assertTrue(stop_has_ordering_lock.wait(5))
+                committer = threading.Thread(
+                    target=commit_worker, daemon=True)
+                committer.start()
+                self.assertTrue(committer.is_alive())
+                release_stop.set()
+                stopper.join(5)
+                committer.join(5)
+
+            self.assertFalse(stopper.is_alive())
+            self.assertFalse(committer.is_alive())
+            self.assertEqual(stop_errors, [])
+            self.assertEqual(len(commit_errors), 1)
+            self.assertIsInstance(
+                commit_errors[0], run_meta.CampaignStoppedError)
+            self.assertFalse(os.path.exists(result_path))
+            self.assertFalse(os.path.exists(checkpoint_path))
+            self.assertEqual(
+                run_meta.read_campaign_stop_conditions(out_dir)[0][
+                    "condition"],
+                "dispatcher_process_lost",
+            )
+
     def test_dispatch_worker_barrier_closes_lease_metadata_pid_and_plan(self):
         with tempfile.TemporaryDirectory() as out_dir:
             plan_path = os.path.join(out_dir, "sample.task_plan.json")
@@ -630,8 +881,13 @@ class IntegrationContractGroup04Mixin:
                         lease, portalocker.LOCK_EX | portalocker.LOCK_NB)
                     leases.append(lease)
                 dispatch_log = os.path.join(out_dir, "dispatch_log.jsonl")
-                paired_dispatch._authorize_workers(
-                    out_dir, running, task_plans, dispatch_log, 1.0)
+                with mock.patch.object(
+                        paired_dispatch, "read_run_metadata_snapshot",
+                        wraps=paired_dispatch.read_run_metadata_snapshot,
+                ) as metadata_snapshot:
+                    paired_dispatch._authorize_workers(
+                        out_dir, running, task_plans, dispatch_log, 1.0)
+                self.assertEqual(metadata_snapshot.call_count, 1)
                 authorization_rows = run_meta._read_jsonl_records_with_retry(
                     dispatch_log)
                 self.assertEqual(

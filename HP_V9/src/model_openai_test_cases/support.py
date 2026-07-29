@@ -1,4 +1,4 @@
-"""Shared fixtures for the HP_V8 infrastructure regression suite."""
+"""Shared fixtures for the HP_V9 infrastructure regression suite."""
 
 import argparse
 import contextlib
@@ -40,6 +40,29 @@ import run_meta
 import utils_relay_plan
 
 from .fixture_builders import *
+
+
+@contextlib.contextmanager
+def synthetic_full234_scope():
+    """Provide a deterministic 234-sample tree without repository-local data."""
+    selection = json.loads(pathlib.Path(
+        paired_dispatch.REMAINING134_SELECTION_PATH
+    ).read_text(encoding="utf-8"))
+    selected = list(selection["selected_sample_ids"])
+    extras = [f"zz_ci_unselected_{index:03d}" for index in range(134)]
+    samples = sorted(selected + extras)
+    if len(samples) != paired_dispatch.FULL234_SAMPLE_COUNT:
+        raise AssertionError("synthetic full234 scope has the wrong size")
+    with tempfile.TemporaryDirectory() as root:
+        for sample in samples:
+            sample_dir = pathlib.Path(root, sample)
+            sample_dir.mkdir()
+            pathlib.Path(sample_dir, "sample.json").write_text(
+                json.dumps({"sample_type": "json"}),
+                encoding="utf-8",
+            )
+        with mock.patch.object(paired_dispatch, "SAMPLES_ROOT", root):
+            yield samples
 
 
 def _events(include_delta=True, include_stop=True, content=None):

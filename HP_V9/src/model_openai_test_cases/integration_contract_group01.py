@@ -323,6 +323,74 @@ class IntegrationContractGroup01Mixin:
         self.assertEqual(
             inspect.call_args.kwargs["terminal_audit_samples"],
             {"sample-exited"})
+        preloaded = inspect.call_args.kwargs["preloaded_ledgers"]
+        self.assertEqual(
+            set(preloaded),
+            set(paired_dispatch._DEEPSEEK_INCREMENTAL_LEDGER_FILES),
+        )
+        self.assertEqual(
+            preloaded["api_calls.jsonl"],
+            [{
+                "request_id": "request-from-active-worker",
+                "sample": "sample-active",
+            }],
+        )
+
+    def test_scoped_deepseek_inspector_consumes_preloaded_shared_ledgers(self):
+        sample = "sample-a"
+        manifest = self._incremental_exit_audit_manifest([sample])
+        manifest["config"].update({
+            "method_set": ["fullrewrite", "hybridpatch"],
+            "num_round_trips": 10,
+            "model": paired_dispatch.DEEPSEEK_MODEL,
+            "provider": "opencode_zen",
+            "openai_base_url": paired_dispatch.DEEPSEEK_BASE_URL,
+            "reasoning_effort": paired_dispatch.DEEPSEEK_REASONING_EFFORT,
+            "max_tokens": paired_dispatch.DEEPSEEK_MAX_TOKENS,
+            "transport_resume_policy": None,
+            "key_count": paired_dispatch.DEEPSEEK_FULL_KEY_COUNT,
+            "slots_per_key": paired_dispatch.DEEPSEEK_FULL_SLOTS_PER_KEY,
+            "max_worker_count": (
+                paired_dispatch.DEEPSEEK_FULL_KEY_COUNT
+                * paired_dispatch.DEEPSEEK_FULL_SLOTS_PER_KEY),
+        })
+        manifest["task_plans"] = {}
+        preloaded = {
+            name: []
+            for name in paired_dispatch._DEEPSEEK_INCREMENTAL_LEDGER_FILES
+        }
+
+        def shared_ledger_read_is_forbidden(path):
+            if os.path.basename(path) in preloaded:
+                raise AssertionError(
+                    f"scoped inspector re-read shared ledger {path}")
+            return []
+
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_read_jsonl",
+                    side_effect=shared_ledger_read_is_forbidden), \
+                mock.patch.object(
+                    paired_dispatch, "read_run_metadata_snapshot",
+                    side_effect=AssertionError(
+                        "scoped inspector re-folded metadata from disk")), \
+                mock.patch.object(
+                    paired_dispatch, "read_sample_outcomes",
+                    side_effect=AssertionError(
+                        "scoped inspector re-read outcomes from disk")), \
+                mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")):
+            inspection = paired_dispatch.inspect_campaign(
+                out_dir,
+                manifest,
+                require_terminal_provenance=True,
+                audit_samples={sample},
+                terminal_audit_samples=set(),
+                preloaded_ledgers=preloaded,
+            )
+
+        self.assertIsInstance(inspection["errors"], list)
 
     def test_transport_exhaustion_isolates_one_worker_and_sibling_completes(self):
         with tempfile.TemporaryDirectory() as out_dir:

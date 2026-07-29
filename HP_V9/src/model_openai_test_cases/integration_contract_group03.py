@@ -5,62 +5,65 @@ from .support import *
 
 class IntegrationContractGroup03Mixin:
     def test_remaining134_scope_excludes_planned100_and_uses_fourteen_keys(self):
-        all_samples, _full_scope = paired_dispatch._load_full234_scope()
-        samples, scope = paired_dispatch._load_remaining134_scope()
-        selection = json.loads(pathlib.Path(
-            paired_dispatch.REMAINING134_SELECTION_PATH
-        ).read_text(encoding="utf-8"))
-        excluded = set(selection["selected_sample_ids"])
-        self.assertEqual(len(all_samples), 234)
-        self.assertEqual(len(excluded), 100)
-        self.assertEqual(len(samples), 134)
-        self.assertFalse(excluded & set(samples))
-        self.assertEqual(excluded | set(samples), set(all_samples))
-        self.assertEqual(scope["sample_count"], 134)
-        self.assertEqual(
-            scope["exclusion_source"]["sha256"],
-            paired_dispatch.REMAINING134_SELECTION_SHA256)
+        with synthetic_full234_scope():
+            all_samples, _full_scope = paired_dispatch._load_full234_scope()
+            samples, scope = paired_dispatch._load_remaining134_scope()
+            selection = json.loads(pathlib.Path(
+                paired_dispatch.REMAINING134_SELECTION_PATH
+            ).read_text(encoding="utf-8"))
+            excluded = set(selection["selected_sample_ids"])
+            self.assertEqual(len(all_samples), 234)
+            self.assertEqual(len(excluded), 100)
+            self.assertEqual(len(samples), 134)
+            self.assertFalse(excluded & set(samples))
+            self.assertEqual(excluded | set(samples), set(all_samples))
+            self.assertEqual(scope["sample_count"], 134)
+            self.assertEqual(
+                scope["exclusion_source"]["sha256"],
+                paired_dispatch.REMAINING134_SELECTION_SHA256)
 
-        args = mock.Mock(
-            campaign_role="remaining134", smoke_dir=None, samples=None,
-            num_round_trips=10, seed=42, slots_per_key=4,
-        )
-        resolved = paired_dispatch._resolve_remaining134_scope(args)
-        self.assertEqual(resolved, scope)
-        self.assertEqual(args.samples, samples)
-        paired_dispatch._validate_campaign_grid(args)
+            args = mock.Mock(
+                campaign_role="remaining134", smoke_dir=None, samples=None,
+                num_round_trips=10, seed=42, slots_per_key=4,
+            )
+            resolved = paired_dispatch._resolve_remaining134_scope(args)
+            self.assertEqual(resolved, scope)
+            self.assertEqual(args.samples, samples)
+            paired_dispatch._validate_campaign_grid(args)
 
-        labels = [f"KEY_{index:02d}" for index in range(1, 15)]
-        assignments = paired_dispatch.build_key_assignments(
-            samples, labels, 4, allow_queue=True)
-        for item in assignments:
-            item["methods"] = list(paired_dispatch.REMAINING134_METHOD_PHASES)
-        with mock.patch.object(
-                paired_dispatch, "_git_identity",
-                return_value=("1" * 40, "clean")), mock.patch.object(
-                    paired_dispatch, "code_fingerprint",
-                    return_value={"unit": "test"}):
-            manifest = paired_dispatch.build_manifest(
-                "out", samples, assignments, {}, args)
-        self.assertEqual(manifest["remaining134_scope"], scope)
-        self.assertEqual(len(manifest["assignment_queues"]), 14)
-        self.assertEqual(
-            sorted(queue["worker_count"]
-                   for queue in manifest["assignment_queues"]),
-            [9] * 6 + [10] * 8,
-        )
-        self.assertTrue(all(
-            queue["hybridpatch_first"] == queue["worker_count"]
-            and queue["fullrewrite_first"] == 0
-            for queue in manifest["assignment_queues"]
-        ))
-        self.assertEqual(manifest["config"]["key_count"], 14)
-        self.assertEqual(manifest["config"]["max_worker_count"], 56)
-        self.assertEqual(manifest["config"]["queued_worker_count"], 78)
-        self.assertEqual(manifest["config"]["total_worker_invocations"], 268)
-        self.assertEqual(
-            manifest["config"]["method_phases"],
-            ["hybridpatch", "fullrewrite"])
+            labels = [f"KEY_{index:02d}" for index in range(1, 15)]
+            assignments = paired_dispatch.build_key_assignments(
+                samples, labels, 4, allow_queue=True)
+            for item in assignments:
+                item["methods"] = list(
+                    paired_dispatch.REMAINING134_METHOD_PHASES)
+            with mock.patch.object(
+                    paired_dispatch, "_git_identity",
+                    return_value=("1" * 40, "clean")), mock.patch.object(
+                        paired_dispatch, "code_fingerprint",
+                        return_value={"unit": "test"}):
+                manifest = paired_dispatch.build_manifest(
+                    "out", samples, assignments, {}, args)
+            self.assertEqual(manifest["remaining134_scope"], scope)
+            self.assertEqual(len(manifest["assignment_queues"]), 14)
+            self.assertEqual(
+                sorted(queue["worker_count"]
+                       for queue in manifest["assignment_queues"]),
+                [9] * 6 + [10] * 8,
+            )
+            self.assertTrue(all(
+                queue["hybridpatch_first"] == queue["worker_count"]
+                and queue["fullrewrite_first"] == 0
+                for queue in manifest["assignment_queues"]
+            ))
+            self.assertEqual(manifest["config"]["key_count"], 14)
+            self.assertEqual(manifest["config"]["max_worker_count"], 56)
+            self.assertEqual(manifest["config"]["queued_worker_count"], 78)
+            self.assertEqual(
+                manifest["config"]["total_worker_invocations"], 268)
+            self.assertEqual(
+                manifest["config"]["method_phases"],
+                ["hybridpatch", "fullrewrite"])
 
     def test_remaining134_runs_all_hp_before_any_fr_and_persists_barrier(self):
         samples = ["sample-a", "sample-b"]
@@ -488,13 +491,22 @@ class IntegrationContractGroup03Mixin:
     def test_preflight_require_plans_fails_on_missing_frozen_plan(self):
         with tempfile.TemporaryDirectory() as out_dir, \
                 tempfile.TemporaryDirectory() as plans_from, \
+                tempfile.TemporaryDirectory() as samples_root, \
                 mock.patch.object(
                     fr_baseline_dispatch.subprocess, "Popen") as popen:
-            passed = fr_baseline_dispatch.preflight(
-                ["treebank4"], [("KEY_01", "redacted")],
-                out_dir, plans_from, skip_probe=False,
-                require_plans=True,
+            sample_dir = pathlib.Path(samples_root, "treebank4")
+            sample_dir.mkdir()
+            pathlib.Path(sample_dir, "sample.json").write_text(
+                json.dumps({"sample_type": "treebank"}),
+                encoding="utf-8",
             )
+            with mock.patch.object(
+                    fr_baseline_dispatch, "SAMPLES_ROOT", samples_root):
+                passed = fr_baseline_dispatch.preflight(
+                    ["treebank4"], [("KEY_01", "redacted")],
+                    out_dir, plans_from, skip_probe=False,
+                    require_plans=True,
+                )
         self.assertFalse(passed)
         popen.assert_not_called()
 
