@@ -4,6 +4,326 @@ from .support import *
 
 
 class IntegrationContractGroup01Mixin:
+    @staticmethod
+    def _incremental_exit_audit_manifest(samples, *, revision=None,
+                                         metadata_storage=None):
+        return {
+            "schema": paired_dispatch.SCHEMA,
+            "run_git_commit": "1" * 40,
+            "config": {
+                "campaign_role": "deepseek_full234",
+                "samples": list(samples),
+                "transport": paired_dispatch.DEEPSEEK_TRANSPORT,
+                "transport_revision": (
+                    paired_dispatch.DEEPSEEK_TRANSPORT_REVISION
+                    if revision is None else revision
+                ),
+                "run_metadata_storage": (
+                    run_meta.RUN_METADATA_STORAGE_EVENT_V1
+                    if metadata_storage is None else metadata_storage
+                ),
+            },
+        }
+
+    def _exercise_worker_exit_audit_queue(
+            self, manifest, *, sample_count=1, slots_per_key=None,
+            delta_inspection=None, full_inspection=None,
+            full_interval=None, expected_error=None):
+        class FakeProcess:
+            returncode = None
+
+            def __init__(self, pid):
+                self.pid = pid
+
+            def poll(self):
+                self.returncode = 0
+                return self.returncode
+
+        samples = [f"sample-{index:03d}" for index in range(sample_count)]
+        assignments = [
+            {
+                "sample": sample,
+                "key_label": "KEY_01",
+                "methods": ["hybridpatch", "fullrewrite"],
+            }
+            for sample in samples
+        ]
+        launched = []
+
+        def fake_launch(_args, _out_dir, _manifest, _plans, _keys,
+                        batch, _authorizations, _dispatch_log, running):
+            for index, item in enumerate(batch, len(launched) + 1):
+                sample = item["sample"]
+                launched.append(sample)
+                running[sample] = {
+                    **item,
+                    "process": FakeProcess(1000 + index),
+                    "log": mock.Mock(),
+                    "worker_launch_id": f"worker-{sample}",
+                    "exit_recorded": False,
+                }
+            return [item["sample"] for item in batch]
+
+        def fake_exit(_out_dir, running, sample, _item, returncode,
+                      _dispatch_log):
+            self.assertEqual(returncode, 0)
+            del running[sample]
+            return "finished"
+
+        delta_inspection = dict(delta_inspection or {
+            "errors": [], "api_calls": sample_count,
+            "preservation_violations": 0,
+        })
+        full_inspection = dict(full_inspection or {
+            "errors": [], "api_calls": sample_count,
+            "preservation_violations": 0,
+        })
+
+        def fake_delta(_out_dir, _manifest, state, **_kwargs):
+            return dict(delta_inspection), dict(state)
+
+        args = mock.Mock(
+            campaign_role="full234", poll_interval=0,
+            progress_interval=9999,
+        )
+        args._deepseek_exit_audit_preflight_manifest_sha256 = (
+            paired_dispatch._canonical_record_sha256(manifest))
+        initial_state = {"terminal_since_full": 0}
+        interval_patch = (
+            mock.patch.object(
+                paired_dispatch, "DEEPSEEK_EXIT_FULL_AUDIT_INTERVAL",
+                full_interval)
+            if full_interval is not None else contextlib.nullcontext()
+        )
+        with tempfile.TemporaryDirectory() as out_dir, \
+                mock.patch.object(
+                    paired_dispatch, "_launch_worker_batch",
+                    side_effect=fake_launch), \
+                mock.patch.object(
+                    paired_dispatch, "_record_worker_exit",
+                    side_effect=fake_exit), \
+                mock.patch.object(
+                    paired_dispatch, "_initialize_deepseek_exit_audit_state",
+                    return_value=initial_state) as initialize, \
+                mock.patch.object(
+                    paired_dispatch, "_audit_deepseek_exit_delta",
+                    side_effect=fake_delta) as delta_audit, \
+                mock.patch.object(
+                    paired_dispatch, "inspect_campaign",
+                    return_value=full_inspection) as full_audit, \
+                mock.patch.object(
+                    paired_dispatch, "_publish_active_worker_set"), \
+                mock.patch.object(
+                    paired_dispatch, "_raise_if_operator_pause_requested"), \
+                mock.patch.object(paired_dispatch.time, "sleep"), \
+                interval_patch:
+            call = lambda: paired_dispatch._run_worker_queue(
+                args, out_dir, manifest, {}, {}, assignments, {},
+                os.path.join(out_dir, "dispatch_log.jsonl"), {},
+                set(), set(), set(), len(assignments),
+                slots_per_key or sample_count,
+            )
+            if expected_error is None:
+                call()
+            else:
+                with self.assertRaisesRegex(RuntimeError, expected_error):
+                    call()
+            dispatch_rows = run_meta._read_jsonl_records_with_retry(
+                os.path.join(out_dir, "dispatch_log.jsonl"))
+
+        return {
+            "launched": launched,
+            "initialize_calls": initialize.call_count,
+            "delta_calls": delta_audit.call_count,
+            "delta_call_args": list(delta_audit.call_args_list),
+            "full_calls": full_audit.call_count,
+            "full_call_args": list(full_audit.call_args_list),
+            "dispatch_rows": dispatch_rows,
+        }
+
+    def test_deepseek_exit_audit_cursor_accepts_append_and_rejects_drift(self):
+        empty_cursor = {
+            "byte_count": 0,
+            "row_count": 0,
+            "prefix_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = pathlib.Path(out_dir, "ledger.jsonl")
+            path.write_bytes(b'{"row":1}\n')
+            cursor, rows = paired_dispatch._advance_append_only_ledger_cursor(
+                str(path), empty_cursor)
+            self.assertEqual(rows, [{"row": 1}])
+            path.write_bytes(path.read_bytes() + b'{"row":2}\n')
+            advanced, rows = paired_dispatch._advance_append_only_ledger_cursor(
+                str(path), cursor)
+            self.assertEqual(rows, [{"row": 2}])
+            self.assertEqual(advanced["row_count"], 2)
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = pathlib.Path(out_dir, "ledger.jsonl")
+            path.write_bytes(b'{"row":1}\n')
+            cursor, _ = paired_dispatch._advance_append_only_ledger_cursor(
+                str(path), empty_cursor)
+            path.write_bytes(b"")
+            with self.assertRaisesRegex(RuntimeError, "was truncated"):
+                paired_dispatch._advance_append_only_ledger_cursor(
+                    str(path), cursor)
+
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = pathlib.Path(out_dir, "ledger.jsonl")
+            path.write_bytes(b'{"row":1}\n')
+            cursor, _ = paired_dispatch._advance_append_only_ledger_cursor(
+                str(path), empty_cursor)
+            path.write_bytes(b'{"row":2}\n')
+            with self.assertRaisesRegex(RuntimeError, "prefix drifted"):
+                paired_dispatch._advance_append_only_ledger_cursor(
+                    str(path), cursor)
+
+    def test_deepseek_exit_audit_cursor_waits_for_locked_append(self):
+        empty_cursor = {
+            "byte_count": 0,
+            "row_count": 0,
+            "prefix_sha256": hashlib.sha256(b"").hexdigest(),
+        }
+        with tempfile.TemporaryDirectory() as out_dir:
+            path = pathlib.Path(out_dir, "ledger.jsonl")
+            observed = []
+            failures = []
+            with open(path, "a+b") as writer:
+                portalocker.lock(writer, portalocker.LOCK_EX)
+                writer.write(b'{"row":')
+                writer.flush()
+
+                def read_cursor():
+                    try:
+                        observed.append(
+                            paired_dispatch._advance_append_only_ledger_cursor(
+                                str(path), empty_cursor))
+                    except BaseException as exc:
+                        failures.append(exc)
+
+                reader = threading.Thread(target=read_cursor, daemon=True)
+                reader.start()
+                threading.Event().wait(0.05)
+                self.assertTrue(reader.is_alive())
+                writer.write(b'1}\n')
+                writer.flush()
+                os.fsync(writer.fileno())
+                portalocker.unlock(writer)
+                reader.join(5)
+
+            self.assertFalse(reader.is_alive())
+            self.assertEqual(failures, [])
+            self.assertEqual(observed[0][1], [{"row": 1}])
+
+    def test_deepseek_exit_audit_fast_path_skips_full_scan(self):
+        manifest = self._incremental_exit_audit_manifest(["sample-000"])
+        result = self._exercise_worker_exit_audit_queue(manifest)
+        self.assertEqual(result["launched"], ["sample-000"])
+        self.assertEqual(result["initialize_calls"], 1)
+        self.assertEqual(result["delta_calls"], 1)
+        self.assertEqual(result["full_calls"], 0)
+        self.assertEqual(
+            result["delta_call_args"][0].kwargs["exited_samples"],
+            {"sample-000"})
+
+    def test_deepseek_exit_audit_twentieth_terminal_triggers_full_scan(self):
+        samples = [f"sample-{index:03d}" for index in range(20)]
+        manifest = self._incremental_exit_audit_manifest(samples)
+        result = self._exercise_worker_exit_audit_queue(
+            manifest, sample_count=20, slots_per_key=20)
+        self.assertEqual(result["initialize_calls"], 1)
+        self.assertEqual(result["delta_calls"], 1)
+        self.assertEqual(result["full_calls"], 1)
+        self.assertEqual(
+            result["full_call_args"][0].kwargs["required_complete_samples"],
+            set(samples))
+
+    def test_deepseek_exit_audit_legacy_transport_falls_back_to_full_scan(self):
+        manifest = self._incremental_exit_audit_manifest(
+            ["sample-000"], revision="opencode_openai_compatible/5")
+        result = self._exercise_worker_exit_audit_queue(manifest)
+        self.assertEqual(result["initialize_calls"], 0)
+        self.assertEqual(result["delta_calls"], 0)
+        self.assertEqual(result["full_calls"], 1)
+        self.assertEqual(
+            result["full_call_args"][0].kwargs[
+                "required_complete_samples"],
+            {"sample-000"})
+
+    def test_deepseek_exit_local_audit_failure_does_not_release_or_refill(self):
+        manifest = self._incremental_exit_audit_manifest(
+            ["sample-000", "sample-001"])
+        result = self._exercise_worker_exit_audit_queue(
+            manifest, sample_count=2, slots_per_key=1,
+            delta_inspection={
+                "errors": ["local exit audit failed"], "api_calls": 1,
+                "preservation_violations": 0,
+            },
+            expected_error="local exit audit failed",
+        )
+        self.assertEqual(result["launched"], ["sample-000"])
+        self.assertEqual(result["delta_calls"], 1)
+        self.assertEqual(result["full_calls"], 0)
+        self.assertFalse(any(
+            row.get("event") == "queue_slots_released"
+            for row in result["dispatch_rows"]))
+
+    def test_deepseek_due_full_audit_failure_does_not_release_or_refill(self):
+        manifest = self._incremental_exit_audit_manifest(
+            ["sample-000", "sample-001"])
+        result = self._exercise_worker_exit_audit_queue(
+            manifest, sample_count=2, slots_per_key=1, full_interval=1,
+            full_inspection={
+                "errors": ["periodic full audit failed"], "api_calls": 1,
+                "preservation_violations": 0,
+            },
+            expected_error="periodic full audit failed",
+        )
+        self.assertEqual(result["launched"], ["sample-000"])
+        self.assertEqual(result["delta_calls"], 1)
+        self.assertEqual(result["full_calls"], 1)
+        self.assertFalse(any(
+            row.get("event") == "queue_slots_released"
+            for row in result["dispatch_rows"]))
+
+    def test_deepseek_exit_delta_audits_new_api_sample_from_active_worker(self):
+        manifest = self._incremental_exit_audit_manifest(
+            ["sample-exited", "sample-active"])
+        with tempfile.TemporaryDirectory() as out_dir:
+            state = paired_dispatch._initialize_deepseek_exit_audit_state(
+                out_dir)
+            run_meta.append_jsonl_locked(
+                os.path.join(out_dir, "api_calls.jsonl"), {
+                    "request_id": "request-from-active-worker",
+                    "sample": "sample-active",
+                })
+            with mock.patch.object(
+                    paired_dispatch, "_inspect_deepseek_key_failover_audit",
+                    return_value=[]), mock.patch.object(
+                        paired_dispatch, "inspect_campaign",
+                        return_value={
+                            "errors": [], "api_calls": 1,
+                            "preservation_violations": 0,
+                        }) as inspect:
+                inspection, next_state = (
+                    paired_dispatch._audit_deepseek_exit_delta(
+                        out_dir, manifest, state,
+                        exited_samples={"sample-exited"},
+                        active_samples={"sample-active"},
+                        required_complete_samples={"sample-exited"},
+                    ))
+
+        self.assertEqual(inspection["errors"], [])
+        self.assertEqual(inspection["api_calls"], 1)
+        self.assertIsNotNone(next_state)
+        self.assertEqual(
+            inspect.call_args.kwargs["audit_samples"],
+            {"sample-exited", "sample-active"})
+        self.assertEqual(
+            inspect.call_args.kwargs["terminal_audit_samples"],
+            {"sample-exited"})
+
     def test_transport_exhaustion_isolates_one_worker_and_sibling_completes(self):
         with tempfile.TemporaryDirectory() as out_dir:
             self._write_infrastructure_fixture(out_dir)

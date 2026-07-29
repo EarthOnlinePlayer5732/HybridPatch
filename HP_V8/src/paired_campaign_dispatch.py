@@ -170,6 +170,20 @@ PENDING_NEVER_STARTED = "never_started"
 PENDING_INFRASTRUCTURE_INCOMPLETE = "infrastructure_incomplete"
 PENDING_INTERRUPTED = "interrupted"
 OPERATOR_PAUSE_CONDITION = "operator_directed_dispatcher_pause"
+DEEPSEEK_EXIT_FULL_AUDIT_INTERVAL = 20
+_DEEPSEEK_INCREMENTAL_LEDGER_FILES = (
+    # Read terminal-publication ledgers newest-to-oldest.  Workers publish
+    # API -> outcome -> metadata, so this order can observe an older causal
+    # prefix but cannot pair a newer outcome/metadata event with a missing API
+    # row while other workers are still active.
+    "run_metadata_events.jsonl",
+    "sample_outcomes.jsonl",
+    "api_calls.jsonl",
+    "api_attempt_ledger.jsonl",
+    # Dispatcher-only routing evidence is read last; the current exit and
+    # authorization rows were already durably appended by this process.
+    "dispatch_log.jsonl",
+)
 _OPERATOR_PAUSE_EXIT_CODES = {
     "SIGINT": 130,
     "SIGTERM": 143,
@@ -5324,22 +5338,38 @@ def _inspect_deepseek_key_failover_audit(
 def _inspect_deepseek_campaign(
         out_dir, manifest, *, require_complete=False,
         require_terminal_provenance=None, active_samples=None,
-        required_complete_samples=None):
+        required_complete_samples=None, audit_samples=None,
+        terminal_audit_samples=None):
     """Audit a DeepSeek prefix, including frozen /3-/4-/5 and current /6."""
     if require_terminal_provenance is None:
         require_terminal_provenance = require_complete
     config = manifest.get("config") or {}
     expected_samples = set(config.get("samples") or [])
+    scoped_audit = audit_samples is not None
+    sample_scope = (
+        set(audit_samples or []) if scoped_audit else set(expected_samples)
+    )
     expected_methods = set(config.get("method_set") or [])
     target_rt = config.get("num_round_trips")
-    active_samples = set(active_samples or [])
+    active_samples = set(active_samples or []) & sample_scope
     completion_samples = (
         expected_samples if require_complete
         else set(required_complete_samples or [])
     )
+    terminal_scope = (
+        sample_scope
+        if terminal_audit_samples is None
+        else set(terminal_audit_samples or [])
+    )
     errors = []
     preservation = 0
     preservation_not_applicable = 0
+    if (not sample_scope or not sample_scope <= expected_samples):
+        errors.append("DeepSeek audit sample scope is invalid")
+    if not completion_samples <= sample_scope:
+        errors.append("DeepSeek completion scope exceeds audit sample scope")
+    if not terminal_scope <= sample_scope:
+        errors.append("DeepSeek terminal scope exceeds audit sample scope")
 
     runtime_identity = (
         config.get("transport"), config.get("transport_revision")
@@ -5444,6 +5474,8 @@ def _inspect_deepseek_campaign(
     if commit != expected_commit or tree_state != "clean":
         errors.append("Git commit/tree state changed during campaign")
     for sample, plan in (manifest.get("task_plans") or {}).items():
+        if sample not in sample_scope:
+            continue
         plan_path = os.path.join(out_dir, plan.get("path") or "")
         if not os.path.isfile(plan_path):
             errors.append(f"task plan missing: {sample}")
@@ -5471,15 +5503,40 @@ def _inspect_deepseek_campaign(
         else:
             target[worker_id] = row
 
+    if scoped_audit:
+        scoped_worker_ids = {
+            worker_id for worker_id, launch in launches.items()
+            if launch.get("sample") in sample_scope
+        }
+        launches = {
+            worker_id: row for worker_id, row in launches.items()
+            if worker_id in scoped_worker_ids
+        }
+        authorizations = {
+            worker_id: row for worker_id, row in authorizations.items()
+            if worker_id in scoped_worker_ids
+        }
+        exits = {
+            worker_id: row for worker_id, row in exits.items()
+            if worker_id in scoped_worker_ids
+        }
+
     metadata = read_run_metadata_snapshot(out_dir)
+    audited_metadata = []
     metadata_by_worker = {}
     latest_by_sample = {}
     for record in metadata:
         worker_id = record.get("worker_launch_id")
+        record_samples = record.get("samples") or []
+        if (scoped_audit
+                and worker_id not in launches
+                and not (set(record_samples) & sample_scope)):
+            continue
+        audited_metadata.append(record)
         if isinstance(worker_id, str) and worker_id:
             metadata_by_worker.setdefault(worker_id, []).append(record)
-        for sample in record.get("samples") or []:
-            if sample in expected_samples:
+        for sample in record_samples:
+            if sample in sample_scope:
                 latest_by_sample[sample] = record
         if record.get("model") != DEEPSEEK_MODEL:
             errors.append("run_metadata model mismatch")
@@ -5498,7 +5555,6 @@ def _inspect_deepseek_campaign(
         if (campaign_config.get("reasoning_effort")
                 != DEEPSEEK_REASONING_EFFORT):
             errors.append("run_metadata campaign reasoning effort mismatch")
-        record_samples = record.get("samples") or []
         if (record.get("status") == "failed"
                 and worker_id not in recovered_worker_ids):
             errors.append(
@@ -5525,22 +5581,41 @@ def _inspect_deepseek_campaign(
     # always observes a causal prefix rather than a newer outcome paired with
     # an older API snapshot.
     outcome_snapshot = read_sample_outcomes(out_dir)
+    if scoped_audit:
+        outcome_snapshot = [
+            row for row in outcome_snapshot
+            if row.get("sample") in sample_scope
+        ]
     committed_rows, api_rows = _read_relay_publication_snapshot(
-        out_dir, config.get("samples") or [],
+        out_dir,
+        [
+            sample for sample in config.get("samples") or []
+            if sample in sample_scope
+        ],
         config.get("method_set") or [],
     )
-    errors.extend(_inspect_deepseek_key_failover_audit(
-        manifest, dispatch_rows, api_rows, outcome_snapshot, launches))
+    if scoped_audit:
+        api_rows = [
+            row for row in api_rows if row.get("sample") in sample_scope
+        ]
+    else:
+        errors.extend(_inspect_deepseek_key_failover_audit(
+            manifest, dispatch_rows, api_rows, outcome_snapshot, launches))
     committed_call_ids = {
         call_id
         for rows in committed_rows.values()
         for row in rows
         for call_id in (row.get("api_call_ids") or [])
     }
+    infrastructure_config = dict(config)
+    infrastructure_config["samples"] = [
+        sample for sample in config.get("samples") or []
+        if sample in sample_scope
+    ]
     infrastructure_request_ids = (
         _verified_deepseek_infrastructure_request_ids(
-            out_dir, config,
-            metadata_snapshot=metadata,
+            out_dir, infrastructure_config,
+            metadata_snapshot=audited_metadata,
             api_snapshot=api_rows,
             committed_call_ids=committed_call_ids,
             outcome_snapshot=outcome_snapshot,
@@ -5727,6 +5802,8 @@ def _inspect_deepseek_campaign(
             errors.append(f"API worker provenance mismatch at row {index}")
 
     for sample in config.get("samples") or []:
+        if sample not in sample_scope:
+            continue
         for method in config.get("method_set") or []:
             rows = committed_rows[(sample, method)]
             seen = set()
@@ -5840,9 +5917,14 @@ def _inspect_deepseek_campaign(
             errors.append(
                 "not all required latest run_metadata invocations are finished")
     if require_terminal_provenance:
-        if any(record.get("finished_at") is None for record in metadata):
+        if any(
+                record.get("finished_at") is None
+                for record in audited_metadata
+                if set(record.get("samples") or []) & terminal_scope):
             errors.append("campaign finished_at is incomplete")
         for worker_id, launch in launches.items():
+            if launch.get("sample") not in terminal_scope:
+                continue
             exit_row = exits.get(worker_id)
             worker_metadata = metadata_by_worker.get(worker_id) or []
             terminal_provenance = _worker_terminal_provenance(
@@ -5897,7 +5979,8 @@ def _inspect_deepseek_campaign(
 
 def inspect_campaign(out_dir, manifest, *, require_complete=False,
                      require_terminal_provenance=None, active_samples=None,
-                     required_complete_samples=None, method_phase=None):
+                     required_complete_samples=None, method_phase=None,
+                     audit_samples=None, terminal_audit_samples=None):
     if require_terminal_provenance is None:
         require_terminal_provenance = require_complete
     config = manifest["config"]
@@ -5924,6 +6007,8 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
             require_terminal_provenance=require_terminal_provenance,
             active_samples=active_samples,
             required_complete_samples=required_complete_samples,
+            audit_samples=audit_samples,
+            terminal_audit_samples=terminal_audit_samples,
         )
         if quiescent_metadata_error is not None:
             result["errors"] = list(result.get("errors") or []) + [
@@ -5934,6 +6019,9 @@ def inspect_campaign(out_dir, manifest, *, require_complete=False,
                 "snapshot mode is invalid: " + snapshot_mode_error
             ]
         return result
+    if audit_samples is not None:
+        raise RuntimeError(
+            "sample-scoped campaign inspection is only supported for DeepSeek")
     declared_phases = config.get("method_phases")
     if method_phase is None and declared_phases is not None:
         if declared_phases != list(REMAINING134_METHOD_PHASES):
@@ -8120,6 +8208,204 @@ def _queue_has_pending_work(restored):
         or any(restored["pending_by_key"].values()))
 
 
+def _supports_incremental_exit_audit(manifest):
+    config = manifest.get("config") if isinstance(manifest, dict) else None
+    return (
+        isinstance(manifest, dict)
+        and manifest.get("schema") == SCHEMA
+        and isinstance(config, dict)
+        and config.get("campaign_role") == "deepseek_full234"
+        and config.get("transport") == DEEPSEEK_TRANSPORT
+        and config.get("transport_revision") == DEEPSEEK_TRANSPORT_REVISION
+        and config.get("run_metadata_storage")
+        == RUN_METADATA_STORAGE_EVENT_V1
+    )
+
+
+def _read_complete_jsonl_bytes(path):
+    deadline = time.monotonic() + 60.0
+    while True:
+        try:
+            with open(path, "rb") as handle:
+                # Match _read_jsonl(): a writer holds LOCK_EX across the whole
+                # append, flush and fsync.  Reading only after LOCK_SH is
+                # granted distinguishes a genuinely torn tail from an ordinary
+                # in-progress append or Windows sharing violation.
+                portalocker.lock(handle, portalocker.LOCK_SH)
+                try:
+                    payload = handle.read()
+                finally:
+                    portalocker.unlock(handle)
+        except FileNotFoundError:
+            return b""
+        except (OSError, portalocker.exceptions.LockException):
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
+            continue
+        if payload and not payload.endswith(b"\n"):
+            raise RuntimeError(
+                f"append-only JSONL has an incomplete tail: {path}")
+        return payload
+
+
+def _decode_jsonl_suffix(payload, *, path, first_row_number):
+    rows = []
+    if not payload:
+        return rows
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError(
+            f"append-only JSONL is not UTF-8: {path}") from exc
+    for offset, line in enumerate(text.splitlines(), first_row_number):
+        if not line.strip():
+            raise RuntimeError(
+                f"append-only JSONL has a blank row {offset}: {path}")
+        try:
+            row = json.loads(line)
+        except ValueError as exc:
+            raise RuntimeError(
+                f"append-only JSONL row {offset} is invalid: {path}") from exc
+        if not isinstance(row, dict):
+            raise RuntimeError(
+                f"append-only JSONL row {offset} is not an object: {path}")
+        rows.append(row)
+    return rows
+
+
+def _advance_append_only_ledger_cursor(path, cursor):
+    prior = dict(cursor or {})
+    prior_bytes = prior.get("byte_count", 0)
+    prior_rows = prior.get("row_count", 0)
+    prior_digest = prior.get(
+        "prefix_sha256", hashlib.sha256(b"").hexdigest())
+    if (not _is_exact_int(prior_bytes) or prior_bytes < 0
+            or not _is_exact_int(prior_rows) or prior_rows < 0
+            or not isinstance(prior_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", prior_digest) is None):
+        raise RuntimeError(f"append-only ledger cursor is invalid: {path}")
+    payload = _read_complete_jsonl_bytes(path)
+    if len(payload) < prior_bytes:
+        raise RuntimeError(f"append-only ledger was truncated: {path}")
+    if hashlib.sha256(payload[:prior_bytes]).hexdigest() != prior_digest:
+        raise RuntimeError(f"append-only ledger prefix drifted: {path}")
+    rows = _decode_jsonl_suffix(
+        payload[prior_bytes:], path=path,
+        first_row_number=prior_rows + 1)
+    return {
+        "byte_count": len(payload),
+        "row_count": prior_rows + len(rows),
+        "prefix_sha256": hashlib.sha256(payload).hexdigest(),
+    }, rows
+
+
+def _initialize_deepseek_exit_audit_state(out_dir):
+    cursors = {}
+    rows_by_name = {}
+    empty_cursor = {
+        "byte_count": 0,
+        "row_count": 0,
+        "prefix_sha256": hashlib.sha256(b"").hexdigest(),
+    }
+    for name in _DEEPSEEK_INCREMENTAL_LEDGER_FILES:
+        cursor, rows = _advance_append_only_ledger_cursor(
+            os.path.join(out_dir, name), empty_cursor)
+        cursors[name] = cursor
+        rows_by_name[name] = rows
+    request_ids = set()
+    for number, row in enumerate(rows_by_name["api_calls.jsonl"], 1):
+        request_id = row.get("request_id")
+        if (not isinstance(request_id, str) or not request_id
+                or request_id in request_ids):
+            raise RuntimeError(
+                f"duplicate/invalid API request id at row {number}")
+        request_ids.add(request_id)
+    return {
+        "cursors": cursors,
+        "rows": rows_by_name,
+        "request_ids": request_ids,
+        "terminal_since_full": 0,
+    }
+
+
+def _audit_deepseek_exit_delta(
+        out_dir, manifest, state, *, exited_samples, active_samples,
+        required_complete_samples):
+    next_cursors = {}
+    delta_rows = {}
+    for name in _DEEPSEEK_INCREMENTAL_LEDGER_FILES:
+        cursor, rows = _advance_append_only_ledger_cursor(
+            os.path.join(out_dir, name), state["cursors"][name])
+        next_cursors[name] = cursor
+        delta_rows[name] = rows
+    next_rows = {
+        name: list(state["rows"][name]) + list(delta_rows[name])
+        for name in _DEEPSEEK_INCREMENTAL_LEDGER_FILES
+    }
+    next_request_ids = set(state["request_ids"])
+    errors = []
+    expected_samples = set((manifest.get("config") or {}).get("samples") or [])
+    new_api_samples = set()
+    first_api_number = (
+        state["cursors"]["api_calls.jsonl"]["row_count"] + 1)
+    for number, row in enumerate(
+            delta_rows["api_calls.jsonl"], first_api_number):
+        request_id = row.get("request_id")
+        sample = row.get("sample")
+        if (not isinstance(request_id, str) or not request_id
+                or request_id in next_request_ids):
+            errors.append(
+                f"duplicate/invalid API request id at row {number}")
+        else:
+            next_request_ids.add(request_id)
+        if sample not in expected_samples:
+            errors.append(f"unmappable API ledger row {number}")
+        else:
+            new_api_samples.add(sample)
+
+    dispatch_rows = next_rows["dispatch_log.jsonl"]
+    launches = {
+        row.get("worker_launch_id"): row
+        for row in dispatch_rows
+        if row.get("event") == "launch"
+        and isinstance(row.get("worker_launch_id"), str)
+    }
+    errors.extend(_inspect_deepseek_key_failover_audit(
+        manifest,
+        dispatch_rows,
+        next_rows["api_calls.jsonl"],
+        next_rows["sample_outcomes.jsonl"],
+        launches,
+    ))
+    audit_samples = set(exited_samples) | new_api_samples
+    local = inspect_campaign(
+        out_dir,
+        manifest,
+        require_terminal_provenance=True,
+        active_samples=set(active_samples),
+        required_complete_samples=set(required_complete_samples),
+        audit_samples=audit_samples,
+        terminal_audit_samples=set(exited_samples),
+    )
+    errors.extend(local.get("errors") or [])
+    if errors:
+        return {
+            "errors": sorted(set(errors)),
+            "api_calls": next_cursors["api_calls.jsonl"]["row_count"],
+            "preservation_violations": local.get(
+                "preservation_violations", 0),
+        }, None
+    next_state = {
+        "cursors": next_cursors,
+        "rows": next_rows,
+        "request_ids": next_request_ids,
+        "terminal_since_full": state["terminal_since_full"],
+    }
+    local["api_calls"] = next_cursors["api_calls.jsonl"]["row_count"]
+    return local, next_state
+
+
 def _run_worker_queue(
         args, out_dir, inspection_manifest, task_plans, keys, assignments,
         resume_authorizations, dispatch_log, running,
@@ -8207,6 +8493,17 @@ def _run_worker_queue(
     last_report = 0.0
     last_inspection = {
         "errors": [], "api_calls": 0, "preservation_violations": 0}
+    incremental_exit_audit = (
+        method_phase is None
+        and _supports_incremental_exit_audit(inspection_manifest)
+        and getattr(
+            args, "_deepseek_exit_audit_preflight_manifest_sha256", None)
+        == _canonical_record_sha256(inspection_manifest)
+    )
+    exit_audit_state = (
+        _initialize_deepseek_exit_audit_state(out_dir)
+        if incremental_exit_audit else None
+    )
     while running or any(pending_by_key.values()) or handoff_fifo:
         _raise_if_operator_pause_requested(args, "worker_queue_refill")
         # Recheck the durable stop latch at the refill boundary.  The check
@@ -8395,16 +8692,44 @@ def _run_worker_queue(
                 + ", ".join(conditions)
             )
         if exited:
-            # Keep the existing fail-closed full inspection until a dedicated
-            # worker-local/delta audit verifies every released slot.
             _raise_if_operator_pause_requested(
                 args, "before_worker_exit_campaign_audit")
-            last_inspection = inspect_campaign(
-                out_dir, inspection_manifest,
-                active_samples=set(running),
-                required_complete_samples=completed_in_poll,
-                method_phase=method_phase,
-            )
+            if incremental_exit_audit:
+                last_inspection, candidate_state = (
+                    _audit_deepseek_exit_delta(
+                        out_dir,
+                        inspection_manifest,
+                        exit_audit_state,
+                        exited_samples={item["sample"] for item in exited},
+                        active_samples=set(running),
+                        required_complete_samples=completed_in_poll,
+                    )
+                )
+                if last_inspection["errors"]:
+                    raise RuntimeError(
+                        "; ".join(last_inspection["errors"]))
+                candidate_state["terminal_since_full"] += len(exited)
+                if (candidate_state["terminal_since_full"]
+                        >= DEEPSEEK_EXIT_FULL_AUDIT_INTERVAL):
+                    full_inspection = inspect_campaign(
+                        out_dir,
+                        inspection_manifest,
+                        active_samples=set(running),
+                        required_complete_samples=set(completed_samples),
+                    )
+                    if full_inspection["errors"]:
+                        raise RuntimeError(
+                            "; ".join(full_inspection["errors"]))
+                    candidate_state["terminal_since_full"] = 0
+                    last_inspection = full_inspection
+                exit_audit_state = candidate_state
+            else:
+                last_inspection = inspect_campaign(
+                    out_dir, inspection_manifest,
+                    active_samples=set(running),
+                    required_complete_samples=completed_in_poll,
+                    method_phase=method_phase,
+                )
             _raise_if_operator_pause_requested(
                 args, "after_worker_exit_campaign_audit")
             if last_inspection["errors"]:
@@ -8991,6 +9316,13 @@ def _launch_under_lease_impl(args, out_dir):
                 "campaign preflight failed before worker launch: "
                 + "; ".join(preflight["errors"])
             )
+        # The append-only exit-audit cursor is only a safe optimization after
+        # this exact manifest has passed a full campaign preflight.  Bind that
+        # fact in memory so direct queue callers and legacy resumes continue to
+        # use the conservative full inspector.
+        args._deepseek_exit_audit_preflight_manifest_sha256 = (
+            _canonical_record_sha256(inspection_manifest)
+        )
         launch_assignments, resume_authorizations = (
             _select_invocation_assignments(
                 out_dir, assignments, resume=args.resume,
