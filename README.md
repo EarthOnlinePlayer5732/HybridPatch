@@ -50,7 +50,7 @@ New HP_V9 experiments use one entry point. The same command creates a fresh camp
 ```bash
 export PYTHONUTF8=1
 cd ./HP_V9
-python -u -B ./src/run_campaign.py --all --methods hybridpatch fullrewrite --round-trips 10 --keys-file ../.env.frkeys --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_YYYYMMDD_SLUG
+python -u -B ./src/run_campaign.py --all --methods hybridpatch fullrewrite --round-trips 10 --keys-file <KEY_FILE> --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_YYYYMMDD_SLUG
 python -B ./src/verify_campaign.py --dir ./exp_YYYYMMDD_SLUG --full
 ```
 

@@ -113,7 +113,7 @@ python -B ./src/test_model_openai.py
 
 # 调 LLM（产生费用）——HP_V9 新实验唯一入口
 cd ../HP_V9
-python -u -B ./src/run_campaign.py --samples malware6 latex2 --methods hybridpatch fullrewrite --round-trips 10 --keys-file ../.env.frkeys --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_SLUG
+python -u -B ./src/run_campaign.py --samples malware6 latex2 --methods hybridpatch fullrewrite --round-trips 10 --keys-file <KEY_FILE> --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_SLUG
 
 # 仅限用户明确要求的全新未冻结实验；冻结归档不得重复运行结果复核
 python -B ./src/verify_campaign.py --dir ./exp_SLUG --full

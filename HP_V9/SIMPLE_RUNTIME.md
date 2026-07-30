@@ -15,13 +15,13 @@ gate、evaluator、row schema、seeded relay 和模型请求参数没有复制�
 指定样本：
 
 ```bash
-PYTHONUTF8=1 python -u -B ./src/run_campaign.py --samples accounting1 json2 treebank4 --methods hybridpatch fullrewrite --round-trips 10 --keys-file ../.env.frkeys --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_ID
+PYTHONUTF8=1 python -u -B ./src/run_campaign.py --samples accounting1 json2 treebank4 --methods hybridpatch fullrewrite --round-trips 10 --keys-file <KEY_FILE> --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_ID
 ```
 
 全量：
 
 ```bash
-PYTHONUTF8=1 python -u -B ./src/run_campaign.py --all --methods hybridpatch fullrewrite --round-trips 10 --keys-file ../.env.frkeys --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_ID
+PYTHONUTF8=1 python -u -B ./src/run_campaign.py --all --methods hybridpatch fullrewrite --round-trips 10 --keys-file <KEY_FILE> --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_ID
 ```
 
 命令中没有 `new`、`resume`、campaign role、recovery authorization、parent-loss
