@@ -9,9 +9,9 @@ from relay_core import (EvaluatorIncompleteError, PreservationViolationError,
                         RelayHooks, run_method)
 from simple_api_recorder import SimpleApiRecorder
 from simple_runtime_io import (LocalEvidenceError, commit_round_trip,
-                               load_resume_state, method_dir, read_json,
+                               load_resume_state, load_task_plan, method_dir, read_json,
                                read_status, sample_dir, sample_lock, utc_now,
-                               sha256_json, write_status)
+                               write_status)
 
 
 EXIT_COMPLETE = 0
@@ -67,11 +67,7 @@ def run_sample(out_dir, sample, key_label, *, generate_impl=None):
     if not samples_root.is_absolute():
         samples_root = Path(__file__).resolve().parent.parent / samples_root
     methods = list(scientific["method_order_by_sample"][sample])
-    plan_record = scientific["task_plans"][sample]
-    plan_payload = read_json(out_dir / plan_record["path"])
-    if sha256_json(plan_payload) != plan_record["sha256"]:
-        raise LocalEvidenceError(f"task plan SHA mismatch for {sample}")
-    task_plan = list(plan_payload["target_state_ids"])
+    task_plan, _plan_payload = load_task_plan(out_dir, sample)
     round_trips = int(scientific["round_trips"])
     seed = int(scientific["seed"])
     include_distractor = bool(scientific["include_distractor"])
@@ -97,7 +93,7 @@ def run_sample(out_dir, sample, key_label, *, generate_impl=None):
                 method_path = method_dir(out_dir, sample, method)
                 checkpoint, completed = load_resume_state(
                     out_dir, sample, method, round_trips, seed,
-                    include_distractor, samples_root)
+                    include_distractor, samples_root, task_plan=task_plan)
                 if completed >= round_trips:
                     status["methods"][method] = "complete"
                     write_status(out_dir, sample, status)
@@ -186,7 +182,20 @@ def main(argv=None):
     signal.signal(signal.SIGINT, _signal_handler)
     if hasattr(signal, "SIGTERM"):
         signal.signal(signal.SIGTERM, _signal_handler)
-    return run_sample(args.out_dir, args.sample, args.key_label)
+    try:
+        return run_sample(args.out_dir, args.sample, args.key_label)
+    except BaseException as exc:
+        try:
+            log_path = sample_dir(args.out_dir, args.sample) / "worker.log"
+            _append_worker_log(
+                log_path,
+                "bootstrap_failed "
+                + "".join(traceback.format_exception(exc))[-12000:].replace("\n", "\\n"))
+        except Exception:
+            pass
+        if isinstance(exc, (KeyboardInterrupt, WorkerInterrupted)):
+            return EXIT_INTERRUPTED
+        return EXIT_WORKER_FAILED
 
 
 if __name__ == "__main__":

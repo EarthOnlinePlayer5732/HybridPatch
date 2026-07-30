@@ -138,10 +138,16 @@ def _launch_worker(out_dir, sample, key_label, key):
         "--out-dir", str(Path(out_dir).resolve()),
         "--sample", sample, "--key-label", key_label,
     ]
-    return subprocess.Popen(
-        command, cwd=str(_ROOT), env=_worker_env(key, key_label),
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL)
+    log_path = Path(out_dir) / "samples" / sample / "worker.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("a", encoding="utf-8", newline="\n")
+    try:
+        return subprocess.Popen(
+            command, cwd=str(_ROOT), env=_worker_env(key, key_label),
+            stdin=subprocess.DEVNULL, stdout=log_handle,
+            stderr=subprocess.STDOUT)
+    finally:
+        log_handle.close()
 
 
 def _wait_and_stop(children, grace_seconds):
@@ -182,11 +188,21 @@ def run_campaign(args):
         if not run_exists:
             foreign = [
                 path.name for path in out_dir.iterdir()
-                if path.name != ".campaign.lock"]
+                if path.name not in {".campaign.lock", "task_plans"}]
             if foreign:
                 raise RuntimeError(
                     "fresh simplified runtime out_dir is not empty: "
                     + ", ".join(sorted(foreign)[:10]))
+            plans_dir = out_dir / "task_plans"
+            if plans_dir.is_dir():
+                expected = {f"{sample}.json" for sample in samples}
+                unexpected = [
+                    path.name for path in plans_dir.iterdir()
+                    if not path.name.startswith(".") and path.name not in expected]
+                if unexpected:
+                    raise RuntimeError(
+                        "incomplete fresh initialization contains unexpected task plans: "
+                        + ", ".join(sorted(unexpected)[:10]))
         _reject_existing_mismatch(out_dir, base)
         task_plans = prepare_task_plans(
             out_dir, samples, args.round_trips, args.seed, _SAMPLES_ROOT,
@@ -219,7 +235,7 @@ def run_campaign(args):
             if interrupted["signum"] is None:
                 interrupted["signum"] = signum
 
-        for name in ("SIGINT", "SIGTERM"):
+        for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
             if hasattr(signal, name):
                 signum = getattr(signal, name)
                 prior_handlers[signum] = signal.signal(signum, request_stop)
@@ -347,7 +363,8 @@ def run_campaign(args):
                 out_dir, "campaign_interrupted", invocation_id=invocation,
                 signal=interrupted["signum"], pending_count=len(pending),
                 running_count=len(running), external_count=len(external))
-            write_quick_summary(out_dir, "interrupted")
+            write_quick_summary(
+                out_dir, "interrupted", skip_samples=set(external))
             return 130 if interrupted["signum"] == signal.SIGINT else 143
 
         summary = write_quick_summary(out_dir, "incomplete")

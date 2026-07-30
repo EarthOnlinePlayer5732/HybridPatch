@@ -18,7 +18,8 @@
 ## 工作目录与路径
 
 - Git、跨版本文档与目录管理命令从 `hybridpatch_clean/` 根目录运行；版本代码、测试、verify、analyze 与实验命令从目标 `HP_Vx/` 根运行。工具调用必须显式设置绝对 `workdir`，不要依赖上一条命令留下的当前目录。
-- `HP_V7` 是最新冻结可运行参考，当前没有可写 active 方法快照，顶层不再有运行入口 `src/`。在付费、长时或写入命令前，先确认已按版本纪律创建新的 `HP_V8`（或后续版本），再检查其 `src/experiment_runner.py`；只读复核旧实现时可检查 `HP_V7/src/experiment_runner.py`。
+- `HP_V8` 及更早版本是冻结参考；`HP_V9` 是当前 active 版本。新实验只检查并使用
+  `HP_V9/src/run_campaign.py`；旧 `experiment_runner.py` 与 paired dispatcher 只作历史兼容。
 - `HP_Vx/data` 是指向共享顶层 `data/` 的 Windows junction。只允许从 Git Bash 使用 `MSYS_NO_PATHCONV=1 cmd.exe /c mklink /J` 创建 junction，并向 `cmd.exe` 传入经 `cygpath -aw` 转换的绝对路径；这是唯一的跨 shell 文件操作例外。
 - Git Bash 文件操作必须引用路径，并在命令支持时用 `--` 终止选项；Windows 原生程序需要绝对路径时用 `cygpath -aw` 转换。不要手工拼接未引用的含空格、中文或反斜杠路径。
 - 在 JavaScript/工具编排源码中，不把 Windows 路径直接写进会解释转义的字符串；例如 `\v`、`\t`、`\n` 可能变成控制字符。优先使用 `path.join()`、正斜杠或经过验证的双重转义。
@@ -75,7 +76,9 @@
   evaluator smoke、计划审阅和 Key probe（若实验计划要求）必须作为启动命令之外的独立门禁；
   `run_campaign.py` 启动本身不得运行回归、历史 archive 扫描或旧 dispatcher dry-run。
 
-- 新 API 实验开跑前，优先用 `tools/preflight_experiment.py` 一次生成零 API preflight receipt：复用未变代码的回归结果，并对正式 manifest 中的样本并行运行 runtime evaluator。dispatcher dry-run 仍每次执行，以核对本次 task plan、out_dir 和命令身份；该工具不执行 Key probe，也不启动正式 worker。
+- legacy paired campaign 开跑前仍使用 `tools/preflight_experiment.py`。HP_V9 simplified
+  campaign 使用自包含零 API runtime 回归、234 evaluator smoke、计划审阅和独立 Key probe；
+  不得把新命令包装回 legacy dispatcher dry-run。
 - 零 API 缓存只复用输入指纹完全一致且成功的结果。代码、Python runtime 或样本内容变化时只重跑失效部分，失败结果不得缓存为通过。Key 小探针仍是独立的真实 provider 请求，成功 receipt 不能替代 Key probe。全部通过后再做最终命令复核并开跑。
 - 方法实验输出放所属 `HP_Vx/exp_*`；传输诊断放顶层 `transport/exp_*`；baseline 放顶层 `Baseline/exp_*`。从 HP 根引用后两者时使用 `../transport/...` / `../Baseline/...`。
 - 新方法语义先复制最新 `HP_Vx` 为下一版本再改；冻结版永不回改。API 修改只在 `transport/` 开发，验证后仅同步到新建的可写 HP 并记录指纹，绝不回灌冻结版本。

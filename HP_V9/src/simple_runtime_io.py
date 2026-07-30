@@ -253,6 +253,29 @@ def prepare_task_plans(out_dir, samples, round_trips, seed, samples_root, *,
     return records
 
 
+def load_task_plan(out_dir, sample):
+    """Read and authenticate one immutable task plan from run.json."""
+    out_dir = Path(out_dir)
+    run = read_json(out_dir / "run.json")
+    scientific = run.get("scientific")
+    if not isinstance(scientific, dict):
+        raise LocalEvidenceError("run.json scientific configuration is invalid")
+    record = (scientific.get("task_plans") or {}).get(sample)
+    if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+        raise LocalEvidenceError(f"task plan record is missing for {sample}")
+    payload = read_json(out_dir / record["path"])
+    if (not isinstance(payload, dict)
+            or payload.get("schema") != "anchorpatch.simple_task_plan/1"
+            or payload.get("sample") != sample
+            or sha256_json(payload) != record.get("sha256")):
+        raise LocalEvidenceError(f"task plan identity mismatch for {sample}")
+    targets = payload.get("target_state_ids")
+    if (not isinstance(targets, list)
+            or not all(isinstance(item, str) and item for item in targets)):
+        raise LocalEvidenceError(f"task plan targets are invalid for {sample}")
+    return list(targets), payload
+
+
 def create_or_validate_run(out_dir, scientific, execution):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -373,6 +396,96 @@ def validate_result_pairs(rows, round_trips):
     return by_rt, complete
 
 
+def _transition_prompt(source_state, target_state_id):
+    matches = [
+        item.get("prompt") for item in source_state.get("prompts") or []
+        if isinstance(item, dict) and item.get("target_state") == target_state_id]
+    if len(matches) != 1 or not isinstance(matches[0], str):
+        raise LocalEvidenceError(
+            f"frozen transition prompt is missing or ambiguous for {target_state_id}")
+    return matches[0]
+
+
+def validate_result_trajectory(rows, sample, method, round_trips, task_plan,
+                               samples_root):
+    """Bind committed rows to the immutable sample task plan and prompts."""
+    by_rt, complete = validate_result_pairs(rows, round_trips)
+    if len(task_plan) < round_trips:
+        raise LocalEvidenceError("task plan is shorter than requested round trips")
+    loaded, _sample_folder, states = load_sample(
+        sample, samples_folder=str(Path(samples_root)) + os.sep)
+    initial_id = loaded["start_state"]
+    initial = states[initial_id]
+    expected_state_chain = []
+    for rt in range(1, complete + 1):
+        forward_id = task_plan[rt - 1]
+        if forward_id not in states:
+            raise LocalEvidenceError(
+                f"task plan RT{rt} target state is unknown: {forward_id}")
+        forward_state = states[forward_id]
+        expected = {
+            "forward": (
+                forward_id, _transition_prompt(initial, forward_id)),
+            "backward": (
+                initial_id, _transition_prompt(forward_state, initial_id)),
+        }
+        for direction in ("forward", "backward"):
+            row = by_rt[rt][direction]
+            target_id, instruction = expected[direction]
+            if (row.get("sample_id") != sample or row.get("method") != method
+                    or row.get("target_state_id") != target_id
+                    or row.get("task_state_id") != target_id
+                    or row.get("initial_state_id") != initial_id
+                    or row.get("edit_instruction") != instruction):
+                raise LocalEvidenceError(
+                    f"result trajectory differs from task plan at "
+                    f"RT{rt}/{direction}")
+            expected_state_chain.append(target_id)
+            state_chain = row.get("state_chain")
+            rid_chain = row.get("rid_chain")
+            expected_length = len(expected_state_chain)
+            if (state_chain != expected_state_chain
+                    or not isinstance(rid_chain, list)
+                    or len(rid_chain) != expected_length
+                    or not all(isinstance(item, str) and item for item in rid_chain)
+                    or row.get("response_id") != rid_chain[-1]):
+                raise LocalEvidenceError(
+                    f"result relay chain is invalid at RT{rt}/{direction}")
+    return by_rt, complete, expected_state_chain
+
+
+def validate_checkpoint_state(checkpoint, complete, by_rt, expected_state_chain):
+    """Check the hot-path checkpoint shape and its terminal row binding."""
+    if checkpoint is None:
+        if complete:
+            return
+        return
+    if not isinstance(checkpoint, dict):
+        raise LocalEvidenceError("checkpoint must be a JSON object")
+    checkpoint_rt = checkpoint.get("completed_round_trips")
+    if (not isinstance(checkpoint_rt, int) or isinstance(checkpoint_rt, bool)
+            or checkpoint_rt < 0 or checkpoint_rt > complete):
+        raise LocalEvidenceError("checkpoint round-trip progress is invalid")
+    expected_length = checkpoint_rt * 2
+    rid_chain = checkpoint.get("rid_chain")
+    state_chain = checkpoint.get("state_chain")
+    if (not isinstance(checkpoint.get("current_context"), dict)
+            or not isinstance(rid_chain, list)
+            or not isinstance(state_chain, list)
+            or len(rid_chain) != expected_length
+            or len(state_chain) != expected_length
+            or state_chain != expected_state_chain[:expected_length]
+            or not all(isinstance(item, str) and item for item in rid_chain)
+            or not isinstance(
+                checkpoint.get("context_shuffle_random_state"), (list, tuple))):
+        raise LocalEvidenceError("checkpoint relay state is invalid")
+    if checkpoint_rt:
+        terminal = by_rt[checkpoint_rt]["backward"]
+        if (rid_chain != terminal.get("rid_chain")
+                or state_chain != terminal.get("state_chain")):
+            raise LocalEvidenceError("checkpoint does not match its terminal result row")
+
+
 def commit_round_trip(method_path, rows, checkpoint):
     """Append one sample-local pair and atomically advance its checkpoint."""
     method_path = Path(method_path)
@@ -426,14 +539,18 @@ def _replay_generated(method, row, context, distractor, target_state):
 
 
 def load_resume_state(out_dir, sample, method, round_trips, seed,
-                      include_distractor, samples_root):
+                      include_distractor, samples_root, task_plan=None):
     """Validate local evidence and repair only a checkpoint lagging full pairs."""
     path = method_dir(out_dir, sample, method)
     rows = read_result_rows(path / "result.jsonl")
-    by_rt, complete = validate_result_pairs(rows, round_trips)
+    if task_plan is None:
+        task_plan, _payload = load_task_plan(out_dir, sample)
+    by_rt, complete, expected_state_chain = validate_result_trajectory(
+        rows, sample, method, round_trips, task_plan, samples_root)
     checkpoint_path = path / "checkpoint.json"
     checkpoint = read_json(checkpoint_path) if checkpoint_path.exists() else None
-    checkpoint_rt = int(checkpoint.get("completed_round_trips", 0)) if checkpoint else 0
+    validate_checkpoint_state(checkpoint, complete, by_rt, expected_state_chain)
+    checkpoint_rt = checkpoint.get("completed_round_trips", 0) if checkpoint else 0
     if checkpoint_rt > complete:
         raise LocalEvidenceError("checkpoint is ahead of result rows")
     if checkpoint_rt == complete:
@@ -471,5 +588,7 @@ def load_resume_state(out_dir, sample, method, round_trips, seed,
         "rid_chain": rid_chain, "state_chain": state_chain,
         "context_shuffle_random_state": random.getstate(),
     }
+    validate_checkpoint_state(
+        checkpoint, complete, by_rt, expected_state_chain)
     write_json_atomic(checkpoint_path, checkpoint)
     return checkpoint, complete

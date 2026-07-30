@@ -1,5 +1,6 @@
 """Zero-API acceptance tests for the simplified HP_V9 runtime."""
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -16,21 +17,48 @@ import run_sample
 from domains import get_domain
 from relay_core import (_evaluate, EvaluatorIncompleteError,
                         PreservationViolationError)
-from simple_api_recorder import SimpleApiRecorder
+from simple_api_recorder import LocalCallEvidenceError, SimpleApiRecorder
 from simple_runtime_io import (
     LocalEvidenceError, all_sample_ids, campaign_lock, commit_round_trip,
     create_or_validate_run, load_resume_state, lock_is_held, method_orders,
-    read_json, read_status, sample_dir, sample_lock, validate_result_pairs,
-    sha256_json, write_json_atomic, write_status,
+    prepare_task_plans, read_json, read_status, sample_dir, sample_lock,
+    validate_result_pairs, sha256_json, write_json_atomic, write_status,
 )
 from utils_context import build_context_from_folder, stringify_context
 from utils_env import load_sample
-from verify_campaign import verify_full, write_quick_summary
+from verify_campaign import (_verify_row_journals, verify_full,
+                             write_quick_summary)
 
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 SAMPLES_ROOT = ROOT / "data" / "samples_delegate52"
+requires_local_data = unittest.skipUnless(
+    os.environ.get("ANCHORPATCH_TEST_NO_LOCAL_DATA") != "1"
+    and (SAMPLES_ROOT / "accounting1" / "sample.json").is_file(),
+    "local DELEGATE-52 junction is not available")
+
+
+def _complete_response(message="answer", *, call_kind="fullrewrite_primary",
+                       attempts=None):
+    attempts = list(attempts or [{
+        "status": "success", "http_status": 200, "stream_complete": True,
+        "final_usage_seen": True, "terminal_sequence_valid": True,
+        "retry_budget_consumed": False,
+    }])
+    return {
+        "message": message, "http_status": 200, "stream_complete": True,
+        "finish_reason": "stop", "response_classification": (
+            "normal" if message.strip() else "model_empty"),
+        "transport": "openai_sdk_stream",
+        "transport_revision": "opencode_openai_compatible/6",
+        "reasoning_effort": "high", "call_kinds": [call_kind],
+        "transport_attempts": attempts, "prompt_tokens": 2,
+        "completion_tokens": 1, "total_tokens": 3,
+        "input_tokens": 2, "output_tokens": 1,
+        "elapsed_time": 0.01, "retry_count": max(len(attempts) - 1, 0),
+        "failed_attempt_count": max(len(attempts) - 1, 0),
+    }
 
 
 def _minimal_run(out_dir, samples, methods_by_sample, round_trips=10):
@@ -122,6 +150,7 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
             self.assertEqual(
                 read_status(self.out, sample, ["fullrewrite"])["state"], "complete")
 
+    @requires_local_data
     def test_all_selects_exact_sorted_234_inventory(self):
         samples = all_sample_ids(SAMPLES_ROOT)
         self.assertEqual(len(samples), 234)
@@ -186,13 +215,13 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         attempts = [
             {"http_status": 503, "retry_budget_consumed": False},
             {"http_status": 502, "retry_budget_consumed": True},
-            {"http_status": 200, "status": "success"},
+            {"http_status": 200, "status": "success", "stream_complete": True,
+             "final_usage_seen": True, "terminal_sequence_valid": True},
         ]
         def generate(messages, **kwargs):
             calls["count"] += 1
             calls["kwargs"] = kwargs
-            return {"message": "ok", "transport_attempts": attempts,
-                    "transport_revision": "opencode_openai_compatible/6"}
+            return _complete_response("ok", attempts=attempts)
         recorder = SimpleApiRecorder(
             self.out / "samples/a/fullrewrite", "a", "fullrewrite",
             "deepseek-v4-flash", generate_impl=generate)
@@ -207,12 +236,13 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
     def test_incomplete_stream_retry_metadata_is_not_reimplemented(self):
         attempts = [
             {"error_type": "incomplete_stream", "retry_budget_consumed": True},
-            {"http_status": 200, "status": "success"},
+            {"http_status": 200, "status": "success", "stream_complete": True,
+             "final_usage_seen": True, "terminal_sequence_valid": True},
         ]
         recorder = SimpleApiRecorder(
             self.out / "samples/a/fullrewrite", "a", "fullrewrite", "m",
             generate_impl=lambda _messages, **_kwargs:
-                {"message": "ok", "transport_attempts": attempts})
+                _complete_response("ok", attempts=attempts))
         recorder.set_step(1, "backward")
         result = recorder.generate([], model="m", max_retries=3,
                                    call_kind="fullrewrite_primary")
@@ -251,6 +281,7 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         return {"campaign_state": "complete" if all(r["complete"] for r in rows.values()) else (hint or "incomplete"),
                 "sample_state_counts": states, "samples": rows}
 
+    @requires_local_data
     def test_quota_exhausted_key_moves_sample_to_healthy_key(self):
         args = self._campaign_args(["accounting1"], ["KEY_1", "KEY_2"])
         launches = []
@@ -272,6 +303,7 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(launches, ["KEY_1", "KEY_2"])
 
+    @requires_local_data
     def test_all_keys_invalid_exits_incomplete_without_fatal_state(self):
         args = self._campaign_args(["accounting1"], ["KEY_1"])
         def launch(out_dir, sample, label, _key):
@@ -298,6 +330,7 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         self.assertFalse(resumed)
         self.assertEqual(first, second)
 
+    @requires_local_data
     def test_replacement_key_resumes_existing_api_incomplete_sample(self):
         first_args = self._campaign_args(["accounting1"], ["KEY_1"])
         def fail_launch(out_dir, sample, _label, _key):
@@ -346,7 +379,7 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         calls = {"count": 0}
         def generate(_messages, **_kwargs):
             calls["count"] += 1
-            return {"message": "answer", "total_tokens": 3}
+            return _complete_response("answer")
         recorder = SimpleApiRecorder(
             self.out / "samples/a/fullrewrite", "a", "fullrewrite", "m",
             generate_impl=generate)
@@ -359,13 +392,77 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(first["message"], second["message"])
         self.assertTrue(second["replayed_from_success_journal"])
 
+    def test_success_journal_replay_rejects_incomplete_transport_terminal(self):
+        recorder = SimpleApiRecorder(
+            self.out / "samples/a/fullrewrite", "a", "fullrewrite", "m",
+            generate_impl=lambda _messages, **_kwargs: _complete_response("answer"))
+        recorder.set_step(1, "forward")
+        kwargs = {"model": "m", "return_metadata": True,
+                  "call_kind": "fullrewrite_primary"}
+        recorder.generate([], **kwargs)
+        path = (self.out / "samples/a/fullrewrite/calls/rt01/forward/primary/"
+                "success.json")
+        payload = read_json(path)
+        payload["response"]["stream_complete"] = False
+        write_json_atomic(path, payload)
+        with self.assertRaises(LocalCallEvidenceError):
+            recorder.generate([], **kwargs)
+
+    def test_verifier_accepts_explainable_primary_plus_repair_linkage(self):
+        sample, method = "synthetic", "hybridpatch"
+        method_path = self.out / "samples" / sample / method
+        payloads = {}
+        responses = []
+        for leaf, call_kind, call_id, message in (
+                ("primary", "hybridpatch_primary", "call-primary", "bad envelope"),
+                ("repair", "hybridpatch_repair", "call-repair", "fixed envelope")):
+            response = _complete_response(message, call_kind=call_kind)
+            request = {
+                "sample": sample, "method": method, "messages": [],
+                "parameters": {"call_kind": call_kind}}
+            path = method_path / "calls" / "rt01" / "forward" / leaf / "success.json"
+            payload = {
+                "schema": "anchorpatch.simple_api_success/1", "call_id": call_id,
+                "sample": sample, "method": method, "request": request,
+                "request_sha256": sha256_json(request), "response": response,
+            }
+            write_json_atomic(path, payload)
+            payload["_path"] = str(path)
+            payloads[path.resolve()] = payload
+            responses.append(response)
+        row = {
+            "round_trip_num": 1, "round_trip_direction": "forward",
+            "raw_llm_response": "fixed envelope",
+            "api_call_ids": ["call-primary", "call-repair"],
+            "api_raw_paths": [
+                "calls/rt01/forward/primary/success.json",
+                "calls/rt01/forward/repair/success.json"],
+            "call_kinds": ["hybridpatch_primary", "hybridpatch_repair"],
+            "api_transport_attempts": [
+                attempt for response in responses
+                for attempt in response["transport_attempts"]],
+        }
+        for key in (
+                "prompt_tokens", "completion_tokens", "total_tokens",
+                "input_tokens", "output_tokens", "elapsed_time", "retry_count",
+                "failed_attempt_count"):
+            row[key] = sum(response.get(key) or 0 for response in responses)
+        for key in ("finish_reason", "response_classification", "transport",
+                    "transport_revision", "reasoning_effort"):
+            row[key] = responses[0][key]
+        used = set()
+        self.assertEqual(
+            _verify_row_journals(
+                method_path, sample, method, row, payloads, used), [])
+        self.assertEqual(used, {"call-primary", "call-repair"})
+
     def test_process_death_without_success_journal_allows_retry(self):
         calls = {"count": 0}
         def generate(_messages, **_kwargs):
             calls["count"] += 1
             if calls["count"] == 1:
                 raise RuntimeError("died")
-            return {"message": "answer"}
+            return _complete_response("answer")
         recorder = SimpleApiRecorder(
             self.out / "samples/a/fullrewrite", "a", "fullrewrite", "m",
             generate_impl=generate)
@@ -377,6 +474,7 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(calls["count"], 2)
         self.assertEqual(result["message"], "answer")
 
+    @requires_local_data
     def test_complete_result_pair_repairs_lagging_checkpoint(self):
         sample = "accounting1"
         loaded, sample_folder, states = load_sample(
@@ -385,21 +483,32 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         initial = states[initial_id]
         forward_id = initial["prompts"][0]["target_state"]
         forward = states[forward_id]
+        forward_instruction = initial["prompts"][0]["prompt"]
+        backward_instruction = next(
+            item["prompt"] for item in forward["prompts"]
+            if item["target_state"] == initial_id)
         forward_context = {
             filename: "placeholder\n" for filename in forward["context"]}
         backward_context = build_context_from_folder(
             Path(sample_folder) / initial["solution_folder"])
         path = self.out / "samples" / sample / "fullrewrite"
         rows = [
-            {"round_trip_num": 1, "round_trip_direction": "forward",
-             "target_state_id": forward_id,
+            {"sample_id": sample, "method": "fullrewrite",
+             "round_trip_num": 1, "round_trip_direction": "forward",
+             "target_state_id": forward_id, "task_state_id": forward_id,
+             "initial_state_id": initial_id,
+             "edit_instruction": forward_instruction,
              "raw_llm_response": stringify_context(forward_context),
-             "rid_chain": ["r1"], "state_chain": [forward_id],
+             "response_id": "r1", "rid_chain": ["r1"],
+             "state_chain": [forward_id],
              "bdpatch": {"actual_method": "full_rewrite"}},
-            {"round_trip_num": 1, "round_trip_direction": "backward",
-             "target_state_id": initial_id,
+            {"sample_id": sample, "method": "fullrewrite",
+             "round_trip_num": 1, "round_trip_direction": "backward",
+             "target_state_id": initial_id, "task_state_id": initial_id,
+             "initial_state_id": initial_id,
+             "edit_instruction": backward_instruction,
              "raw_llm_response": stringify_context(backward_context),
-             "rid_chain": ["r1", "r2"],
+             "response_id": "r2", "rid_chain": ["r1", "r2"],
              "state_chain": [forward_id, initial_id],
              "bdpatch": {"actual_method": "full_rewrite"}},
         ]
@@ -407,11 +516,13 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         (path / "result.jsonl").write_text(
             "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
         checkpoint, complete = load_resume_state(
-            self.out, sample, "fullrewrite", 1, 42, True, SAMPLES_ROOT)
+            self.out, sample, "fullrewrite", 1, 42, True, SAMPLES_ROOT,
+            task_plan=[forward_id])
         self.assertEqual(complete, 1)
         self.assertEqual(checkpoint["completed_round_trips"], 1)
         self.assertTrue((path / "checkpoint.json").is_file())
 
+    @requires_local_data
     def test_corrupt_single_sample_result_is_isolated(self):
         self._worker_fixture(["accounting1", "accounting2"])
         bad = self.out / "samples" / "accounting1" / "fullrewrite" / "result.jsonl"
@@ -431,6 +542,31 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(summary["campaign_state"], "incomplete")
         self.assertTrue((self.out / "reports" / "quick_summary.json").is_file())
 
+    def test_quick_summary_isolates_legal_json_with_invalid_field_types(self):
+        sample = "accounting1"
+        self._worker_fixture([sample], round_trips=1)
+        path = self.out / "samples" / sample / "fullrewrite"
+        path.mkdir(parents=True)
+        rows = [
+            {"round_trip_num": 1, "round_trip_direction": "forward",
+             "evaluation": {"score": 0.1},
+             "bdpatch": {"preservation_violations": []}},
+            {"round_trip_num": 1, "round_trip_direction": "backward",
+             "evaluation": {"score": 0.2}, "bdpatch": {}},
+        ]
+        (path / "result.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        write_json_atomic(path / "checkpoint.json", {
+            "completed_round_trips": 1, "current_context": {},
+            "rid_chain": [], "state_chain": [],
+            "context_shuffle_random_state": []})
+        summary = write_quick_summary(self.out, "incomplete")
+        method = summary["samples"][sample]["methods"]["fullrewrite"]
+        self.assertFalse(method["complete"])
+        self.assertTrue(any(
+            "preservation_violations is not an integer" in item
+            for item in method["errors"]))
+
     def test_full_verifier_does_not_modify_runtime_evidence(self):
         self._worker_fixture(["accounting1"])
         evidence = [path for path in self.out.rglob("*") if path.is_file()]
@@ -440,7 +576,8 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertFalse(report["ok"])
 
-    def test_full_verifier_replays_complete_single_method_campaign(self):
+    @requires_local_data
+    def _build_complete_verified_campaign(self):
         sample = "accounting1"
         self._worker_fixture([sample])
         scientific = read_json(self.out / "run.json")["scientific"]
@@ -450,6 +587,10 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         initial = states[initial_id]
         forward_id = initial["prompts"][0]["target_state"]
         forward = states[forward_id]
+        forward_instruction = initial["prompts"][0]["prompt"]
+        backward_instruction = next(
+            item["prompt"] for item in forward["prompts"]
+            if item["target_state"] == initial_id)
         plan_path = self.out / scientific["task_plans"][sample]["path"]
         plan = read_json(plan_path)
         plan["target_state_ids"] = [forward_id]
@@ -468,22 +609,49 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
             domain, sample, forward_context, forward, list(forward["context"]))
         backward_evaluation = _evaluate(
             domain, sample, backward_context, initial, list(initial["context"]))
+        forward_raw = stringify_context(forward_context)
+        backward_raw = stringify_context(backward_context)
+        responses = {
+            "forward": _complete_response(forward_raw),
+            "backward": _complete_response(backward_raw),
+        }
+        def linked_fields(direction, call_id):
+            response = responses[direction]
+            return {
+                "api_call_ids": [call_id],
+                "api_raw_paths": [
+                    f"calls/rt01/{direction}/primary/success.json"],
+                "call_kinds": ["fullrewrite_primary"],
+                "api_transport_attempts": response["transport_attempts"],
+                **{key: response[key] for key in (
+                    "finish_reason", "response_classification", "transport",
+                    "transport_revision", "reasoning_effort", "prompt_tokens",
+                    "completion_tokens", "total_tokens", "input_tokens",
+                    "output_tokens", "elapsed_time", "retry_count",
+                    "failed_attempt_count")},
+            }
         rows = [
             {"sample_id": sample, "sample_type": loaded["sample_type"],
              "method": "fullrewrite", "round_trip_num": 1,
              "round_trip_direction": "forward", "target_state_id": forward_id,
-             "raw_llm_response": stringify_context(forward_context),
-             "evaluation": forward_evaluation, "api_call_ids": ["call-fwd"],
+             "task_state_id": forward_id, "initial_state_id": initial_id,
+             "edit_instruction": forward_instruction,
+             "raw_llm_response": forward_raw,
+             "evaluation": forward_evaluation, "response_id": "r1",
              "rid_chain": ["r1"], "state_chain": [forward_id],
+             **linked_fields("forward", "call-fwd"),
              "bdpatch": {"actual_method": "full_rewrite",
                          "preservation_violations": None}},
             {"sample_id": sample, "sample_type": loaded["sample_type"],
              "method": "fullrewrite", "round_trip_num": 1,
              "round_trip_direction": "backward", "target_state_id": initial_id,
-             "raw_llm_response": stringify_context(backward_context),
-             "evaluation": backward_evaluation, "api_call_ids": ["call-bwd"],
+             "task_state_id": initial_id, "initial_state_id": initial_id,
+             "edit_instruction": backward_instruction,
+             "raw_llm_response": backward_raw,
+             "evaluation": backward_evaluation, "response_id": "r2",
              "rid_chain": ["r1", "r2"],
              "state_chain": [forward_id, initial_id],
+             **linked_fields("backward", "call-bwd"),
              "bdpatch": {"actual_method": "full_rewrite",
                          "preservation_violations": None}},
         ]
@@ -506,16 +674,100 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
             "context_shuffle_random_state": random.getstate(),
         })
         for direction, call_id in (("forward", "call-fwd"), ("backward", "call-bwd")):
+            request = {
+                "sample": sample, "method": "fullrewrite", "messages": [],
+                "parameters": {"call_kind": "fullrewrite_primary"}}
             write_json_atomic(
                 path / "calls" / "rt01" / direction / "primary" / "success.json",
                 {"schema": "anchorpatch.simple_api_success/1", "call_id": call_id,
-                 "request": {}, "request_sha256": sha256_json({}),
-                 "response": {"message": "stored"}})
+                 "sample": sample, "method": "fullrewrite",
+                 "request": request, "request_sha256": sha256_json(request),
+                 "response": responses[direction]})
         write_status(self.out, sample, {
             "state": "complete", "methods": {"fullrewrite": "complete"}})
         report = verify_full(self.out)
+        return report, path
+
+    def test_full_verifier_replays_complete_single_method_campaign(self):
+        report, _path = self._build_complete_verified_campaign()
         self.assertTrue(report["ok"], report["issues"])
         self.assertEqual(report["analysis"]["endpoint_count"]["fullrewrite"], 1)
+
+    def test_full_verifier_rejects_raw_response_journal_mismatch(self):
+        report, path = self._build_complete_verified_campaign()
+        self.assertTrue(report["ok"], report["issues"])
+        rows = [json.loads(line) for line in (
+            path / "result.jsonl").read_text(encoding="utf-8").splitlines()]
+        rows[0]["raw_llm_response"] = "wrong response"
+        (path / "result.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        report = verify_full(self.out)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(
+            "raw response/journal mismatch" in issue for issue in report["issues"]))
+
+    def test_full_verifier_rejects_wrong_direction_journal_link(self):
+        report, path = self._build_complete_verified_campaign()
+        self.assertTrue(report["ok"], report["issues"])
+        rows = [json.loads(line) for line in (
+            path / "result.jsonl").read_text(encoding="utf-8").splitlines()]
+        rows[0]["api_raw_paths"] = [
+            "calls/rt01/backward/primary/success.json"]
+        (path / "result.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        report = verify_full(self.out)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(
+            "path does not match the result step" in issue
+            for issue in report["issues"]))
+
+    def test_full_verifier_reports_orphan_success_journal(self):
+        report, path = self._build_complete_verified_campaign()
+        self.assertTrue(report["ok"], report["issues"])
+        source = read_json(
+            path / "calls" / "rt01" / "forward" / "primary" / "success.json")
+        source["call_id"] = "orphan-call"
+        write_json_atomic(
+            path / "calls" / "rt02" / "forward" / "primary" / "success.json",
+            source)
+        report = verify_full(self.out)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(
+            "orphan success journal" in issue for issue in report["issues"]))
+
+    def test_full_verifier_rejects_task_plan_trajectory_mismatch(self):
+        report, path = self._build_complete_verified_campaign()
+        self.assertTrue(report["ok"], report["issues"])
+        rows = [json.loads(line) for line in (
+            path / "result.jsonl").read_text(encoding="utf-8").splitlines()]
+        rows[0]["edit_instruction"] = "wrong frozen prompt"
+        (path / "result.jsonl").write_text(
+            "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        report = verify_full(self.out)
+        self.assertFalse(report["ok"])
+        self.assertTrue(any(
+            "task-plan trajectory invalid" in issue for issue in report["issues"]))
+        plan_record = read_json(self.out / "run.json")["scientific"]["task_plans"][
+            "accounting1"]
+        task_plan = read_json(self.out / plan_record["path"])["target_state_ids"]
+        with self.assertRaises(LocalEvidenceError):
+            load_resume_state(
+                self.out, "accounting1", "fullrewrite", 1, 42, True,
+                SAMPLES_ROOT, task_plan=task_plan)
+
+    def test_resume_rejects_checkpoint_chain_mismatch_at_equal_progress(self):
+        report, path = self._build_complete_verified_campaign()
+        self.assertTrue(report["ok"], report["issues"])
+        checkpoint = read_json(path / "checkpoint.json")
+        checkpoint["rid_chain"] = ["wrong", "chain"]
+        write_json_atomic(path / "checkpoint.json", checkpoint)
+        plan_record = read_json(self.out / "run.json")["scientific"]["task_plans"][
+            "accounting1"]
+        task_plan = read_json(self.out / plan_record["path"])["target_state_ids"]
+        with self.assertRaises(LocalEvidenceError):
+            load_resume_state(
+                self.out, "accounting1", "fullrewrite", 1, 42, True,
+                SAMPLES_ROOT, task_plan=task_plan)
 
     def test_active_runtime_source_contains_no_forbidden_components(self):
         names = [
@@ -530,6 +782,35 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
             for token in forbidden:
                 self.assertNotIn(token, text, f"{name}: {token}")
 
+    def test_active_runtime_transitive_local_import_graph_excludes_forensics(self):
+        pending = [
+            "relay_core", "run_campaign", "run_sample", "simple_runtime_io",
+            "simple_api_recorder", "verify_campaign"]
+        visited = set()
+        forbidden = {
+            "paired_campaign_dispatch", "campaign_recovery_runtime",
+            "authorize_ledger_lock_recovery", "run_meta"}
+        while pending:
+            module = pending.pop()
+            if module in visited:
+                continue
+            visited.add(module)
+            path = HERE / f"{module}.py"
+            if not path.is_file():
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            imported = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported.update(alias.name.split(".", 1)[0] for alias in node.names)
+                elif isinstance(node, ast.ImportFrom) and node.module:
+                    imported.add(node.module.split(".", 1)[0])
+            self.assertFalse(imported & forbidden, (module, imported & forbidden))
+            pending.extend(
+                name for name in imported
+                if (HERE / f"{name}.py").is_file() and not name.startswith("test_"))
+
+    @requires_local_data
     def test_thirty_workers_have_disjoint_sample_write_roots(self):
         samples = all_sample_ids(SAMPLES_ROOT)[:30]
         roots = [sample_dir(self.out, sample).resolve() for sample in samples]
@@ -589,6 +870,45 @@ class SimpleRuntimeAcceptanceTests(unittest.TestCase):
         with campaign_lock(self.out):
             self.assertTrue(lock_is_held(self.out / ".campaign.lock"))
         self.assertFalse(lock_is_held(self.out / ".campaign.lock"))
+
+    def test_worker_bootstrap_failure_is_captured_in_sample_log(self):
+        process = run_campaign._launch_worker(
+            self.out, "missing-sample", "KEY_1", "fake-secret")
+        self.assertEqual(process.wait(timeout=30), run_sample.EXIT_WORKER_FAILED)
+        log = (self.out / "samples" / "missing-sample" / "worker.log").read_text(
+            encoding="utf-8")
+        self.assertIn("bootstrap_failed", log)
+        self.assertIn("run.json", log)
+        self.assertNotIn("fake-secret", log)
+
+    @requires_local_data
+    def test_incomplete_fresh_task_plan_initialization_is_resumable(self):
+        sample = "accounting1"
+        prepare_task_plans(self.out, [sample], 1, 42, SAMPLES_ROOT)
+        args = self._campaign_args([sample], ["KEY_1"])
+        def launch(out_dir, selected, _label, _key):
+            return FakeProcess(lambda: write_status(out_dir, selected, {
+                "state": "complete", "methods": {"fullrewrite": "complete"}}), 0)
+        with mock.patch.object(run_campaign, "_launch_worker", side_effect=launch), \
+                mock.patch.object(
+                    run_campaign, "write_quick_summary", side_effect=self._fake_summary):
+            self.assertEqual(run_campaign.run_campaign(args), 0)
+        self.assertTrue((self.out / "run.json").is_file())
+
+    def test_interrupted_summary_skips_external_locked_sample_evidence(self):
+        sample = "accounting1"
+        self._worker_fixture([sample], round_trips=1)
+        result = self.out / "samples" / sample / "fullrewrite" / "result.jsonl"
+        result.parent.mkdir(parents=True)
+        result.write_text("not-json\n", encoding="utf-8")
+        with sample_lock(self.out, sample):
+            summary = write_quick_summary(
+                self.out, "interrupted", skip_samples={sample})
+        record = summary["samples"][sample]
+        self.assertEqual(record["runtime_observation"], "running_external")
+        self.assertTrue(any(
+            "evidence not read" in item
+            for item in record["methods"]["fullrewrite"]["errors"]))
 
 
 if __name__ == "__main__":

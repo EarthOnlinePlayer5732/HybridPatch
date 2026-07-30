@@ -6,7 +6,8 @@ HybridPatch is a constrained-write alternative to full document rewriting for lo
 
 ```text
 HP_V3/ ... HP_V7/  frozen, self-contained method snapshots
-HP_V8/             active draft method snapshot and diagnostic records
+HP_V8/             frozen historical method snapshot and diagnostic records
+HP_V9/             active sample-local campaign runtime and current method snapshot
   src/              method + runner + verifier + transport state of that version
   prompts/          real copy; domain evaluators load it relative to cwd
   data/             Windows junction to the shared top-level data/
@@ -22,7 +23,7 @@ _attic/             retained deletion candidates and pre-restructure fallback
 MIGRATION_MAP.md    old path -> new path inventory
 ```
 
-`HP_V7` is the latest frozen runnable reference; `HP_V8` is the current active draft. Do not mutate HP_V8 method semantics after its recorded campaign—a new method change begins in `HP_V9`. Every HP directory is its own run root: enter it before invoking `src/*.py`. Top-level `.env` files are never copied into versions, so API commands must inject the parent environment explicitly.
+`HP_V8` and earlier versions are frozen historical references; `HP_V9` is the current active runtime. Every HP directory is its own run root: enter it before invoking `src/*.py`. Top-level `.env` files are never copied into versions, so API commands must inject the parent environment explicitly.
 
 ## Setup
 
@@ -30,7 +31,7 @@ From `hybridpatch_clean`:
 
 ```bash
 pip install -r ./requirements.txt
-cd ./HP_V8
+cd ./HP_V9
 export PYTHONUTF8=1
 ```
 
@@ -44,14 +45,13 @@ python -B ./src/test_model_openai.py
 
 ## Run a paired experiment
 
-Only run a new method experiment inside the active writable version, and create `HP_V9` before changing the recorded HP_V8 method; do not add results to frozen `HP_V3`–`HP_V7`. Use a new out_dir. Return to the `hybridpatch_clean` root before running this block. `python-dotenv` loads the single top-level secret file into the child process without copying it:
+New HP_V9 experiments use one entry point. The same command creates a fresh campaign or resumes an existing out_dir after validating its immutable scientific configuration. Use a new out_dir whenever model, methods, seed, task plan, prompt/protocol/executor, or code commit changes:
 
 ```bash
 export PYTHONUTF8=1
-cd ./HP_V8
-python -m dotenv -f ../.env run -- python ./src/experiment_runner.py --sample malware6 latex2 --methods hybridpatch fullrewrite --num_round_trips 10 --skip_distractor --model minimax-m3 --out_dir exp_demo --notes "demo"
-python -B ./src/verify_anchorpatch.py --dir ./exp_demo
-python -B ./src/analyze.py --dir ./exp_demo --K 10 --critical_theta 0.10
+cd ./HP_V9
+python -u -B ./src/run_campaign.py --all --methods hybridpatch fullrewrite --round-trips 10 --keys-file ../.env.frkeys --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_YYYYMMDD_SLUG
+python -B ./src/verify_campaign.py --dir ./exp_YYYYMMDD_SLUG --full
 ```
 
 Method experiments belong in their `HP_Vx/`; transport diagnostics use `../transport/exp_*`; baselines use `../Baseline/exp_*`. New experiments require result verification before citation. For frozen archives,
@@ -95,12 +95,12 @@ stop, use the two-stage post-processing workflow:
 
 ```bash
 python ./tools/process_experiment.py prepare \
-  --experiment ./HP_V8/exp_YYYYMMDD_SLUG \
+  --experiment ./HP_V9/exp_YYYYMMDD_SLUG \
   --confirm-stopped
 
 # Review analysis/record_review.yaml, then:
 python ./tools/process_experiment.py finalize \
-  --experiment ./HP_V8/exp_YYYYMMDD_SLUG
+  --experiment ./HP_V9/exp_YYYYMMDD_SLUG
 ```
 
 See [the record specification](./docs/EXPERIMENT_RECORDS.md) for record schema

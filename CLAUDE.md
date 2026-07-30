@@ -22,7 +22,7 @@ _attic/             只收纳不删除：短 smoke、旧入口、历史日志与
 MIGRATION_MAP.md     全量旧路径到新路径映射
 ```
 
-每个 `HP_Vx` 是独立运行根。命令先 `cd HP_Vx`，再指向该目录的 `src/`；domain prompts 依赖 cwd，data 路径依赖 `src` 的父目录，两者缺一不可。`HP_V7` 是最新冻结可运行参考，当前没有可写的 active 方法快照；下一次方法迭代先复制为 `HP_V8`。当前终端统一使用 Git Bash，所有 Python 命令先 `export PYTHONUTF8=1`。
+每个 `HP_Vx` 是独立运行根。命令先 `cd HP_Vx`，再指向该目录的 `src/`；domain prompts 依赖 cwd，data 路径依赖 `src` 的父目录，两者缺一不可。`HP_V8` 及更早版本是冻结参考；`HP_V9` 是当前 active sample-local runtime。当前终端统一使用 Git Bash，所有 Python 命令先 `export PYTHONUTF8=1`。
 
 ## 三层管线（最新冻结参考 `HP_V7/src/`）
 
@@ -95,7 +95,9 @@ MIGRATION_MAP.md     全量旧路径到新路径映射
 8. **传输边界**：API 修改只在 `transport/` 发生并新增 revision；只有先建立新的可写 `HP_Vx` 后，才把已验证 transport 原字节同步进去并记录源/目标指纹。冻结 HP 永不回灌。
 9. **共享数据与凭据**：顶层 `data/` 只读；`.env` / `.env.frkeys` 只保留顶层一份，不得复制进 HP、transport 或文档。
 10. **标准实验流程与审计 overlay**：新 HP_V8+ API 实验先按 `docs/标准实验流程.md` 创建 `docs/experiment_plans/<experiment_id>.md` 并完成实验前审阅；实验结束后使用 `tools/process_experiment.py prepare → review → finalize`。机械事实与研究判断分离，finalize 才原子写入 catalog 并生成 records。历史 record 重建可用底层 builder/finalizer。`records/` 和 `EXPERIMENTS.md` 只记录 provenance，不改变冻结的 `src/`、`prompts/`、checkpoint、raw response 或 evaluator 字节；后处理不触发 API。
-11. **V8+ 运行身份**：正式付费实验前，runner 必须把 `run_git_commit`、`git_tree_state=clean|dirty`、明确的 `started_at` 和 `finished_at` 写入 `run_metadata.jsonl`；新后处理流程拒绝缺失这些字段的运行，不能再用当前 HEAD、mtime 或整理时间补猜。
+11. **V8+ 运行身份**：legacy runner 在 `run_metadata.jsonl` 记录身份；HP_V9 simplified
+    runtime 在不可变 `run.json` 和 sample status/dispatch 记录运行 commit、tree state、配置与时间。
+    不能用当前 HEAD、mtime 或整理时间补猜历史运行身份。
 
 ## 常用命令
 
@@ -109,13 +111,12 @@ python -B ./src/test_hybrid_executor.py
 python -B ./src/splitters.py
 python -B ./src/test_model_openai.py
 
-# 调 LLM（产生费用）——仅在已创建的新可写版本中；下一版应为 HP_V8
-cd ../HP_V8
-python -m dotenv -f ../.env run -- python ./src/experiment_runner.py --sample malware6 latex2 --methods hybridpatch fullrewrite --num_round_trips 10 --skip_distractor --model minimax-m3 --out_dir exp_SLUG --notes "<什么实验>"
+# 调 LLM（产生费用）——HP_V9 新实验唯一入口
+cd ../HP_V9
+python -u -B ./src/run_campaign.py --samples malware6 latex2 --methods hybridpatch fullrewrite --round-trips 10 --keys-file ../.env.frkeys --key-labels KEY_1 KEY_2 KEY_3 --slots-per-key 10 --out-dir ./exp_SLUG
 
 # 仅限用户明确要求的全新未冻结实验；冻结归档不得重复运行结果复核
-python -B ./src/verify_anchorpatch.py --dir ./exp_SLUG
-python -B ./src/analyze.py --dir ./exp_SLUG --K 10 --critical_theta 0.10
+python -B ./src/verify_campaign.py --dir ./exp_SLUG --full
 
 # 长 adaptive-thinking 运行的只读进度
 python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch fullrewrite --watch
@@ -156,7 +157,7 @@ python -B ./src/monitor_experiment.py --dir ./exp_SLUG --methods hybridpatch ful
 - **方法迭代**：复制最新 `HP_Vx` 为 `HP_V(x+1)`，清除/另存旧实验输出后只在新目录改；协议号与文件夹号对齐。旧版本冻结且必须继续可重放自己的归档。
 - **API 迭代**：只改 `transport/`，延续 `opencode_stream/N`、`opencode_anthropic_sdk/N`、`minimax_official_nonstream/N` revision；更新 `transport/API_ITERATION_LOG.md`。完成验证且已有新的可写 HP 后再同步，并记录双方指纹。
 - **实验落位**：方法实验 → 所属 `HP_Vx/exp_*`；传输诊断 → `transport/exp_*`；基线 → `Baseline/exp_*`。命名沿用 `exp_<YYYYMMDD>_<slug>`。
-- **实验 record**：新 HP_V8+ 运行使用 `python ./tools/process_experiment.py prepare --experiment ./HP_V8/exp_SLUG --confirm-stopped`，审核生成的 `analysis/record_review.yaml` 后再运行 `finalize`；`report.md` 是 canonical 人类入口，`summary.json` 是唯一 canonical machine scope，`casebook.jsonl` 是下一轮诊断案例集。底层 `finalize_experiment.py` 只用于已登记实验。
+- **实验 record**：新 HP_V8+ 运行从仓库根使用 `python ./tools/process_experiment.py prepare --experiment ./HP_V9/exp_SLUG --confirm-stopped`，审核生成的 `analysis/record_review.yaml` 后再运行 `finalize`；`report.md` 是 canonical 人类入口，`summary.json` 是唯一 canonical machine scope，`casebook.jsonl` 是下一轮诊断案例集。底层 `finalize_experiment.py` 只用于已登记实验。
 - **归档重放**：每个归档优先由所在版本的 verifier 重放；HP_V7 含 v3–v7 rev 门，可作兼容兜底。
 - **删除纪律**：任何候删内容先移入 `_attic/`。不得直接删除冻结归档、快照、data、checkpoint 或权重。
 

@@ -32,7 +32,7 @@ jobs:
       PYTHONPATH: "${{ github.workspace }}/HP_V9/src"
 
     steps:
-      - name: Check out full history for the frozen V8 identity check
+      - name: Check out full history for the frozen V9 identity check
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -71,7 +71,9 @@ jobs:
 
       - name: Simplified sample-local runtime acceptance
         working-directory: HP_V9
-        run: python -B ./src/test_simple_runtime.py
+        run: |
+          python -B ./src/test_simple_runtime.py
+          python -W error::ResourceWarning -B ./src/test_simple_runtime_process.py
 
       - name: Compile tracked HP_V9 Python
         run: |

@@ -35,8 +35,11 @@ transaction 或 worker-confirmation 选项。
   executor 或 transport 不同：在调用 API 前拒绝。
 - Key 文件、Key 值、Key label 集合、slots-per-key 和日志详细度可以变化。
 - 完整 `success.json` 存在：直接 replay，不重新 POST。
+- replay 前验证 sample/method/RT/direction/call kind、request SHA、`/6` terminal usage、
+  finish reason、stream completion 和 transport attempt；不完整 journal 不能冒充成功。
 - 调用中死亡且没有完整 `success.json`：下一次运行允许重新 POST。
 - result 已有完整 forward/backward pair、checkpoint 落后：sample worker 只推进 checkpoint。
+- result 的 target、initial state、edit instruction、state/rid chain 必须逐 RT 对应不可变 task plan。
 - checkpoint 超前、重复 row、单边 row、跳 RT 或 JSON 损坏：仅隔离该 sample。
 
 ## 文件所有权
@@ -73,7 +76,7 @@ ordering lock、stop-publication lock、共享 ledger lock 或 recovery registry
 | evaluator 异常 | `evaluator_failed` | 不补 0，其他 sample 继续 |
 | preservation violation | `preservation_invalid` | 停止该 sample 后续 RT，其他 sample 继续 |
 | 未知 Python 异常/本地 evidence 损坏 | `worker_failed` | 保存 traceback，其他 sample 继续 |
-| SIGINT/SIGTERM | sample 回到 `pending`（能优雅收尾时） | 停止补位、terminate/kill、campaign `interrupted` |
+| SIGINT/SIGTERM/SIGBREAK | sample 回到 `pending`（能优雅收尾时） | 停止补位、terminate/kill、campaign `interrupted` |
 
 普通局部错误不会写 campaign-wide fatal 或 stop latch。
 
@@ -88,6 +91,8 @@ samples/<sample>/<method>/calls/rtNN/<forward|backward>/<primary|repair>/
 成功响应通过临时文件加 `os.replace` 发布为 `success.json`，包含请求身份、完整模型响应、
 usage、latency、response classification、transport attempts 和 compact `/6` events。失败写入
 `failures/<id>.json`。recorder 只包装现有 `model_openai.generate`，不实现第二套 HTTP retry。
+worker 的 stdout/stderr 直接追加到自己的 `worker.log`，因此 import、run.json、task-plan 或
+sample-lock bootstrap 失败也保留 traceback。
 
 ## 结束检查
 
@@ -103,9 +108,11 @@ reports/quick_summary.json
 PYTHONUTF8=1 python -u -B ./src/verify_campaign.py --dir ./exp_ID --full
 ```
 
-完整审计重放 result、evaluator 和 score，检查 success journal linkage、checkpoint、
-preservation 与 HP/FR paired endpoint，并只写 `reports/verification.json`；不会修改 evidence、
-调用 API、回滚或补跑。
+完整审计逐 step 绑定固定 journal path、call ID/kind、response、usage、finish、transport attempts
+和 result row；同时按 task plan 重放 target/prompt、evaluator、score 与最终 checkpoint，报告
+孤立 journal、preservation 和 HP/FR paired endpoint。它只写 `reports/verification.json`；不会
+修改 runtime evidence、调用 API、回滚或补跑。quick summary 对单 sample/method 的合法 JSON
+坏字段作局部 error，仍汇总其他样本；中断时不会读取仍由 external worker 持锁的 evidence。
 
 ## 禁止组件检查
 

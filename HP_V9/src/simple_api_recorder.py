@@ -9,12 +9,106 @@ import uuid
 
 SUCCESS_SCHEMA = "anchorpatch.simple_api_success/1"
 FAILURE_SCHEMA = "anchorpatch.simple_api_failure/1"
+TRANSPORT_REVISION = "opencode_openai_compatible/6"
 
 
 class LocalCallEvidenceError(RuntimeError):
     """A deterministic call journal conflicts with the requested semantic call."""
 
     _anchorpatch_failure_class = "worker_failed"
+
+
+def validate_complete_success_journal(
+        payload, *, path=None, sample=None, method=None, rt_num=None,
+        direction=None, call_leaf=None):
+    """Validate one complete /6 success journal and its fixed-path identity."""
+    if not isinstance(payload, dict) or payload.get("schema") != SUCCESS_SCHEMA:
+        raise LocalCallEvidenceError("success journal schema is invalid")
+    call_id = payload.get("call_id")
+    request = payload.get("request")
+    response = payload.get("response")
+    request_sha = payload.get("request_sha256")
+    if not isinstance(call_id, str) or not call_id:
+        raise LocalCallEvidenceError("success journal call_id is missing")
+    if (not isinstance(request, dict) or not isinstance(request_sha, str)
+            or len(request_sha) != 64 or _sha256(request) != request_sha):
+        raise LocalCallEvidenceError("success journal request identity is invalid")
+    if not isinstance(response, dict):
+        raise LocalCallEvidenceError("success journal response is invalid")
+    if not isinstance(response.get("message"), str):
+        raise LocalCallEvidenceError("success journal response message is missing")
+
+    observed_sample = payload.get("sample")
+    observed_method = payload.get("method")
+    if (not isinstance(observed_sample, str) or not observed_sample
+            or request.get("sample") != observed_sample):
+        raise LocalCallEvidenceError("success journal sample identity is invalid")
+    if (not isinstance(observed_method, str) or not observed_method
+            or request.get("method") != observed_method):
+        raise LocalCallEvidenceError("success journal method identity is invalid")
+    if sample is not None and observed_sample != sample:
+        raise LocalCallEvidenceError("success journal belongs to another sample")
+    if method is not None and observed_method != method:
+        raise LocalCallEvidenceError("success journal belongs to another method")
+
+    parameters = request.get("parameters")
+    call_kind = parameters.get("call_kind") if isinstance(parameters, dict) else None
+    if not isinstance(call_kind, str) or not call_kind:
+        raise LocalCallEvidenceError("success journal call kind is missing")
+    expected_leaf = "repair" if call_kind == "hybridpatch_repair" else "primary"
+    if call_leaf is not None and expected_leaf != call_leaf:
+        raise LocalCallEvidenceError("success journal call kind/path mismatch")
+    call_kinds = response.get("call_kinds")
+    if not isinstance(call_kinds, list) or call_kinds != [call_kind]:
+        raise LocalCallEvidenceError("success journal response call kind is invalid")
+
+    if (response.get("transport_revision") != TRANSPORT_REVISION
+            or response.get("transport") != "openai_sdk_stream"
+            or response.get("http_status") != 200
+            or response.get("stream_complete") is not True
+            or not isinstance(response.get("finish_reason"), str)
+            or not response.get("finish_reason").strip()
+            or not isinstance(response.get("response_classification"), str)
+            or not response.get("response_classification").strip()):
+        raise LocalCallEvidenceError("success journal transport terminal is incomplete")
+    attempts = response.get("transport_attempts")
+    if not isinstance(attempts, list) or not attempts:
+        raise LocalCallEvidenceError("success journal transport attempts are missing")
+    if not all(isinstance(attempt, dict) for attempt in attempts):
+        raise LocalCallEvidenceError("success journal transport attempt is invalid")
+    terminal = attempts[-1]
+    if (terminal.get("status") != "success"
+            or terminal.get("http_status") != 200
+            or terminal.get("stream_complete") is not True
+            or terminal.get("final_usage_seen") is not True
+            or terminal.get("terminal_sequence_valid") is not True):
+        raise LocalCallEvidenceError("success journal terminal attempt is incomplete")
+
+    if path is not None:
+        journal_path = Path(path)
+        try:
+            observed_leaf = journal_path.parent.name
+            observed_direction = journal_path.parent.parent.name
+            observed_rt_text = journal_path.parent.parent.parent.name
+            observed_rt = int(observed_rt_text.removeprefix("rt"))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise LocalCallEvidenceError(
+                "success journal fixed path is invalid") from exc
+        if (journal_path.name != "success.json"
+                or observed_leaf not in {"primary", "repair"}
+                or observed_direction not in {"forward", "backward"}
+                or not observed_rt_text.startswith("rt")
+                or observed_rt < 1):
+            raise LocalCallEvidenceError("success journal fixed path is invalid")
+        if rt_num is not None and observed_rt != rt_num:
+            raise LocalCallEvidenceError("success journal belongs to another round trip")
+        if direction is not None and observed_direction != direction:
+            raise LocalCallEvidenceError("success journal belongs to another direction")
+        if call_leaf is not None and observed_leaf != call_leaf:
+            raise LocalCallEvidenceError("success journal belongs to another call leaf")
+        if observed_leaf != expected_leaf:
+            raise LocalCallEvidenceError("success journal call kind/path mismatch")
+    return payload
 
 
 def _utc_now():
@@ -154,10 +248,16 @@ class SimpleApiRecorder:
         except Exception as exc:
             raise LocalCallEvidenceError(
                 f"success journal is not valid JSON: {path}") from exc
-        if (payload.get("schema") != SUCCESS_SCHEMA
-                or payload.get("request_sha256") != request_sha
-                or _sha256(payload.get("request")) != request_sha
-                or not isinstance(payload.get("response"), dict)):
+        rt_num, direction = self._step
+        call_leaf = path.parent.name
+        try:
+            validate_complete_success_journal(
+                payload, path=path, sample=self.sample, method=self.method,
+                rt_num=rt_num, direction=direction, call_leaf=call_leaf)
+        except LocalCallEvidenceError as exc:
+            raise LocalCallEvidenceError(
+                f"success journal identity mismatch: {path}: {exc}") from exc
+        if payload.get("request_sha256") != request_sha:
             raise LocalCallEvidenceError(
                 f"success journal identity mismatch: {path}")
         response = dict(payload["response"])
@@ -218,6 +318,10 @@ class SimpleApiRecorder:
             "request_sha256": request_sha, "request": request,
             "response": response, "transport_events": events,
         }
+        validate_complete_success_journal(
+            payload, path=success_path, sample=self.sample, method=self.method,
+            rt_num=self._step[0], direction=self._step[1],
+            call_leaf=success_path.parent.name)
         _write_json_atomic(success_path, payload)
         return dict(response)
 
@@ -234,6 +338,9 @@ def scan_call_journals(method_dir):
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                payload = {
+                    "parse_error": "journal top level is not a JSON object"}
         except Exception as exc:
             payload = {"path": str(path), "parse_error": str(exc)}
         payload["_path"] = str(path)

@@ -9,11 +9,13 @@ import random
 
 from domains import get_domain
 from relay_core import _evaluate
-from simple_api_recorder import scan_call_journals
+from simple_api_recorder import (LocalCallEvidenceError, scan_call_journals,
+                                 validate_complete_success_journal)
 from simple_runtime_io import (LocalEvidenceError, _replay_generated,
-                               method_dir, read_json, read_result_rows,
-                               read_status, utc_now,
-                               sha256_json, validate_result_pairs,
+                               load_task_plan, method_dir, read_json,
+                               read_result_rows, read_status, utc_now,
+                               validate_checkpoint_state,
+                               validate_result_pairs, validate_result_trajectory,
                                write_json_atomic)
 from utils_context import build_context_from_folder
 from utils_env import (load_distractor_context, load_sample, merge_distractor,
@@ -34,42 +36,101 @@ def _checkpoint(path):
 
 
 def _score(row):
+    if not isinstance(row, dict):
+        return None
     evaluation = row.get("evaluation") or {}
+    if not isinstance(evaluation, dict):
+        return None
     value = evaluation.get("score")
     return float(value) if isinstance(value, (int, float)) else None
 
 
-def _method_summary(out_dir, sample, method, target_rt):
+def _method_summary(out_dir, sample, method, target_rt, *, skip=False):
     path = method_dir(out_dir, sample, method)
     errors = []
+    summary = {
+        "method": method, "result_rows": 0,
+        "committed_round_trips": 0, "checkpoint_round_trips": None,
+        "complete": False, "success_journals": 0, "failure_journals": 0,
+        "failure_types": {}, "http_statuses": {},
+        "retry_budget_consumed": 0, "preservation_violations": 0,
+        "backward_score_mean": None, "final_backward_score": None,
+        "errors": errors,
+    }
+    if skip:
+        errors.append("sample lock is held by an external worker; evidence not read")
+        return summary
     try:
         rows = read_result_rows(path / "result.jsonl")
         _by_rt, complete = validate_result_pairs(rows, target_rt)
     except Exception as exc:
         rows, complete = [], 0
         errors.append(str(exc))
-    checkpoint = _checkpoint(path / "checkpoint.json")
-    checkpoint_rt = (
-        checkpoint.get("completed_round_trips")
-        if isinstance(checkpoint, dict) else None)
-    if checkpoint_rt != complete:
-        errors.append(
-            f"checkpoint/result mismatch: checkpoint={checkpoint_rt}, pairs={complete}")
-    successes, failures = scan_call_journals(path)
+    summary["result_rows"] = len(rows)
+    summary["committed_round_trips"] = complete
+    try:
+        checkpoint = _checkpoint(path / "checkpoint.json")
+        checkpoint_rt = (
+            checkpoint.get("completed_round_trips")
+            if isinstance(checkpoint, dict) else None)
+        if (checkpoint_rt is not None
+                and (not isinstance(checkpoint_rt, int)
+                     or isinstance(checkpoint_rt, bool))):
+            raise LocalEvidenceError("checkpoint progress is not an integer")
+        summary["checkpoint_round_trips"] = checkpoint_rt
+        if checkpoint_rt != complete:
+            errors.append(
+                f"checkpoint/result mismatch: checkpoint={checkpoint_rt}, pairs={complete}")
+    except Exception as exc:
+        errors.append(f"checkpoint summary failed: {exc}")
+        checkpoint_rt = None
+    try:
+        successes, failures = scan_call_journals(path)
+    except Exception as exc:
+        successes, failures = [], []
+        errors.append(f"call journal scan failed: {exc}")
+    summary["success_journals"] = len(successes)
+    summary["failure_journals"] = len(failures)
     failure_types = Counter()
     http_statuses = Counter()
     retry_consumed = 0
     for failure in failures:
+        if not isinstance(failure, dict):
+            errors.append("failure journal is not an object")
+            continue
         details = failure.get("failure") or {}
+        if not isinstance(details, dict):
+            errors.append(f"failure journal payload is invalid: {failure.get('_path')}")
+            continue
         failure_types[str(details.get("provider_error_type")
                           or details.get("error_type") or "unknown")] += 1
         if details.get("http_status") is not None:
             http_statuses[str(details["http_status"])] += 1
-        for attempt in details.get("transport_attempts") or []:
+        attempts = details.get("transport_attempts") or []
+        if not isinstance(attempts, list):
+            errors.append(f"failure attempts are invalid: {failure.get('_path')}")
+            continue
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                errors.append(f"failure attempt is invalid: {failure.get('_path')}")
+                continue
             retry_consumed += int(bool(attempt.get("retry_budget_consumed")))
     for success in successes:
+        if not isinstance(success, dict):
+            errors.append("success journal is not an object")
+            continue
         response = success.get("response") or {}
-        for attempt in response.get("transport_attempts") or []:
+        if not isinstance(response, dict):
+            errors.append(f"success response is invalid: {success.get('_path')}")
+            continue
+        attempts = response.get("transport_attempts") or []
+        if not isinstance(attempts, list):
+            errors.append(f"success attempts are invalid: {success.get('_path')}")
+            continue
+        for attempt in attempts:
+            if not isinstance(attempt, dict):
+                errors.append(f"success attempt is invalid: {success.get('_path')}")
+                continue
             status = attempt.get("http_status")
             if status is not None:
                 http_statuses[str(status)] += 1
@@ -78,14 +139,23 @@ def _method_summary(out_dir, sample, method, target_rt):
         _score(row) for row in rows
         if row.get("round_trip_direction") == "backward"
         and _score(row) is not None]
-    preservation = sum(
-        int(((row.get("bdpatch") or {}).get("preservation_violations") or 0))
-        for row in rows)
-    return {
-        "method": method, "result_rows": len(rows),
-        "committed_round_trips": complete, "checkpoint_round_trips": checkpoint_rt,
-        "complete": complete == target_rt and checkpoint_rt == target_rt,
-        "success_journals": len(successes), "failure_journals": len(failures),
+    preservation = 0
+    for row in rows:
+        try:
+            if not isinstance(row, dict):
+                raise TypeError("result row is not an object")
+            bdpatch = row.get("bdpatch") or {}
+            if not isinstance(bdpatch, dict):
+                raise TypeError("bdpatch is not an object")
+            value = bdpatch.get("preservation_violations")
+            if value is not None:
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise TypeError("preservation_violations is not an integer")
+                preservation += value
+        except Exception as exc:
+            errors.append(f"result preservation summary failed: {exc}")
+    summary.update({
+        "complete": complete == target_rt and checkpoint_rt == target_rt and not errors,
         "failure_types": dict(sorted(failure_types.items())),
         "http_statuses": dict(sorted(http_statuses.items())),
         "retry_budget_consumed": retry_consumed,
@@ -97,11 +167,11 @@ def _method_summary(out_dir, sample, method, target_rt):
             _score(row) for row in reversed(rows)
             if row.get("round_trip_direction") == "backward"
             and row.get("round_trip_num") == target_rt), None),
-        "errors": errors,
-    }
+    })
+    return summary
 
 
-def build_quick_summary(out_dir, campaign_state_hint=None):
+def build_quick_summary(out_dir, campaign_state_hint=None, *, skip_samples=None):
     out_dir = Path(out_dir).resolve()
     run = read_json(out_dir / "run.json")
     scientific = run["scientific"]
@@ -111,6 +181,7 @@ def build_quick_summary(out_dir, campaign_state_hint=None):
     state_counts = Counter()
     totals = Counter()
     all_complete = True
+    skip_samples = set(skip_samples or ())
     for sample in samples:
         methods = list(scientific["method_order_by_sample"][sample])
         try:
@@ -119,9 +190,17 @@ def build_quick_summary(out_dir, campaign_state_hint=None):
         except Exception as exc:
             status = {"state": "worker_failed", "status_error": str(exc)}
             state = "worker_failed"
-        method_rows = {
-            method: _method_summary(out_dir, sample, method, target_rt)
-            for method in methods}
+        method_rows = {}
+        for method in methods:
+            try:
+                method_rows[method] = _method_summary(
+                    out_dir, sample, method, target_rt,
+                    skip=sample in skip_samples)
+            except Exception as exc:
+                method_rows[method] = _method_summary(
+                    out_dir, sample, method, target_rt, skip=True)
+                method_rows[method]["errors"] = [
+                    f"method summary failed: {type(exc).__name__}: {exc}"]
         complete = state == "complete" and all(
             item["complete"] for item in method_rows.values())
         all_complete = all_complete and complete
@@ -136,6 +215,8 @@ def build_quick_summary(out_dir, campaign_state_hint=None):
             "state": state, "complete": complete,
             "methods": method_rows,
             "last_error": status.get("last_error"),
+            "runtime_observation": (
+                "running_external" if sample in skip_samples else None),
         }
     if campaign_state_hint in {"interrupted", "incomplete"}:
         campaign_state = campaign_state_hint
@@ -153,8 +234,9 @@ def build_quick_summary(out_dir, campaign_state_hint=None):
     }
 
 
-def write_quick_summary(out_dir, campaign_state_hint=None):
-    summary = build_quick_summary(out_dir, campaign_state_hint)
+def write_quick_summary(out_dir, campaign_state_hint=None, *, skip_samples=None):
+    summary = build_quick_summary(
+        out_dir, campaign_state_hint, skip_samples=skip_samples)
     write_json_atomic(
         Path(out_dir) / "reports" / "quick_summary.json", summary)
     return summary
@@ -166,17 +248,118 @@ def _compare_score(expected, actual, tolerance=1e-6):
     return math.isclose(float(expected), float(actual), abs_tol=tolerance)
 
 
-def _verify_method_replay(out_dir, scientific, sample, method):
+def _same_number(left, right):
+    if isinstance(left, bool) or isinstance(right, bool):
+        return left == right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return math.isclose(float(left), float(right), abs_tol=1e-12)
+    return left == right
+
+
+def _verify_row_journals(method_path, sample, method, row, journals_by_path,
+                         used_call_ids):
+    issues = []
+    rt = row.get("round_trip_num")
+    direction = row.get("round_trip_direction")
+    call_ids = row.get("api_call_ids")
+    raw_paths = row.get("api_raw_paths")
+    if (not isinstance(call_ids, list) or not call_ids
+            or not all(isinstance(item, str) and item for item in call_ids)
+            or not isinstance(raw_paths, list) or len(raw_paths) != len(call_ids)
+            or not all(isinstance(item, str) and item for item in raw_paths)):
+        return [f"{sample}/{method}/RT{rt}/{direction}: invalid API journal links"]
+    payloads = []
+    for call_id, raw_path in zip(call_ids, raw_paths):
+        relative = Path(raw_path)
+        expected_prefix = Path("calls") / f"rt{rt:02d}" / direction
+        if (relative.is_absolute() or ".." in relative.parts
+                or relative.name != "success.json"
+                or relative.parent.parent != expected_prefix
+                or relative.parent.name not in {"primary", "repair"}):
+            issues.append(
+                f"{sample}/{method}/RT{rt}/{direction}: "
+                f"success journal path does not match the result step")
+            continue
+        absolute = (Path(method_path) / relative).resolve()
+        payload = journals_by_path.get(absolute)
+        if payload is None:
+            issues.append(
+                f"{sample}/{method}/RT{rt}/{direction}: "
+                f"missing success journal for {call_id}")
+            continue
+        try:
+            validate_complete_success_journal(
+                payload, path=absolute, sample=sample, method=method,
+                rt_num=rt, direction=direction,
+                call_leaf=relative.parent.name)
+        except LocalCallEvidenceError as exc:
+            issues.append(
+                f"{sample}/{method}/RT{rt}/{direction}: "
+                f"malformed success journal: {exc}")
+            continue
+        if payload.get("call_id") != call_id:
+            issues.append(
+                f"{sample}/{method}/RT{rt}/{direction}: call_id/path mismatch")
+            continue
+        payloads.append(payload)
+        used_call_ids.add(call_id)
+    if len(payloads) != len(call_ids):
+        return issues
+
+    responses = [payload["response"] for payload in payloads]
+    call_kinds = [payload["request"]["parameters"]["call_kind"]
+                  for payload in payloads]
+    combined_attempts = [
+        attempt for response in responses
+        for attempt in response.get("transport_attempts") or []]
+    if row.get("call_kinds") != call_kinds:
+        issues.append(
+            f"{sample}/{method}/RT{rt}/{direction}: call kind linkage mismatch")
+    if row.get("api_transport_attempts") != combined_attempts:
+        issues.append(
+            f"{sample}/{method}/RT{rt}/{direction}: transport attempt linkage mismatch")
+    if row.get("raw_llm_response") not in {
+            response.get("message") for response in responses}:
+        issues.append(
+            f"{sample}/{method}/RT{rt}/{direction}: raw response/journal mismatch")
+    for key in ("finish_reason", "response_classification", "transport",
+                "transport_revision", "reasoning_effort"):
+        if row.get(key) != responses[0].get(key):
+            issues.append(
+                f"{sample}/{method}/RT{rt}/{direction}: {key} linkage mismatch")
+    numeric_fields = (
+        "prompt_tokens", "completion_tokens", "total_tokens", "total_usd",
+        "total_cny", "elapsed_time", "retry_count", "failed_attempt_count",
+        "quota_wait_count", "rate_limit_wait_count", "transient_wait_count",
+        "input_tokens", "output_tokens", "cache_read_input_tokens",
+        "cache_creation_input_tokens", "prompt_cache_hit_tokens",
+        "prompt_cache_miss_tokens")
+    for key in numeric_fields:
+        values = [response.get(key) for response in responses]
+        if not any(value is not None for value in values):
+            continue
+        expected = sum((value or 0) for value in values)
+        if not _same_number(row.get(key), expected):
+            issues.append(
+                f"{sample}/{method}/RT{rt}/{direction}: {key} linkage mismatch")
+    return issues
+
+
+def _verify_method_replay(out_dir, scientific, sample, method, task_plan):
     target_rt = int(scientific["round_trips"])
     rows = read_result_rows(method_dir(out_dir, sample, method) / "result.jsonl")
-    by_rt, complete = validate_result_pairs(rows, target_rt)
+    samples_root = Path(scientific["samples_root"])
+    if not samples_root.is_absolute():
+        samples_root = Path(__file__).resolve().parent.parent / samples_root
+    try:
+        by_rt, complete, expected_state_chain = validate_result_trajectory(
+            rows, sample, method, target_rt, task_plan, samples_root)
+    except Exception as exc:
+        return [f"{sample}/{method}: task-plan trajectory invalid: {exc}"]
     issues = []
     if complete != target_rt:
         return [f"{sample}/{method}: only {complete}/{target_rt} RT committed"]
     random.seed(int(scientific["seed"]))
-    samples_root = Path(scientific["samples_root"])
-    if not samples_root.is_absolute():
-        samples_root = Path(__file__).resolve().parent.parent / samples_root
     loaded, sample_folder, states = load_sample(
         sample, samples_folder=str(samples_root) + os.sep)
     initial_id = loaded["start_state"]
@@ -215,6 +398,11 @@ def _verify_method_replay(out_dir, scientific, sample, method):
         method_dir(out_dir, sample, method) / "checkpoint.json")
     final_row = by_rt[target_rt]["backward"]
     if isinstance(checkpoint, dict):
+        try:
+            validate_checkpoint_state(
+                checkpoint, complete, by_rt, expected_state_chain)
+        except Exception as exc:
+            issues.append(f"{sample}/{method}: checkpoint invalid: {exc}")
         if checkpoint.get("current_context") != context:
             issues.append(f"{sample}/{method}: checkpoint context mismatch")
         if checkpoint.get("rid_chain") != final_row.get("rid_chain"):
@@ -232,15 +420,13 @@ def verify_full(out_dir):
     quick = build_quick_summary(out_dir)
     issues = []
     success_ids = {}
-    result_links = []
-    for sample, record in (scientific.get("task_plans") or {}).items():
+    task_plans = {}
+    for sample in scientific["samples"]:
         try:
-            payload = read_json(out_dir / record["path"])
+            task_plan, _payload = load_task_plan(out_dir, sample)
+            task_plans[sample] = task_plan
         except Exception as exc:
             issues.append(f"{sample}: task plan unreadable: {exc}")
-            continue
-        if sha256_json(payload) != record.get("sha256"):
-            issues.append(f"{sample}: task plan SHA mismatch")
     for sample in scientific["samples"]:
         methods = scientific["method_order_by_sample"][sample]
         for method in methods:
@@ -252,37 +438,48 @@ def verify_full(out_dir):
                     f"{method_quick['committed_round_trips']}/"
                     f"{scientific['round_trips']} RT")
             successes, _failures = scan_call_journals(path)
+            journals_by_path = {}
+            method_success_ids = set()
             for payload in successes:
                 call_id = payload.get("call_id")
-                if (payload.get("schema") != "anchorpatch.simple_api_success/1"
-                        or not isinstance(payload.get("request_sha256"), str)
-                        or len(payload.get("request_sha256")) != 64
-                        or sha256_json(payload.get("request"))
-                        != payload.get("request_sha256")
-                        or not isinstance(payload.get("response"), dict)):
+                journal_path = Path(payload.get("_path") or "").resolve()
+                try:
+                    validate_complete_success_journal(
+                        payload, path=journal_path,
+                        sample=sample, method=method)
+                except Exception as exc:
                     issues.append(
                         f"{sample}/{method}: malformed success journal "
-                        f"{payload.get('_path')}")
+                        f"{payload.get('_path')}: {exc}")
+                    continue
                 if not call_id or call_id in success_ids:
                     issues.append(
                         f"{sample}/{method}: duplicate or missing success call_id")
                 else:
                     success_ids[call_id] = payload.get("_path")
+                    method_success_ids.add(call_id)
+                    journals_by_path[journal_path] = payload
             try:
                 rows = read_result_rows(path / "result.jsonl")
             except Exception as exc:
                 issues.append(f"{sample}/{method}: {exc}")
                 continue
             for row in rows:
-                for call_id in row.get("api_call_ids") or []:
-                    result_links.append((sample, method, row.get("round_trip_num"), call_id))
+                if not isinstance(row, dict):
+                    issues.append(f"{sample}/{method}: result row is not an object")
+                    continue
+                issues.extend(_verify_row_journals(
+                    path, sample, method, row, journals_by_path,
+                    used_call_ids := set()))
+                method_success_ids -= used_call_ids
+            for call_id in sorted(method_success_ids):
+                issues.append(
+                    f"{sample}/{method}: orphan success journal {call_id}")
             if method_quick["complete"]:
-                issues.extend(_verify_method_replay(
-                    out_dir, scientific, sample, method))
-    for sample, method, rt, call_id in result_links:
-        if call_id not in success_ids:
-            issues.append(
-                f"{sample}/{method}/RT{rt}: missing success journal for {call_id}")
+                if sample in task_plans:
+                    issues.extend(_verify_method_replay(
+                        out_dir, scientific, sample, method,
+                        task_plans[sample]))
     paired_missing = []
     endpoint_scores = {"hybridpatch": [], "fullrewrite": []}
     paired_deltas = []

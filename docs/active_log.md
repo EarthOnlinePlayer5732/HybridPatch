@@ -1,6 +1,36 @@
 > [!NOTE]
 > 本文件保存历史迭代事实。内嵌 PowerShell 命令按当时实际执行形式保留，不是当前操作指南；当前命令统一以仓库根 `AGENTS.md`、`CLAUDE.md` 和 `README.md` 的 Git Bash 规则为准。
 
+## 2026-07-30 - HP_V9 simplified runtime audit closure / Before r4
+
+- external audit verdict：保留 sample-local 架构，结论 `GO WITH FIXES`。r3 因 tracked plan
+  仍指向 legacy dispatcher 而标记 `superseded_before_launch`；新计划为
+  `exp_20260730_dsv4f_234r10_v9_r4`，唯一入口 `HP_V9/src/run_campaign.py`，fresh out_dir。
+- P0 evidence binding：`success.json` replay 与 full verifier 统一验证固定
+  sample/method/RT/direction/call-kind path、request SHA、transport `/6` terminal usage/
+  finish/stream、result call ID/path/kind、raw response、usage 和 attempts；孤立 journal 显式报告。
+- P0 task trajectory：resume 与 verifier 均逐 RT 对照不可变 task plan 的 forward target、
+  backward initial target、冻结 transition prompt、state/rid chain；checkpoint 等进度时也验证
+  shape 与 terminal row，错误只隔离该 sample。
+- robustness：quick summary 把合法 JSON 的坏字段隔离到 method/sample；中断 summary 跳过仍由
+  external worker 持锁的 evidence。worker stdout/stderr 写入自己的 `worker.log`，bootstrap
+  traceback 不再丢失；只有合法 partial task-plan 初始化的 fresh out_dir 可同命令补齐。
+- process semantics：Windows 增加 `SIGBREAK`，与 SIGINT/SIGTERM 一样进入 interrupted 流程。
+  自包含 fake-provider 测试实际启动 dispatcher/worker 子进程，覆盖 3 worker complete、单 worker
+  kill 隔离、signal 后同命令继续、dispatcher kill 后 sample-lock 接管、success journal 未提交
+  replay、30 worker disjoint writes；不依赖本机 `HP_V9/data` junction。
+- validation：simplified component `38/38`、self-contained process `6/6`、冻结 `717e470`
+  scientific behavior identity `3/3`、legacy transport/control `326/326`、executor `72/72`、
+  infrastructure stress `5/5`、quick-summary `1/1`、splitters byte-exact、全 `HP_V9/src` +
+  `tools` py_compile、workflow YAML 与 `git diff --check` PASS。data-off 模式 `38` 项中本地
+  DELEGATE-52 gates 合理 skip `14` 项，process `6/6` 仍完整执行。6 个 active runtime 文件
+  共 2,876 行，单文件最大 761 行。
+- safety：本轮未读取/输出 Key 值，未运行 Key probe、provider POST 或付费实验；未启动、恢复、
+  删除、移动或修改任何历史 `exp_*` 目录。
+- plan review：独立只读 `/root/r4_plan_review` verdict `GO WITH FIXES`；科学配置、exact234、
+  RT10、117/117、transport `/6` 与 sample-local 入口一致。剩余门仅为 234 evaluator receipt、
+  exact sample/task-plan receipt、3-Key probe、clean HEAD、无 active worker、F 盘空间与最终命令。
+
 ## 2026-07-30 - HP_V9 simplified sample-local runtime refactor
 
 - decision：新实验唯一入口改为 `HP_V9/src/run_campaign.py`；旧 paired dispatcher 与

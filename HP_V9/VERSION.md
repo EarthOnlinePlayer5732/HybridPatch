@@ -1295,3 +1295,26 @@ sample 间故障隔离、campaign 结束后统一验证”。
 完整架构、唯一命令、resume、文件所有权、失败分类、禁止组件和设计理由见
 [`SIMPLE_RUNTIME.md`](./SIMPLE_RUNTIME.md)。本次重构只执行零 API 测试；未调用 Key probe、
 provider 或付费实验，未恢复或修改任何历史 `exp_*` 目录。
+
+## 2026-07-30 简化运行器审计收口
+
+外部静态审计确认 sample-local 架构成立，但指出旧 r3 计划入口、journal/result/task-plan
+绑定、quick-summary 局部损坏隔离和真实进程验收四个启动阻塞。本轮不重做架构，只在现有
+六模块内闭合这些边界：
+
+- r3 标记 `superseded_before_launch`；r4 使用全新 out_dir 和唯一 `run_campaign.py` 命令。
+- `simple_api_recorder.py` 提供 replay/verifier 共用的 complete `/6` success contract；
+  `verify_campaign.py` 按固定 path、call ID/kind、response、usage、finish、attempt 做 step-local
+  linkage，并报告 orphan journal。
+- `simple_runtime_io.py` 在 resume 和 full replay 前按 task plan 验证 target、冻结 prompt、
+  state/rid chain；checkpoint 即使与 result pair 数相等也必须绑定 terminal row。
+- quick summary 捕获 method/sample 内所有 evidence type error；external locked sample 在中断
+  summary 中只报告 `running_external`，不并发读取其文件。
+- worker bootstrap stdout/stderr 进入 sample-local `worker.log`；fresh 初始化允许只含合法
+  partial task plans 的目录补齐；Windows `SIGBREAK` 进入同一 interrupted 路径。
+
+验证全部零 API：simplified `38/38`、真实进程 `6/6`、冻结 `717e470` 行为对照 `3/3`、
+legacy `326/326`、executor `72/72`、infrastructure stress `5/5`、quick summary `1/1`、
+splitters byte-exact、全 Python compile、workflow YAML 和 diff check PASS。clean-data-off 模式
+下本地数据 gates skip `14` 项，自包含 process suite 仍 `6/6`。active runtime 共 2,876 行，
+无新增依赖、线程、锁或共享 ledger。本轮未调用 provider，也未改历史实验目录。
